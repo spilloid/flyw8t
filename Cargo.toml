@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flyw8t-protocol",
+    "crates/flyw8t-domain",
+    "crates/flyw8t-web",
+    "crates/flyw8t-server",
+    "crates/flyw8t-agent",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Joseph Spillers"]
+repository = "https://github.com/spilloid/flyw8t"
+rust-version = "1.85"
+
+[workspace.dependencies]
+flyw8t-protocol = { path = "crates/flyw8t-protocol" }
+flyw8t-domain = { path = "crates/flyw8t-domain" }
+flyw8t-web = { path = "crates/flyw8t-web" }
+flyw8t-server = { path = "crates/flyw8t-server" }
+flyw8t-agent = { path = "crates/flyw8t-agent" }
+
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "serde-well-known", "formatting", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ring = "0.17"
+hex = "0.4"
+base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rustls-pemfile = "2"
+webpki-roots = "1"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "__rustls-tls"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "time", "json", "macros", "migrate"] }
+argon2 = { version = "0.5", features = ["std"] }
+leptos = { version = "0.8", default-features = false, features = ["ssr"] }
+sysinfo = "0.37"
+rcgen = "0.13"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

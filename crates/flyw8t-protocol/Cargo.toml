@@ -1,0 +1,16 @@
+[package]
+name = "flyw8t-protocol"
+description = "flyw8t agent <-> server wire protocol and the allowlisted action catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+time.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "flyw8t-web"
+description = "flyw8t web console: server-rendered Leptos views"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flyw8t-protocol.workspace = true
+flyw8t-domain.workspace = true
+leptos.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+time.workspace = true
