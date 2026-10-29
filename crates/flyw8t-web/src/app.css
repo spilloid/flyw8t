@@ -105,6 +105,9 @@ ol.timeline time { color: var(--muted); font-size: 0.82rem; }
 
 @media (max-width: 680px) {
   .top { gap: 0.5rem; }
+  .top nav { order: 3; flex: 1 0 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -1rem; padding: 0 1rem; }
+  .top nav a { white-space: nowrap; }
+  .logout { margin-left: auto; }
   .who { display: none; }
   table.list thead { display: none; }
   table.list, table.list tbody, table.list tr, table.list td { display: block; width: 100%; }

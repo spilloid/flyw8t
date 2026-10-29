@@ -1,0 +1,47 @@
+# flyw8t: PostgreSQL + server. See docs/deployment.md.
+#   cp .env.example .env    # then set real values
+#   docker compose up -d --build
+name: flyw8t
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flyw8t
+      POSTGRES_USER: flyw8t
+      POSTGRES_PASSWORD: ${FLYW8T_DB_PASSWORD:?set FLYW8T_DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flyw8t -d flyw8t"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Not published: only the server reaches the database.
+
+  server:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      FLYW8T_DATABASE_URL: postgres://flyw8t:${FLYW8T_DB_PASSWORD}@db:5432/flyw8t
+      FLYW8T_PUBLIC_URL: ${FLYW8T_PUBLIC_URL:-http://localhost:8080}
+      FLYW8T_BOOTSTRAP_ADMIN_EMAIL: ${FLYW8T_BOOTSTRAP_ADMIN_EMAIL:-}
+      FLYW8T_BOOTSTRAP_ADMIN_PASSWORD: ${FLYW8T_BOOTSTRAP_ADMIN_PASSWORD:-}
+      FLYW8T_TLS_CERT: ${FLYW8T_TLS_CERT:-}
+      FLYW8T_TLS_KEY: ${FLYW8T_TLS_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    ports:
+      # Loopback only by default. Expose to a network only behind TLS: set
+      # FLYW8T_PUBLIC_URL=https://… and either FLYW8T_TLS_CERT/KEY or a reverse proxy.
+      - "${FLYW8T_PUBLISH:-127.0.0.1:8080}:8080"
+    volumes:
+      - ./tls:/tls:ro
+
+volumes:
+  pgdata:

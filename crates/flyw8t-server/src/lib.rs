@@ -137,6 +137,8 @@ pub fn router(state: Shared) -> Router {
         .route("/admin/tokens", post(web::create_api_token))
         .route("/admin/tokens/{id}/revoke", post(web::revoke_api_token))
         .route("/static/app.css", get(stylesheet))
+        .route("/static/icon.svg", get(icon))
+        .route("/favicon.ico", get(icon))
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_handler))
@@ -153,6 +155,17 @@ pub fn router(state: Shared) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
         .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+async fn icon() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "max-age=86400"),
+        ],
+        flyw8t_web::ICON_SVG,
+    )
+        .into_response()
 }
 
 async fn stylesheet() -> Response {

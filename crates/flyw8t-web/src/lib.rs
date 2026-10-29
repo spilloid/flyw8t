@@ -12,3 +12,6 @@ pub use pages::*;
 
 /// Stylesheet served at `/static/app.css`.
 pub const STYLESHEET: &str = include_str!("app.css");
+
+/// Icon served at `/static/icon.svg` and `/favicon.ico`.
+pub const ICON_SVG: &str = include_str!("icon.svg");

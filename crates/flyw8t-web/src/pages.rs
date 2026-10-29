@@ -30,6 +30,7 @@ fn head(title: String, refresh: Option<u32>) -> impl IntoView {
             <meta name="color-scheme" content="light dark"/>
             {refresh.map(|s| view! { <meta http-equiv="refresh" content=s.to_string()/> })}
             <title>{title}</title>
+            <link rel="icon" href="/static/icon.svg" type="image/svg+xml"/>
             <link rel="stylesheet" href="/static/app.css"/>
         </head>
     }
@@ -210,7 +211,7 @@ pub fn overview_page(ctx: &PageCtx, o: Overview) -> String {
         <h1>"Overview"</h1>
         <div class="tiles">
             <a class="tile" href="/devices?connection=connected"><span class="num">{o.devices_connected}</span>" of "{o.devices_total}" devices connected now"</a>
-            <a class="tile" href="/jobs?state=running"><span class="num">{o.jobs_in_flight}</span>" jobs in flight"</a>
+            <a class="tile" href="/jobs?state=running"><span class="num">{o.jobs_in_flight}</span>" queued or running"</a>
             <a class="tile" href="/jobs?state=completed"><span class="num">{o.jobs_succeeded_24h}</span>" verified successes (24 h)"</a>
             <a class="tile bad" href="/jobs?state=failed"><span class="num">{o.jobs_failed_24h}</span>" failed (24 h)"</a>
             <a class="tile unknown" href="/jobs?state=outcome_unknown"><span class="num">{o.jobs_unknown}</span>" outcome unknown"</a>
