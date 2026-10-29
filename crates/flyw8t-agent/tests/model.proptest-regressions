@@ -7,3 +7,4 @@
 cc 91835409da9a96249ead1d3798a8e683996064469c0d707ef77fb8bf8aecbf9d # shrinks to ops = [Create, Create, Create, Create, Connect, DropToAgent]
 cc bb7ba35d8033ee56b135a4fa67358667289e78939d93b8fd11d834b616cd0092 # shrinks to ops = [Create, Connect, Create, Cancel(29), Crash, Deadline(6), Connect, DropToAgent]
 cc d5ef20490fd84c8cb02b2ac5bd82d7d8abeb6b785782ef1a77e41ecfbd3af6a0 # shrinks to ops = [Create, Connect, DeliverToAgent, StartJob(0), Crash]
+cc cb31893ea02f9126981ce38027d0e0c60926abc5c8563c77141f50af340f9c2e # shrinks to ops = [Create, Connect, Create, DeliverToAgent, DeliverToServer, Create, DeliverToAgent, DeliverToAgent, Tick, DeliverToServer, StartJob(0), DeliverToServer, FinishJob(0, 0), Cancel(8)]

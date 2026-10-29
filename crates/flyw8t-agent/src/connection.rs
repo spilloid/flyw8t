@@ -69,11 +69,16 @@ pub struct Agent {
     events_tx: mpsc::Sender<AgentMsg>,
     events_rx: tokio::sync::Mutex<mpsc::Receiver<AgentMsg>>,
     started: Instant,
+    /// Held for the agent's lifetime: one process per state directory (see `lock_state_dir`).
+    _lock: std::fs::File,
 }
 
 impl Agent {
     pub fn new(cfg: AgentConfig) -> Result<Arc<Self>> {
         let device_id = cfg.device_id.context("agent is not enrolled")?;
+        // Before the journal is read: two processes sharing one journal could each believe a
+        // job is new and both run it (adversarial review finding 2).
+        let lock = lock_state_dir(&cfg.state_dir)?;
         let key = DeviceKey::load(&cfg.key_path())?;
         let tls = crate::tls::client_config(cfg.ca_cert_pem.as_deref())?;
         let journal = Journal::open(&cfg.journal_dir())?;
@@ -89,6 +94,7 @@ impl Agent {
             events_tx,
             events_rx: tokio::sync::Mutex::new(events_rx),
             started: Instant::now(),
+            _lock: lock,
         }))
     }
 
@@ -211,6 +217,9 @@ impl Agent {
                         running_jobs,
                     }).await?;
                     ws.send(Message::Ping(Vec::new().into())).await?;
+                    if let Err(e) = self.journal.prune() {
+                        tracing::warn!(error = %format!("{e:#}"), "journal prune failed");
+                    }
                     // A final report can be dropped on a live session (bounded event buffer).
                     // Re-send every unacknowledged one; the server stores each idempotently.
                     for report in self.journal.unreported() {
@@ -489,4 +498,59 @@ fn jitter(max: Duration) -> Duration {
     let mut b = [0u8; 2];
     let _ = ring::rand::SystemRandom::new().fill(&mut b);
     max.mul_f64(f64::from(u16::from_le_bytes(b)) / f64::from(u16::MAX))
+}
+
+/// How long a starting agent waits for a previous process on the same state directory to
+/// exit (a service restart can overlap the old process's shutdown).
+const LOCK_WAIT: Duration = Duration::from_secs(15);
+
+pub fn lock_state_dir(state_dir: &std::path::Path) -> Result<std::fs::File> {
+    lock_state_dir_within(state_dir, LOCK_WAIT)
+}
+
+/// Take an exclusive OS lock on `<state_dir>/agent.lock`. The lock is released when the
+/// process exits, however it exits, so a crash never leaves a stale lock behind.
+fn lock_state_dir_within(state_dir: &std::path::Path, wait: Duration) -> Result<std::fs::File> {
+    std::fs::create_dir_all(state_dir)?;
+    let path = state_dir.join("agent.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => bail!(
+                "another flyw8t agent is already running with state directory {}",
+                state_dir.display()
+            ),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).context("locking the state directory")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_process_per_state_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = lock_state_dir_within(dir.path(), Duration::ZERO).unwrap();
+        let second = lock_state_dir_within(dir.path(), Duration::from_millis(300));
+        assert!(second.unwrap_err().to_string().contains("already running"));
+        drop(first);
+        assert!(
+            lock_state_dir_within(dir.path(), Duration::ZERO).is_ok(),
+            "released on drop"
+        );
+    }
 }

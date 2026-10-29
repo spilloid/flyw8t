@@ -117,7 +117,7 @@ async fn console_renders_cleanly_everywhere() {
     // Real state to look at.
     let server = start_fresh().await;
     let (admin, org, agent) = enrolled(&server).await;
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, agent.device_id).await;
     let ok = admin
         .run(&server, agent.device_id, &[("action", "net.ipconfig")])
@@ -191,6 +191,7 @@ async fn console_renders_cleanly_everywhere() {
         (format!("/organizations/{org}"), "organization"),
         ("/audit".into(), "audit"),
         ("/admin".into(), "admin"),
+        ("/support".into(), "support"),
         (
             "/devices/00000000-0000-0000-0000-000000000000".into(),
             "not-found",

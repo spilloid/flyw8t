@@ -24,6 +24,7 @@ pub enum Permission {
     ManageOrganizations,
     ManageUsers,
     ViewAudit,
+    RunSupportSessions,
 }
 
 impl Role {
@@ -55,7 +56,7 @@ impl Role {
             Role::Admin => true,
             Role::Technician => matches!(
                 p,
-                ViewDevices | RunDiagnostics | CancelJobs | ManageEnrollment
+                ViewDevices | RunDiagnostics | CancelJobs | ManageEnrollment | RunSupportSessions
             ),
             Role::ReadOnly => matches!(p, ViewDevices),
         }

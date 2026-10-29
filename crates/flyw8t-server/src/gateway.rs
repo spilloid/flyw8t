@@ -28,6 +28,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Outbound messages buffered per connection. A full buffer means the device is not keeping
 /// up; offers that do not fit are not sent and stay queued.
 const OUTBOUND_BUFFER: usize = 64;
+/// Inbound messages per second on one authenticated connection before it is closed.
+const MAX_MESSAGES_PER_SECOND: u32 = 100;
 
 pub async fn agent_ws(
     ws: WebSocketUpgrade,
@@ -65,10 +67,12 @@ async fn refuse(sink: &mut Sink, code: RefusalCode, message: &str) -> anyhow::Re
     .await
 }
 
-/// Next text frame as an agent message, or an error on close, garbage or timeout.
+/// Next text frame as an agent message, or an error on close, garbage or timeout. The
+/// deadline is absolute: pings or other non-text frames do not extend it.
 async fn recv(stream: &mut Stream, timeout: Duration) -> anyhow::Result<AgentMsg> {
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let frame = tokio::time::timeout(timeout, stream.next())
+        let frame = tokio::time::timeout_at(deadline, stream.next())
             .await
             .map_err(|_| anyhow::anyhow!("agent silent for {timeout:?}"))?
             .ok_or_else(|| anyhow::anyhow!("agent closed the connection"))??;
@@ -200,8 +204,18 @@ async fn handle(
                 .await;
             }
             match authenticate(state, &nonce, device_id, &signature).await? {
-                AuthResult::Ok { hostname } => {
-                    connected(state, sink, stream, device_id, hostname, agent_version, ip).await
+                AuthResult::Ok { hostname, key } => {
+                    connected(
+                        state,
+                        sink,
+                        stream,
+                        device_id,
+                        hostname,
+                        key,
+                        agent_version,
+                        ip,
+                    )
+                    .await
                 }
                 AuthResult::Revoked => {
                     Audit::anonymous("agent", device_id.to_string(), "device.authenticate")
@@ -351,7 +365,7 @@ pub fn fingerprint(public_key: &[u8]) -> String {
 }
 
 enum AuthResult {
-    Ok { hostname: String },
+    Ok { hostname: String, key: Vec<u8> },
     Revoked,
     Failed,
 }
@@ -382,7 +396,7 @@ async fn authenticate(
             .is_ok()
         {
             return Ok(if active {
-                AuthResult::Ok { hostname }
+                AuthResult::Ok { hostname, key }
             } else {
                 AuthResult::Revoked
             });
@@ -391,12 +405,14 @@ async fn authenticate(
     Ok(AuthResult::Failed)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connected(
     state: &Shared,
     sink: &mut Sink,
     stream: &mut Stream,
     device_id: Uuid,
     hostname: String,
+    key: Vec<u8>,
     agent_version: String,
     ip: String,
 ) -> anyhow::Result<()> {
@@ -434,6 +450,26 @@ async fn connected(
             close: close.clone(),
         },
     );
+    // A revocation that committed between authentication and registration would otherwise be
+    // missed: its kick found nothing registered. Re-check now that the connection is visible
+    // to future kicks (adversarial review finding 3).
+    let (still_active,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM device_credentials c JOIN devices d ON d.id = c.device_id
+                         WHERE c.device_id = $1 AND c.public_key = $2 AND c.revoked_at IS NULL AND d.retired_at IS NULL)",
+    )
+    .bind(device_id)
+    .bind(&key)
+    .fetch_one(&state.db)
+    .await?;
+    if !still_active {
+        state.registry.unregister(device_id, conn_id);
+        return refuse(
+            sink,
+            RefusalCode::Revoked,
+            "this device's credential has been revoked",
+        )
+        .await;
+    }
     crate::metrics::CONNECTS.inc();
     tracing::info!(%device_id, %hostname, %conn_id, "agent connected");
 
@@ -470,6 +506,9 @@ async fn connected_loop(
         tracing::error!(%device_id, error = %format!("{e:#}"), "initial dispatch failed");
     }
     let idle = Duration::from_secs(u64::from(state.config.heartbeat_secs) * 3);
+    // A healthy agent sends a handful of messages a minute; a burst beyond this is a fault
+    // or an attack, and every message costs a database write.
+    let mut window = (tokio::time::Instant::now(), 0u32);
     loop {
         tokio::select! {
             _ = close.cancelled() => {
@@ -481,6 +520,14 @@ async fn connected_loop(
                 let frame = frame
                     .map_err(|_| anyhow::anyhow!("no message for {idle:?}"))?
                     .ok_or_else(|| anyhow::anyhow!("agent closed the connection"))??;
+                if window.0.elapsed() >= Duration::from_secs(1) {
+                    window = (tokio::time::Instant::now(), 0);
+                }
+                window.1 += 1;
+                if window.1 > MAX_MESSAGES_PER_SECOND {
+                    let _ = refuse(sink, RefusalCode::RateLimited, "too many messages").await;
+                    anyhow::bail!("agent exceeded {MAX_MESSAGES_PER_SECOND} messages per second");
+                }
                 let text = match frame {
                     Message::Text(t) => t,
                     Message::Close(_) => return Ok(()),

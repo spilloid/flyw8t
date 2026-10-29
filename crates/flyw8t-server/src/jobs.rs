@@ -43,6 +43,30 @@ impl JobCore {
 const CORE: &str =
     "id, organization_id, device_id, request, timeout_secs, state, cancel_requested_at";
 
+/// Events kept per job for reports that change nothing (see `apply_report`).
+const MAX_EVENTS_PER_JOB: i64 = 50;
+/// Device-supplied text (errors, reasons) is truncated to this many characters when stored.
+const MAX_DEVICE_TEXT: usize = 4096;
+
+fn clip(s: &str) -> String {
+    s.chars().take(MAX_DEVICE_TEXT).collect()
+}
+
+/// A bounded summary of a device outcome, for event details.
+fn outcome_summary(o: &ExecOutcome) -> Value {
+    let short = |s: &str| s.chars().take(300).collect::<String>();
+    match o {
+        ExecOutcome::Failed { error } => json!({ "kind": "failed", "error": short(error) }),
+        ExecOutcome::NotStarted { reason } => {
+            json!({ "kind": "not_started", "reason": short(reason) })
+        }
+        ExecOutcome::Interrupted { reason } => {
+            json!({ "kind": "interrupted", "reason": short(reason) })
+        }
+        other => serde_json::to_value(other).unwrap_or(Value::Null),
+    }
+}
+
 async fn lock(tx: &mut PgConnection, job_id: Uuid) -> sqlx::Result<Option<JobCore>> {
     sqlx::query_as(&format!("SELECT {CORE} FROM jobs WHERE id = $1 FOR UPDATE"))
         .bind(job_id)
@@ -82,9 +106,11 @@ async fn transition(
     let f = sets.finished.as_ref();
     let (exit_code, error) = match f.map(|f| &f.outcome) {
         Some(ExecOutcome::Exited { code }) => (Some(*code), None),
-        Some(ExecOutcome::Failed { error }) => (None, Some(error.clone())),
-        Some(ExecOutcome::NotStarted { reason }) => (None, Some(format!("Not executed: {reason}"))),
-        Some(ExecOutcome::Interrupted { reason }) => (None, Some(reason.clone())),
+        Some(ExecOutcome::Failed { error }) => (None, Some(clip(error))),
+        Some(ExecOutcome::NotStarted { reason }) => {
+            (None, Some(format!("Not executed: {}", clip(reason))))
+        }
+        Some(ExecOutcome::Interrupted { reason }) => (None, Some(clip(reason))),
         _ => (None, None),
     };
     sqlx::query(
@@ -375,15 +401,20 @@ async fn dispatch_one(state: &Shared, job_id: Uuid, conn: Uuid) -> anyhow::Resul
     let Some(job) = lock(&mut tx, job_id).await? else {
         return Ok(());
     };
-    let (last_conn, stale): (Option<Uuid>, bool) = sqlx::query_as(
+    let (last_conn, stale, deliverable): (Option<Uuid>, bool, bool) = sqlx::query_as(
         "SELECT last_dispatch_conn,
-                coalesce(last_dispatched_at <= now() - make_interval(secs => $2), true)
+                coalesce(last_dispatched_at <= now() - make_interval(secs => $2), true),
+                deliver_by > clock_timestamp()
            FROM jobs WHERE id = $1",
     )
     .bind(job_id)
     .bind(state.config.redelivery_after.as_secs_f64())
     .fetch_one(&mut *tx)
     .await?;
+    // The scan that selected this job may be stale by now; never send past the deadline.
+    if !deliverable {
+        return Ok(());
+    }
     async fn record_conn(tx: &mut PgConnection, job_id: Uuid, conn: Uuid) -> sqlx::Result<()> {
         sqlx::query(
             "UPDATE jobs SET last_dispatch_conn = $2, last_dispatched_at = now() WHERE id = $1",
@@ -420,10 +451,19 @@ async fn dispatch_one(state: &Shared, job_id: Uuid, conn: Uuid) -> anyhow::Resul
             record_conn(&mut tx, job_id, conn).await?;
             tx.commit().await?;
             if !state.registry.send_on(job.device_id, conn, offer) {
-                // Never left this server: provably not delivered, so back to the queue.
+                // This offer never left the server. Requeue only if no other offer has been
+                // sent since: a reconnect may already have redelivered it on a new connection,
+                // which rewrites last_dispatch_conn (adversarial review finding 1).
                 let mut tx = state.db.begin().await?;
                 if let Some(job) = lock(&mut tx, job_id).await? {
-                    if job.state() == ExecState::Dispatched {
+                    let (still_ours,): (bool,) = sqlx::query_as(
+                        "SELECT last_dispatch_conn IS NOT DISTINCT FROM $2 FROM jobs WHERE id = $1",
+                    )
+                    .bind(job_id)
+                    .bind(conn)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if job.state() == ExecState::Dispatched && still_ours {
                         transition(
                             &mut tx,
                             &job,
@@ -504,15 +544,15 @@ pub async fn apply_report(
         JobPhase::Accepted => (Report::Accepted, json!({}), "acknowledged_again"),
         JobPhase::NotAccepted { reason } => (
             Report::NotAccepted {
-                busy: *reason == NotAccepted::Busy,
+                retryable: matches!(reason, NotAccepted::Busy | NotAccepted::StorageError),
             },
             json!({ "reason": reason }),
-            "declined_late",
+            "declined",
         ),
         JobPhase::Started { .. } => (Report::Started, json!({}), "started_report"),
         JobPhase::Finished(f) => (
             Report::Finished(state_for_outcome(&f.outcome)),
-            json!({ "outcome": f.outcome }),
+            json!({ "outcome": outcome_summary(&f.outcome) }),
             "final_report_again",
         ),
     };
@@ -533,9 +573,22 @@ pub async fn apply_report(
     }
     match decision.to {
         None => {
-            let mut detail = detail;
-            detail["state"] = json!(current.as_str());
-            event(&mut tx, job.id, unchanged_kind, None, None, &actor, detail).await?;
+            // Reports that change nothing are counted; only the first few are kept as events,
+            // so a device repeating itself (or a hostile one) cannot grow history without bound.
+            sqlx::query("UPDATE jobs SET unchanged_reports = unchanged_reports + 1 WHERE id = $1")
+                .bind(job.id)
+                .execute(&mut *tx)
+                .await?;
+            let (events,): (i64,) =
+                sqlx::query_as("SELECT count(*) FROM job_events WHERE job_id = $1")
+                    .bind(job.id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if events < MAX_EVENTS_PER_JOB {
+                let mut detail = detail;
+                detail["state"] = json!(current.as_str());
+                event(&mut tx, job.id, unchanged_kind, None, None, &actor, detail).await?;
+            }
         }
         Some(to) => {
             let from = job.state();
@@ -547,9 +600,6 @@ pub async fn apply_report(
                         ..Default::default()
                     },
                 ),
-                JobPhase::NotAccepted { .. } if to == ExecState::Queued => {
-                    ("declined_busy", Sets::default())
-                }
                 JobPhase::NotAccepted { reason } => (
                     "declined",
                     Sets {
@@ -592,7 +642,7 @@ async fn finished_sets(
 ) -> anyhow::Result<(&'static str, Sets)> {
     if to == ExecState::OutcomeUnknown {
         let note = match &finished.outcome {
-            ExecOutcome::Interrupted { reason } => reason.clone(),
+            ExecOutcome::Interrupted { reason } => clip(reason),
             _ => "outcome unknown".into(),
         };
         return Ok((

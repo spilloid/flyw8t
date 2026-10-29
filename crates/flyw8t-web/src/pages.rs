@@ -12,6 +12,7 @@ pub enum Nav {
     Devices,
     Organizations,
     Jobs,
+    Support,
     Audit,
     Admin,
 }
@@ -22,7 +23,7 @@ fn render(view: impl IntoView + 'static) -> String {
     format!("<!doctype html>{html}")
 }
 
-fn head(title: String, refresh: Option<u32>) -> impl IntoView {
+fn head(title: String, refresh: Option<u32>, script: bool) -> impl IntoView {
     view! {
         <head>
             <meta charset="utf-8"/>
@@ -32,16 +33,29 @@ fn head(title: String, refresh: Option<u32>) -> impl IntoView {
             <title>{title}</title>
             <link rel="icon" href="/static/icon.svg" type="image/svg+xml"/>
             <link rel="stylesheet" href="/static/app.css"/>
+            {script.then(|| view! { <script src="/static/support.js" defer=true></script> })}
         </head>
     }
 }
 
-/// The authenticated page frame: header, navigation, flash, content.
 fn shell(
     title: &str,
     ctx: &PageCtx,
     active: Nav,
     refresh: Option<u32>,
+    body: impl IntoView + 'static,
+) -> String {
+    shell_with(title, ctx, active, refresh, false, body)
+}
+
+/// The authenticated page frame: header, navigation, flash, content. `script` loads the
+/// attended-support script (the only page script in the console; ADR-0010).
+fn shell_with(
+    title: &str,
+    ctx: &PageCtx,
+    active: Nav,
+    refresh: Option<u32>,
+    script: bool,
     body: impl IntoView + 'static,
 ) -> String {
     let mut items = vec![
@@ -50,6 +64,9 @@ fn shell(
         (Nav::Organizations, "/organizations", "Organizations"),
         (Nav::Jobs, "/jobs", "Jobs"),
     ];
+    if ctx.can_support {
+        items.push((Nav::Support, "/support", "Support"));
+    }
     if ctx.is_admin {
         items.push((Nav::Audit, "/audit", "Audit"));
         items.push((Nav::Admin, "/admin", "Administration"));
@@ -69,7 +86,7 @@ fn shell(
     let csrf = ctx.csrf.clone();
     render(view! {
         <html lang="en">
-            {head(format!("{title} · flyw8t"), refresh)}
+            {head(format!("{title} · flyw8t"), refresh, script)}
             <body>
                 <header class="top">
                     <a class="brand" href="/">"flyw8t"</a>
@@ -176,7 +193,7 @@ pub fn login_page(error: Option<String>, no_admin: bool, csrf_ok_hint: Option<St
     let hint = csrf_ok_hint.map(|h| view! { <p class="muted">{h}</p> });
     render(view! {
         <html lang="en">
-            {head("Sign in · flyw8t".into(), None)}
+            {head("Sign in · flyw8t".into(), None, false)}
             <body class="login">
                 <main class="card narrow">
                     <h1>"flyw8t"</h1>
@@ -968,11 +985,218 @@ pub fn error_page(ctx: Option<&PageCtx>, status: u16, message: &str) -> String {
         ),
         None => render(view! {
             <html lang="en">
-                {head(format!("{title} · flyw8t"), None)}
+                {head(format!("{title} · flyw8t"), None, false)}
                 <body class="login"><main class="card narrow"><h1>{title}</h1><p>{msg}</p><p><a href="/login">"Sign in"</a></p></main></body>
             </html>
         }),
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Attended support
+
+fn support_badge_class(state: &str) -> &'static str {
+    match state {
+        "connected" => "badge good",
+        "connecting" | "waiting" | "authorizing" | "created" => "badge busy",
+        "connection_failed" => "badge bad",
+        _ => "badge neutral",
+    }
+}
+
+fn support_state_badge(state: &str, label: &str) -> impl IntoView {
+    view! { <span class=support_badge_class(state)>{label.to_string()}</span> }
+}
+
+pub fn support_list_page(
+    ctx: &PageCtx,
+    sessions: Vec<SupportSessionView>,
+    invite: Option<SupportInvite>,
+) -> String {
+    let now = ctx.now;
+    let invite = invite.map(|i| {
+        let href = format!("/support/{}", i.session_id);
+        view! {
+            <section class="card reveal" role="alert">
+                <h2>"Invitation ready"</h2>
+                <p>"Read this code to the person you are helping, or send them the link. It works once, in one browser, for "{i.minutes}" minutes."</p>
+                <p class="code-big">{i.code}</p>
+                <p class="muted">"They go to "<span class="mono">{i.entry_url}</span>" and type the code, or open:"</p>
+                <pre class="output secret">{i.link}</pre>
+                <p><a class="button" href=href>"Open the session"</a></p>
+            </section>
+        }
+    });
+    let rows = if sessions.is_empty() {
+        view! { <p class="empty">"No support sessions yet."</p> }.into_any()
+    } else {
+        let body = sessions
+            .into_iter()
+            .map(|s| {
+                let href = format!("/support/{}", s.id);
+                view! {
+                    <tr>
+                        <td data-label="Session"><a href=href class="mono">{fmt::short_id(s.id)}</a></td>
+                        <td data-label="For">{s.note.clone().unwrap_or_else(|| "—".into())}</td>
+                        <td data-label="State">{support_state_badge(s.state, s.state_label)}</td>
+                        <td data-label="Created">{time_cell(now, s.created_at)}" · "{s.created_by.clone()}</td>
+                    </tr>
+                }
+            })
+            .collect_view();
+        view! {
+            <table class="list">
+                <thead><tr><th scope="col">"Session"</th><th scope="col">"For"</th><th scope="col">"State"</th><th scope="col">"Created"</th></tr></thead>
+                <tbody>{body}</tbody>
+            </table>
+        }
+        .into_any()
+    };
+    let body = view! {
+        <h1>"Support"</h1>
+        {invite}
+        <section class="card">
+            <h2>"Start an attended session"</h2>
+            <p>"The person you are helping opens a link in their browser and chooses a tab, a window, or their screen to show you. "<strong>"You can see it. You cannot click, type, or control anything."</strong>" Nothing is installed, and the session ends when either of you ends it."</p>
+            <form method="post" action="/support" class="inline-form">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>"Who are you helping? (optional)"<input type="text" name="note" maxlength="200" placeholder="Front desk, printer issue"/></label>
+                <span class="badge neutral">"View screen (no control)"</span>
+                <button type="submit">"Create invitation"</button>
+            </form>
+        </section>
+        <section>
+            <h2>"Recent sessions"</h2>
+            {rows}
+        </section>
+    };
+    shell("Support", ctx, Nav::Support, None, body)
+}
+
+pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &str) -> String {
+    let title = format!("Support session {}", fmt::short_id(s.id));
+    let end_url = format!("/support/{}/end", s.id);
+    let live = !s.terminal;
+    let end_form = live.then(|| {
+        view! {
+            <form method="post" action=end_url class="inline-form">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <button type="submit" class="bad" id="end-live">"End session"</button>
+                <span class="muted">"Ending is immediate and the invitation can never be used again."</span>
+            </form>
+        }
+    });
+    let ended = s.ended_at.map(|t| {
+        view! { <p class="muted">{format!("Ended {} — {}", fmt::timestamp(t), s.end_reason.clone().unwrap_or_default())}</p> }
+    });
+    let caps = s
+        .capabilities
+        .join(", ")
+        .replace("view_screen", "view screen (no control)");
+    let data_state = if s.terminal { "ended" } else { s.state };
+    let body = view! {
+        <p class="crumbs"><a href="/support">"Support"</a>" / "</p>
+        // The badge is updated live by support.js; it never shows the load-time state as current.
+        <h1>{title.clone()}" "<span id="state-badge" class=support_badge_class(s.state)>{s.state_label}</span></h1>
+        <div id="support" data-role="technician" data-session=s.id.to_string() data-ice=ice_servers.to_string() data-state=data_state>
+            <p class="lead" id="state" aria-live="polite">{s.state_label}</p>
+            <p class="muted" id="peer"></p>
+            <p class="flash bad" id="error" aria-live="assertive"></p>
+            {ended}
+            <dl class="facts card">
+                <dt>"For"</dt><dd>{s.note.clone().unwrap_or_else(|| "—".into())}</dd>
+                <dt>"Granted"</dt><dd>{caps}</dd>
+                <dt>"Invitation valid until"</dt><dd>{fmt::timestamp(s.invite_expires_at)}</dd>
+            </dl>
+            <div id="sas-box" class="card sas" hidden=true>
+                <strong>"Security code: "</strong><span id="sas" class="mono"></span>
+                <p class="muted">"Ask them to read the code on their screen. If it is different, end the session: someone may be in the middle."</p>
+            </div>
+            <section id="viewer" class="card" hidden=true>
+                <h2>"Their shared screen"</h2>
+                <video id="remote" autoplay=true muted=true playsinline=true></video>
+            </section>
+            {end_form}
+            <noscript><p class="flash bad">"Viewing a shared screen needs JavaScript."</p></noscript>
+        </div>
+    };
+    shell_with(&title, ctx, Nav::Support, None, live, body)
+}
+
+/// The participant's pages: no account, no navigation.
+fn participant_shell(title: &str, script: bool, body: impl IntoView + 'static) -> String {
+    render(view! {
+        <html lang="en">
+            {head(format!("{title} · flyw8t"), None, script)}
+            <body class="login">
+                <main class="card narrow">{body}</main>
+            </body>
+        </html>
+    })
+}
+
+pub fn support_entry_page(error: Option<String>) -> String {
+    let err = error.map(|e| view! { <p class="flash bad" role="alert">{e}</p> });
+    participant_shell(
+        "Get help",
+        false,
+        view! {
+            <h1>"Get help from your technician"</h1>
+            <p>"Enter the 9-digit code your technician gave you. You will see who is asking and what they are asking for before anything is shared."</p>
+            {err}
+            <form method="post" action="/s" class="stack">
+                <label>"Code"<input type="text" name="code" inputmode="numeric" autocomplete="off" maxlength="15" required=true autofocus=true placeholder="123 456 789"/></label>
+                <button type="submit">"Continue"</button>
+            </form>
+        },
+    )
+}
+
+pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String {
+    let caps = v
+        .capabilities
+        .into_iter()
+        .map(|c| view! { <li>{c}</li> })
+        .collect_view();
+    let heading = format!("{} wants to see your screen", v.technician_name);
+    let who = format!(
+        "Requested by {} ({}), as known to {}.",
+        v.technician_name, v.technician_email, v.server_host
+    );
+    let deciding = v.state == "authorizing";
+    participant_shell(
+        "Screen sharing request",
+        true,
+        view! {
+            <div id="support" data-role="participant" data-ice=ice_servers.to_string() data-state=v.state>
+                <h1>{heading}</h1>
+                <p>{who}</p>
+                // Live status and the way out come first, so ending is always one tap away.
+                <div class="live">
+                    <p class="lead" id="state" aria-live="polite">{v.state_label}</p>
+                    <p class="flash bad" id="error" aria-live="assertive"></p>
+                    <button type="button" id="end" class="bad" hidden=true>"Stop sharing and end the session"</button>
+                    <div id="sas-box" class="sas" hidden=true>
+                        <strong>"Security code: "</strong><span id="sas" class="mono"></span>
+                        <p class="muted">"Your technician should read you the same code. If it is different, end the session."</p>
+                    </div>
+                </div>
+                <h2>"If you allow, they can"</h2>
+                <ul>{caps}</ul>
+                <h2>"They cannot"</h2>
+                <ul>
+                    <li>"Move your mouse, type, or click anything."</li>
+                    <li>"See anything you do not choose in the next step."</li>
+                    <li>"Keep access after you end the session or close this page."</li>
+                </ul>
+                <div id="decide" class="stack" hidden=!deciding>
+                    <button type="button" id="allow">"Allow, and choose what to share"</button>
+                    <button type="button" id="decline" class="bad">"Decline"</button>
+                </div>
+                <noscript><p class="flash bad">"Sharing your screen needs JavaScript in this browser."</p></noscript>
+            </div>
+        },
+    )
 }
 
 #[cfg(test)]
@@ -990,6 +1214,7 @@ mod tests {
             can_run: true,
             is_admin: true,
             can_enroll: true,
+            can_support: true,
             flash: None,
         }
     }

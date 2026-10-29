@@ -23,6 +23,11 @@ pub struct Config {
     pub delivery_window: Duration,
     /// How long an offer may go unacknowledged on one connection before it is offered again.
     pub redelivery_after: Duration,
+    /// How long an attended-support invitation (code and link) stays valid.
+    pub support_invite_ttl: Duration,
+    /// WebRTC ICE servers for attended support, as a JSON array of RTCIceServer objects.
+    /// Empty by default: LAN only, and no third party is contacted.
+    pub ice_servers: String,
     pub session_ttl: Duration,
 }
 
@@ -54,6 +59,7 @@ impl Config {
             public_url: public_url.trim_end_matches('/').to_string(),
             tls,
             bootstrap_admin,
+            ice_servers: var("FLYW8T_ICE_SERVERS").unwrap_or_else(|| "[]".into()),
             ..Self::defaults()
         };
         cfg.validate()?;
@@ -73,6 +79,8 @@ impl Config {
             silence_grace: Duration::from_secs(60),
             delivery_window: Duration::from_secs(15 * 60),
             redelivery_after: Duration::from_secs(60),
+            support_invite_ttl: Duration::from_secs(10 * 60),
+            ice_servers: "[]".into(),
             session_ttl: Duration::from_secs(12 * 60 * 60),
         }
     }
@@ -80,6 +88,12 @@ impl Config {
     /// Plaintext is allowed only when the public URL is loopback. A deployment reachable
     /// from anywhere else must present HTTPS, natively or through a proxy.
     pub fn validate(&self) -> Result<()> {
+        let ice: serde_json::Value =
+            serde_json::from_str(&self.ice_servers).context("FLYW8T_ICE_SERVERS must be JSON")?;
+        anyhow::ensure!(
+            ice.is_array(),
+            "FLYW8T_ICE_SERVERS must be a JSON array of RTCIceServer objects"
+        );
         let (scheme, rest) = self
             .public_url
             .split_once("://")

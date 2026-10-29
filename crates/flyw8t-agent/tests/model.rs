@@ -159,6 +159,15 @@ impl Sim {
                 if let Some(entry) = self.journal.get(id) {
                     return self.agent_emit(entry.report());
                 }
+                // Mirrors MAX_CONCURRENT_JOBS: a full agent declines without journaling.
+                if self.pending.len() + self.running.len() >= 2 {
+                    return self.agent_emit(JobReport {
+                        job_id: id,
+                        phase: JobPhase::NotAccepted {
+                            reason: NotAccepted::Busy,
+                        },
+                    });
+                }
                 match self.journal.accept(id, &Action::NetIpconfig, 30).unwrap() {
                     Accept::New => {
                         self.pending.push(id);
@@ -283,7 +292,7 @@ impl Sim {
         let reduced = match &r.phase {
             JobPhase::Accepted => Report::Accepted,
             JobPhase::NotAccepted { reason } => Report::NotAccepted {
-                busy: *reason == NotAccepted::Busy,
+                retryable: matches!(reason, NotAccepted::Busy | NotAccepted::StorageError),
             },
             JobPhase::Started { .. } => Report::Started,
             JobPhase::Finished(f) => Report::Finished(state_for_outcome(&f.outcome)),

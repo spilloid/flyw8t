@@ -352,7 +352,7 @@ async fn hostile_frames_close_the_connection() {
     assert!(closed, "oversized message must close the connection");
 
     // Still healthy for a well-behaved agent.
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, agent.device_id).await;
     stop.cancel();
     task.await.unwrap().unwrap();
@@ -429,6 +429,118 @@ async fn report_for_job_recorded_as_queued_is_accepted_not_looped() {
             .connected_since(agent.device_id)
             .is_some(),
         "connection survives"
+    );
+    server.stop().await;
+}
+
+/// Review finding 5: a device repeating a final report cannot grow job history without
+/// bound, and a burst of messages closes the connection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn repeated_reports_are_counted_not_logged_and_bursts_are_cut_off() {
+    let server = start_fresh().await;
+    let (admin, _org, agent) = enrolled(&server).await;
+    let mut raw = RawAgent::authenticate(&server, &agent).await;
+    let r = admin
+        .post(
+            &server,
+            &format!("/devices/{}/jobs", agent.device_id),
+            &[("action", "net.ipconfig")],
+        )
+        .await;
+    let job: Uuid = extract(&r.location(), r"/jobs/([0-9a-f-]{36})")
+        .unwrap()
+        .parse()
+        .unwrap();
+    raw.expect_offer().await;
+    for i in 0..80 {
+        raw.report(job, finished_exit0("Windows IP Configuration"))
+            .await;
+        if i % 40 == 39 {
+            tokio::time::sleep(Duration::from_millis(1100)).await; // stay under the rate limit
+        }
+    }
+    let db = server.state.db.clone();
+    wait_for("all reports processed", Duration::from_secs(15), || {
+        let db = db.clone();
+        async move {
+            sqlx::query_as::<_, (i32,)>("SELECT unchanged_reports FROM jobs WHERE id = $1")
+                .bind(job)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+                .0
+                == 79
+        }
+    })
+    .await;
+    let (events,): (i64,) = sqlx::query_as("SELECT count(*) FROM job_events WHERE job_id = $1")
+        .bind(job)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert!(events <= 50, "{events} events kept for one job");
+    assert_eq!(
+        job_state(&server, job).await,
+        ("completed".into(), "verified".into())
+    );
+
+    // A burst far beyond any healthy agent: refused and closed.
+    for _ in 0..300 {
+        if raw
+            .ws
+            .send(Message::text(
+                serde_json::to_string(&AgentMsg::Heartbeat {
+                    agent_version: "x".into(),
+                    uptime_secs: 1,
+                    running_jobs: 0,
+                })
+                .unwrap(),
+            ))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    let refused = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match raw.ws.next().await {
+                Some(Ok(Message::Text(t))) if t.as_str().contains("rate_limited") => return true,
+                None | Some(Err(_)) => return false,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(refused, "burst must be refused with RateLimited");
+    server.stop().await;
+}
+
+/// Review finding 9: a cross-site form post (login CSRF) is refused by Origin.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn cross_origin_posts_are_refused() {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    let server = start_fresh().await;
+    let body = form(&[("email", ADMIN_EMAIL), ("password", ADMIN_PASSWORD)]);
+    let req = |origin: &str| {
+        Request::post("/login")
+            .header(header::HOST, "rmm.example.test")
+            .header(header::ORIGIN, origin)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+    assert_eq!(
+        server.request(req("https://evil.example")).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        server.request(req("https://rmm.example.test")).await.status,
+        StatusCode::SEE_OTHER
     );
     server.stop().await;
 }

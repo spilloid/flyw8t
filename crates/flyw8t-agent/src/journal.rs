@@ -236,10 +236,17 @@ impl Journal {
     }
 
     /// The server has durably stored this job's final report.
+    ///
+    /// Captured output is dropped at this point: the server has it, and the entry only needs
+    /// to remember that the job ran and how it ended, so a duplicate offer can be answered.
+    /// This keeps memory and disk per retained entry small.
     pub fn mark_acked(&self, job_id: Uuid) -> Result<()> {
         self.update(job_id, |e| {
-            if matches!(e.state, EntryState::Finished { .. }) {
+            if let EntryState::Finished { report } = &mut e.state {
                 e.server_acked = true;
+                report.stdout = None;
+                report.stderr = None;
+                report.structured = None;
             }
         })
     }
@@ -426,6 +433,36 @@ mod tests {
         j.mark_acked(c).unwrap();
         assert!(!j.get(c).unwrap().server_acked);
         assert_eq!(j.prune().unwrap(), 0, "recent acked entries are retained");
+    }
+
+    #[test]
+    fn acknowledged_entries_keep_no_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(dir.path()).unwrap();
+        let id = Uuid::new_v4();
+        j.accept(id, &Action::NetIpconfig, 30).unwrap();
+        let mut f = done(ExecOutcome::Exited { code: 0 });
+        f.stdout = Some(flyw8t_protocol::messages::CapturedStream {
+            data: "x".repeat(100_000),
+            total_bytes: 100_000,
+            truncated: false,
+        });
+        j.finish(id, f).unwrap();
+        j.mark_acked(id).unwrap();
+        let EntryState::Finished { report } =
+            Journal::open(dir.path()).unwrap().get(id).unwrap().state
+        else {
+            panic!()
+        };
+        assert!(
+            report.stdout.is_none(),
+            "output is dropped once the server has it"
+        );
+        assert_eq!(
+            report.outcome,
+            ExecOutcome::Exited { code: 0 },
+            "the outcome is kept for duplicate offers"
+        );
     }
 
     #[test]

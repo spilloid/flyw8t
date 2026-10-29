@@ -17,6 +17,7 @@ pub struct PageCtx {
     pub can_run: bool,
     pub is_admin: bool,
     pub can_enroll: bool,
+    pub can_support: bool,
     pub flash: Option<Flash>,
 }
 
@@ -249,4 +250,46 @@ pub struct DeviceFilter {
     pub q: String,
     pub organization: Option<Uuid>,
     pub connection: String,
+}
+
+/// One attended support session, for the technician.
+#[derive(Debug, Clone, Serialize)]
+pub struct SupportSessionView {
+    pub id: Uuid,
+    pub created_by: String,
+    pub note: Option<String>,
+    pub state: &'static str,
+    pub state_label: &'static str,
+    pub terminal: bool,
+    pub capabilities: Vec<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub invite_expires_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub ended_at: Option<OffsetDateTime>,
+    pub end_reason: Option<String>,
+    #[serde(skip)]
+    pub now: OffsetDateTime,
+}
+
+/// A freshly created invitation, shown once.
+#[derive(Debug, Clone)]
+pub struct SupportInvite {
+    pub session_id: Uuid,
+    pub code: String,
+    pub link: String,
+    pub entry_url: String,
+    pub minutes: u64,
+}
+
+/// What the person being helped sees before deciding.
+#[derive(Debug, Clone)]
+pub struct SupportConsentView {
+    pub technician_name: String,
+    pub technician_email: String,
+    pub server_host: String,
+    pub capabilities: Vec<String>,
+    pub state: &'static str,
+    pub state_label: &'static str,
 }

@@ -50,7 +50,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Reject a form that does not carry this session's CSRF token.
-fn check_csrf(p: &Principal, form: &Form) -> AppResult<()> {
+pub(crate) fn check_csrf(p: &Principal, form: &Form) -> AppResult<()> {
     match form.get("csrf") {
         Some(t) if !p.csrf.is_empty() && constant_time_eq(t.as_bytes(), p.csrf.as_bytes()) => {
             Ok(())
@@ -59,7 +59,7 @@ fn check_csrf(p: &Principal, form: &Form) -> AppResult<()> {
     }
 }
 
-fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
+pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
     PageCtx {
         user_name: p.display_name.clone(),
         role: p.role.as_str(),
@@ -68,6 +68,7 @@ fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
         can_run: p.can(Permission::RunDiagnostics),
         is_admin: p.role == Role::Admin,
         can_enroll: p.can(Permission::ManageEnrollment),
+        can_support: p.can(Permission::RunSupportSessions),
         flash,
     }
 }

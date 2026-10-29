@@ -14,7 +14,7 @@ edition = "2021"
 license = "MIT"
 authors = ["Joseph Spillers"]
 repository = "https://github.com/spilloid/flyw8t"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [workspace.dependencies]
 flyw8t-protocol = { path = "crates/flyw8t-protocol" }

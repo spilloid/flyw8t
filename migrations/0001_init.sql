@@ -159,6 +159,8 @@ CREATE TABLE jobs (
     queued_at            timestamptz,
     first_dispatched_at  timestamptz,
     dispatch_count       integer NOT NULL DEFAULT 0,
+    -- Device reports that changed nothing (duplicates, late reports). Counted, not logged.
+    unchanged_reports    integer NOT NULL DEFAULT 0,
     -- Connection and time of the latest offer. An unacknowledged offer is repeated on a new
     -- connection, or on the same one after the redelivery interval (the agent deduplicates).
     last_dispatch_conn   uuid,

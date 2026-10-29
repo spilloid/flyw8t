@@ -114,6 +114,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    // Make the rename itself durable. On Unix that needs an fsync of the directory. On
+    // Windows, NTFS journals the rename but does not promise it is on disk before returning;
+    // MoveFileEx with MOVEFILE_WRITE_THROUGH would, and is an open item (docs/reliability.md).
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
     Ok(())
 }
 

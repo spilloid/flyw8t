@@ -117,3 +117,12 @@ ol.timeline time { color: var(--muted); font-size: 0.82rem; }
   dl.facts { grid-template-columns: 1fr; }
   dl.facts dt { margin-top: 0.4rem; }
 }
+
+.code-big { font-family: var(--mono); font-size: 2.2rem; font-weight: 700; letter-spacing: 0.08em; margin: 0.4rem 0; }
+a.button { display: inline-block; background: var(--accent); color: #fff; padding: 0.45rem 0.9rem; border-radius: 6px; text-decoration: none; font-weight: 600; }
+.sas { border-color: var(--unk-fg); }
+.sas #sas { font-size: 1.4rem; font-weight: 700; letter-spacing: 0.1em; }
+#remote { width: 100%; max-height: 75vh; background: #000; border-radius: 8px; }
+#error:empty { display: none; }
+[hidden] { display: none !important; }
+.live { border-left: 4px solid var(--accent); padding-left: 0.8rem; margin: 1rem 0; }

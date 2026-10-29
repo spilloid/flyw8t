@@ -329,20 +329,21 @@ impl TestAgent {
         Agent::new(AgentConfig::load(self.dir.path()).unwrap()).unwrap()
     }
 
-    /// Start one session in the background; cancel the token to disconnect.
+    /// Start one session in the background; cancel the token to disconnect. The session task
+    /// owns the agent, so once it (and any job it started) finishes, the agent's state-directory
+    /// lock is released and the next `connect` can load it again, as a restarted process would.
     pub fn connect(
         &self,
         server_url: &str,
     ) -> (
-        Arc<Agent>,
         CancellationToken,
         tokio::task::JoinHandle<anyhow::Result<()>>,
     ) {
         let agent = self.load(server_url);
         let stop = CancellationToken::new();
-        let (a, s) = (agent.clone(), stop.clone());
-        let task = tokio::spawn(async move { a.run_session(&s).await });
-        (agent, stop, task)
+        let s = stop.clone();
+        let task = tokio::spawn(async move { agent.run_session(&s).await });
+        (stop, task)
     }
 }
 

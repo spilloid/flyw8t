@@ -29,7 +29,7 @@ async fn vertical_slice() {
     let page = admin.get(&server, "/devices").await;
     assert!(page.body.contains("Never connected"), "{}", page.body);
 
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, agent.device_id).await;
     let db = server.state.db.clone();
     let device = agent.device_id;
@@ -145,7 +145,7 @@ async fn reconnect_and_duplicate_delivery_never_reexecutes() {
     let (admin, _org, agent) = enrolled(&server).await;
     let device = agent.device_id;
 
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, device).await;
     stop.cancel();
     task.await.unwrap().unwrap();
@@ -169,7 +169,7 @@ async fn reconnect_and_duplicate_delivery_never_reexecutes() {
         .contains(">Queued<"));
 
     // Reconnect: delivered and completed.
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_state(&server, job, "completed", Duration::from_secs(30)).await;
     let (finished_first, started_first): (
         Option<time::OffsetDateTime>,
@@ -189,7 +189,7 @@ async fn reconnect_and_duplicate_delivery_never_reexecutes() {
         .execute(&server.state.db)
         .await
         .unwrap();
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_state(&server, job, "completed", Duration::from_secs(30)).await;
     let (finished_again, started_again, dispatches): (
         Option<time::OffsetDateTime>,
@@ -239,7 +239,7 @@ async fn agent_crash_mid_job_is_outcome_unknown_and_not_rerun() {
 
     // Crash: every agent task (session, job, child process) dies at once.
     process.crash();
-    let (_a2, stop2, task2) = agent.connect(&server.url());
+    let (stop2, task2) = agent.connect(&server.url());
     wait_state(&server, job, "outcome_unknown", Duration::from_secs(20)).await;
     let (note,): (Option<String>,) = sqlx::query_as("SELECT state_note FROM jobs WHERE id = $1")
         .bind(job)
@@ -286,7 +286,7 @@ async fn server_restart_preserves_queued_work() {
     server.stop().await;
 
     let server = start(test_config(&db_url)).await;
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_state(&server, job, "completed", Duration::from_secs(30)).await;
     assert_eq!(job_state(&server, job).await.1, "verified");
     stop.cancel();
@@ -314,7 +314,7 @@ async fn cancellation_before_and_during_execution() {
         ("cancelled".into(), "not_applicable".into())
     );
 
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, device).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(
@@ -581,7 +581,7 @@ async fn enrollment_and_device_revocation() {
         "expired token refused"
     );
 
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, agent.device_id).await;
     let r = admin
         .post(
@@ -619,7 +619,7 @@ async fn enrollment_and_device_revocation() {
 async fn disconnected_device_is_not_shown_as_live() {
     let server = start_fresh().await;
     let (admin, _org, agent) = enrolled(&server).await;
-    let (_a, stop, task) = agent.connect(&server.url());
+    let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, agent.device_id).await;
     stop.cancel();
     task.await.unwrap().unwrap();

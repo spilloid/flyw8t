@@ -146,8 +146,10 @@ pub fn state_for_outcome(outcome: &ExecOutcome) -> ExecState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Report {
     Accepted,
+    /// `retryable`: the device was busy or could not journal it right now, so it may accept a
+    /// later offer. Otherwise it can never run this request (unknown action, invalid params).
     NotAccepted {
-        busy: bool,
+        retryable: bool,
     },
     Started,
     /// A final report proving this execution state (see [`state_for_outcome`]).
@@ -195,17 +197,16 @@ pub fn decide(current: ExecState, report: Report) -> Decision {
             Dispatched => go(Acknowledged, false),
             _ => none(false),
         },
-        Report::NotAccepted { busy } => match effective {
-            // Provably not run, and the device may take it later.
-            Dispatched if busy => {
-                if implied {
-                    none(false)
-                } else {
-                    go(Queued, false)
-                }
-            }
-            // Provably not run, and it never will be.
-            Dispatched | OutcomeUnknown => go(Failed, false),
+        // A decline answers one offer and proves only that *that* offer did not run. Another
+        // offer (a redelivery) may still be in flight or already accepted elsewhere. So:
+        //  - a retryable decline changes nothing: the job stays dispatched and is offered
+        //    again after the redelivery interval. Moving it back to `queued` would let a
+        //    cancel or expiry claim "never sent, did not run" while a redelivery runs it
+        //    (found by the model test);
+        //  - a decline never resolves OutcomeUnknown;
+        //  - only a deterministic decline (this device can never run this request) is final.
+        Report::NotAccepted { retryable } => match effective {
+            Dispatched if !retryable => go(Failed, false),
             _ => none(false),
         },
         Report::Started => match effective {
@@ -411,8 +412,8 @@ mod tests {
         let mut r = vec![
             Report::Accepted,
             Report::Started,
-            Report::NotAccepted { busy: true },
-            Report::NotAccepted { busy: false },
+            Report::NotAccepted { retryable: true },
+            Report::NotAccepted { retryable: false },
         ];
         r.extend(
             [Completed, Failed, TimedOut, Cancelled, OutcomeUnknown]
@@ -453,6 +454,16 @@ mod tests {
                     "{current:?} {report:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_decline_never_resolves_an_unknown_outcome() {
+        for retryable in [true, false] {
+            assert_eq!(
+                decide(OutcomeUnknown, Report::NotAccepted { retryable }).to,
+                None
+            );
         }
     }
 

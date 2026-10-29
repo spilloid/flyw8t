@@ -21,6 +21,7 @@ pub mod queries;
 pub mod ratelimit;
 pub mod registry;
 pub mod remote_access;
+pub mod support;
 pub mod web;
 
 use anyhow::Context;
@@ -45,6 +46,7 @@ pub struct AppState {
     pub registry: registry::Registry,
     pub limiter: ratelimit::RateLimiter,
     pub remote_access: Box<dyn remote_access::RemoteAccessProvider>,
+    pub support: support::SupportHub,
     pub started_unix: u64,
 }
 
@@ -65,6 +67,7 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         registry: Default::default(),
         limiter: Default::default(),
         remote_access: Box::new(remote_access::NotConfigured),
+        support: Default::default(),
         started_unix: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
     });
     bootstrap_admin(&state).await?;
@@ -136,6 +139,17 @@ pub fn router(state: Shared) -> Router {
         .route("/admin/users", post(web::create_user))
         .route("/admin/tokens", post(web::create_api_token))
         .route("/admin/tokens/{id}/revoke", post(web::revoke_api_token))
+        .route(
+            "/support",
+            get(support::list_page).post(support::create_handler),
+        )
+        .route("/support/{id}", get(support::session_page))
+        .route("/support/{id}/end", post(support::end_handler))
+        .route("/api/support/{id}/ws", get(support::technician_ws))
+        .route("/api/support/participant/ws", get(support::participant_ws))
+        .route("/s", get(support::entry_page).post(support::enter_code))
+        .route("/s/{invite}", get(support::open_invite))
+        .route("/static/support.js", get(support_script))
         .route("/static/app.css", get(stylesheet))
         .route("/static/icon.svg", get(icon))
         .route("/favicon.ico", get(icon))
@@ -164,6 +178,17 @@ async fn icon() -> Response {
             (header::CACHE_CONTROL, "max-age=86400"),
         ],
         flyw8t_web::ICON_SVG,
+    )
+        .into_response()
+}
+
+async fn support_script() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        flyw8t_web::SUPPORT_JS,
     )
         .into_response()
 }
@@ -201,6 +226,9 @@ async fn metrics_handler(State(state): State<Shared>) -> Response {
 }
 
 async fn security_headers(req: Request, next: Next) -> Response {
+    if is_cross_origin_write(&req) {
+        return (StatusCode::FORBIDDEN, "cross-origin request refused").into_response();
+    }
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     let set = |h: &mut axum::http::HeaderMap, k: header::HeaderName, v: &'static str| {
@@ -224,7 +252,7 @@ pub async fn run_sweeper(state: Shared, shutdown: CancellationToken) {
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            _ = tick.tick() => match jobs::sweep(&state).await {
+            _ = tick.tick() => match async { jobs::sweep(&state).await?; support::sweep(&state).await }.await {
                 Ok(()) => metrics::SWEEPS_OK.inc(),
                 Err(e) => {
                     metrics::SWEEPS_FAILED.inc();
@@ -280,4 +308,25 @@ pub async fn serve(
         }
     }
     Ok(())
+}
+
+/// A state-changing request whose `Origin` names a different site. Browsers always send
+/// `Origin` on cross-site POSTs, so this refuses login CSRF and is defense in depth behind
+/// the per-session CSRF token everywhere else. Requests without `Origin` (API clients,
+/// agents) are not affected; the JSON API accepts only bearer tokens anyway.
+fn is_cross_origin_write(req: &Request) -> bool {
+    use axum::http::Method;
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return false;
+    }
+    let headers = req.headers();
+    let (Some(origin), Some(host)) = (
+        headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+    ) else {
+        return false;
+    };
+    !origin
+        .split_once("://")
+        .is_some_and(|(_, authority)| authority.eq_ignore_ascii_case(host))
 }
