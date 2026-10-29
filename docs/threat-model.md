@@ -44,7 +44,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 - **Residual:** the server is not authenticated beyond TLS. An attacker with a certificate the agent trusts (a public CA mis-issuance, or a private CA the agent was told to trust) can impersonate the server. Pinning the server's key at enrollment is on the roadmap.
 
 ### T5: Compromised endpoint attacking the server
-- **Control:** reports about jobs the device does not own are ignored and audited; messages are capped at 1 MiB; malformed or out-of-sequence messages close the connection; device-supplied strings are length-truncated and rendered with HTML escaping; a newer connection supersedes an older one; handshakes are rate-limited per IP.
+- **Control:** credentials are re-checked after a connection registers, closing the window where a revocation could slip between authentication and registration; reports about jobs the device does not own are ignored and audited; messages are capped at 1 MiB; malformed or out-of-sequence messages close the connection; device-supplied strings are length-truncated and rendered with HTML escaping; a newer connection supersedes an older one; handshakes are rate-limited per IP.
 - **Evidence:** `device_cannot_report_another_devices_job`, `hostile_frames_close_the_connection`, `newer_connection_supersedes_older`, `pages_escape_untrusted_text`.
 - **Residual:** a compromised device can lie about *its own* results and inventory. Verification checks evidence shape, not truth. Nothing inside a device can prove it is not compromised.
 
@@ -79,10 +79,11 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 ### T13: Browser-side attacks on the console
 - **Control:** CSP `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'`; no inline script; `X-Frame-Options: DENY`; `nosniff`; `Referrer-Policy: no-referrer`; flash messages chosen from fixed codes so a URL cannot inject text.
-- **Residual:** login has no CSRF token (login-CSRF). SameSite=Strict on the resulting session limits the damage; still on the list.
+- **Login CSRF:** state-changing requests whose `Origin` names another site are refused before routing (covers sign-in, which has no session token yet). Evidence: `cross_origin_posts_are_refused`.
+- **Residual:** a browser that sends no `Origin` on a cross-site POST would bypass the login check (current browsers send it).
 
 ### T14: Denial of service
-- **Control:** bounded queues and message sizes; per-IP handshake, enrollment and login limits; a 256 KiB body limit on HTTP.
+- **Control:** bounded queues and message sizes; per-IP handshake, enrollment and login limits; an absolute 30 s handshake deadline that ping frames cannot extend; at most 100 messages per second per authenticated agent connection; at most 50 events per job for reports that change nothing; device-supplied text truncated when stored; a 256 KiB body limit on HTTP.
 - **Residual:** the limiter is in memory and per instance; there is no global connection cap; a botnet can still exhaust connections. Put a reverse proxy with connection limits in front of any internet-exposed deployment.
 
 ## Agent endpoint threats
@@ -96,9 +97,13 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 ## Open items before production
 
 1. MFA (TOTP/WebAuthn) and OIDC sign-in. **(blocking)**
-2. Cross-family adversarial review of the gateway, journal and job orchestration (STD-001; [dev-process.md](dev-process.md)). **(blocking)**
+2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Not yet done for attended support** (`support.rs`, `support.js`). **(blocking for support)**
 3. Authenticode-signed agent and server binaries; signed update manifests before any auto-update.
 4. Pin the server identity at enrollment.
 5. Postgres row-level security as defense in depth for T2.
-6. A session list and forced logout; login CSRF token.
+6. A session list and forced logout.
 7. External penetration test.
+
+## Attended support
+
+Attended (consent-based, browser screen view) sessions have their own threat analysis in [attended-support.md](attended-support.md#threats-specific-to-attended-support): consent before any signaling, single-use invitations, server-impersonation detection through a short authentication string, and no capability beyond viewing what the participant chooses.

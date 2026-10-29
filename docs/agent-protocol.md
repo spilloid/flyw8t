@@ -11,9 +11,11 @@ The agent makes one outbound WebSocket connection to `wss://<server>/api/agent/w
 | Concurrent jobs per agent | 2 (further offers declined `busy`, not buffered) | agent |
 | Agent outbound buffer | 256 reports (overflow dropped; the journal re-sends) | agent |
 | Server outbound buffer per connection | 64 messages (overflow: the offer is not sent and stays queued) | server |
-| Handshake deadline | 30 s | both |
+| Handshake deadline | 30 s, absolute (non-text frames do not extend it) | both |
 | Idle connection | 3 × heartbeat with no message → closed | both |
 | Handshakes per source IP | 60 / min; enrollments 10 / min | server |
+| Inbound messages per authenticated connection | 100 / s (then `Refused{RateLimited}` and close) | server |
+| Agent processes per state directory | 1 (exclusive OS lock; a starting agent waits up to 15 s for a previous one to exit) | agent |
 
 ## Handshake
 
@@ -61,6 +63,8 @@ Every failure returns the same message, so there is no oracle for which tokens e
 | `Heartbeat{agent_version, uptime_secs, running_jobs}` | Every `heartbeat_secs` (default 30). |
 | `Inventory{…}` | On connect and every 6 h. Stored as a timestamped snapshot; display fields only. |
 | `Job{job_id, phase}` | `Accepted` · `NotAccepted{busy\|unsupported_action\|invalid_params\|storage_error}` · `Started{at}` · `Finished{outcome, started_at, finished_at, stdout, stderr, structured}` |
+
+A `NotAccepted` answers one offer only. `busy` and `storage_error` are retryable: the server leaves the job `dispatched` and offers it again later (it never re-queues, since another offer may be in flight). `unsupported_action` and `invalid_params` fail the job. No decline ever resolves `outcome_unknown`.
 
 `Finished.outcome` is one of `Exited{code}`, `Collected`, `Failed{error}`, `TimedOut`, `Cancelled{started}`, `NotStarted{reason}`, `Interrupted{reason}`. The server maps it to an execution state with `domain::job::state_for_outcome`.
 

@@ -86,9 +86,13 @@ The center of the product. Summary here; the contract is [job-lifecycle.md](job-
 
 ## Web console (implemented)
 
-Server-rendered Leptos (SSR only, no WASM yet: [ADR-0003](decisions/ADR-0003-web-ui-ssr-first.md)). Every page is complete HTML that works without JavaScript; in-flight job pages refresh themselves with a meta refresh until the job is final. Live data and cached data are labelled differently: a connection badge comes from the live registry, and inventory says "reported by the device, collected …, cached, not live" with a freshness badge. Navigation shows only what exists: Overview, Devices, Organizations, Jobs, plus Audit and Administration for admins. Monitoring, Scripts and Automations from the founding brief are on the [roadmap](roadmap.md) rather than shown as empty pages.
+Server-rendered Leptos (SSR only, no WASM yet: [ADR-0003](decisions/ADR-0003-web-ui-ssr-first.md)). Every page is complete HTML that works without JavaScript; in-flight job pages refresh themselves with a meta refresh until the job is final. Live data and cached data are labelled differently: a connection badge comes from the live registry, and inventory says "reported by the device, collected …, cached, not live" with a freshness badge. Navigation shows only what exists: Overview, Devices, Organizations, Jobs, Support (technicians and admins), plus Audit and Administration for admins. Monitoring, Scripts and Automations from the founding brief are on the [roadmap](roadmap.md) rather than shown as empty pages.
 
-Validated by `tests/ui_capture.rs` (STD-008): 15 pages × 3 widths × 2 color schemes in headless Chrome, failing on horizontal overflow or any browser error.
+Validated by `tests/ui_capture.rs` (STD-008): 16 pages × 3 widths × 2 color schemes in headless Chrome, failing on horizontal overflow or any browser error.
+
+## Attended support (implemented: browser screen view)
+
+`support.rs` pairs a technician's browser with a participant's browser through a 9-digit code or single-use link, records consent, and relays WebRTC signaling between exactly two sockets, and only after consent. Media flows browser to browser (DTLS-SRTP); the server never sees it. Sessions have their own state machine (`domain::support`) and append-only `support_events`. The support pages are the console's only pages with script (`/static/support.js`, same-origin, no inline script; [ADR-0010](decisions/ADR-0010-attended-support.md)). Details and the threat analysis: [attended-support.md](attended-support.md).
 
 ## Remote access (seam only)
 

@@ -4,7 +4,9 @@
 //! Signs in, builds real state (an enrolled agent, verified, queued, cancelled and
 //! outcome-unknown jobs), then renders every console page at desktop, tablet and phone widths
 //! in light and dark. Fails on horizontal page overflow or any browser error. Screenshots go to
-//! `target/ui-capture/`; with `FLYW8T_PUBLISH_SCREENSHOTS=1` a selection is copied to `docs/img/`.
+//! `target/ui-capture/`; with `FLYW8T_PUBLISH_SCREENSHOTS=1` a selection is copied to `docs/img/`
+//! (git-ignored: these captures show the test machine's real hostname, addresses and network
+//! configuration, so they must not be published until captures use a synthetic device).
 
 mod common;
 
@@ -260,8 +262,15 @@ async fn console_renders_cleanly_everywhere() {
                 .decode(b64)
                 .unwrap();
             std::fs::write(out_dir.join(format!("{name}.png")), &bytes).unwrap();
-            if publish && name.ends_with("-desktop-light") || publish && name == "device-phone-dark"
-            {
+            const PUBLISHED: [&str; 6] = [
+                "overview-desktop-dark",
+                "device-desktop-light",
+                "job-succeeded-desktop-light",
+                "job-unknown-desktop-light",
+                "support-desktop-light",
+                "device-phone-dark",
+            ];
+            if publish && PUBLISHED.contains(&name.as_str()) {
                 std::fs::create_dir_all(&docs_img).unwrap();
                 std::fs::write(docs_img.join(format!("{name}.png")), &bytes).unwrap();
             }

@@ -1,0 +1,32 @@
+# Development process log
+
+Method: corporate-strategy `standards/STD-001-adversarial-review.md`. The orchestrator writes the contract and tests, adjudicates every finding, and owns the final diff. Reviewers are consultants. A finding is accepted only after it is reproduced or confirmed by reading; a fix is accepted only after a test that would fail without it.
+
+Every round is logged here, including the ones that went badly.
+
+| # | Date | Unit | Implementer | Reviewer | Findings (real / raised) | Outcome |
+|---|---|---|---|---|---|---|
+| 1 | 2026-10-29 | Foundation: protocol, domain, agent, server, console | Claude Opus 5.5 (orchestrator, wrote directly) | — (self-review + tests) | — | 9 e2e tests green on first run. Treated as suspicious per STD-001; see row 2. |
+| 2 | 2026-10-29 | Mutation checks on the e2e suite | — | orchestrator | 0 / 3 mutants survived | Disabling journal dedupe, making crash recovery lie, and (later) removing the support consent gate were each caught by the intended test. |
+| 3 | 2026-10-29 | Flaky `silent_device…` test | — | orchestrator | 1 / 1 | Real: the server re-offered a dispatched job on the *same* live connection every sweep (noise), and twice when a job was created as the device connected. Fixed by recording the dispatch connection. |
+| 4 | 2026-10-29 | Model-based property test (`tests/model.rs`) | orchestrator | proptest | 2 / 2 | Real liveness gaps: an offer or cancel lost on a live connection, and a final report dropped by the agent's bounded event buffer, were retried only after a reconnect. Fixed with bounded redelivery and heartbeat re-send. |
+| 5 | 2026-10-29 | Report decision extracted to `domain::job::decide` | orchestrator | exhaustive unit tests | 1 / 1 | Real: a report about a job recorded as `queued` (e.g. after a database restore) caused an illegal transition, then a dropped connection, then a resend: a livelock. Now an implied dispatch. |
+| 6 | 2026-10-29 | Cross-family adversarial review of the core | — | **Codex `gpt-6.1-sol`, high**, read-only (exit 0, model confirmed from the log) | **9 confirmed + 1 plausible / 10** | All accepted. Fixed: failed-send requeue fenced on its connection; agent state-directory lock; revocation re-check after registration; declines never resolve `outcome_unknown`; repeated-report and burst bounds; absolute handshake deadline; journal pruning and output stripping; delivery deadline re-checked under lock; Origin check for cross-site posts; directory fsync on Unix. Open: Windows rename durability. Codex also caught a doc overstatement (model case count) and that the model never produced declines. Test grades it gave: server integration B−, model C+. |
+| 7 | 2026-10-29 | Model gains real `busy` declines (from row 6) | orchestrator | proptest | 1 / 1 | **Real, and introduced by my own fix for finding 4:** `busy` still moved `dispatched → queued`, so with a redelivery in flight a cancel could say "never sent, did not run" while the redelivered offer ran. Fixed: retryable declines change nothing. 3,000 cases green afterwards. |
+| 8 | 2026-10-29 | Attended support Phase B | orchestrator | raw-socket tests + headless Chrome two-tab run | 3 / 3 (UI) | Looking at screenshots found what asserts did not: the technician's header badge kept the load-time state ("Waiting…") while live state was "Connected"; the participant's End button was below the fold; an ended session still said "the other person has this session open" and kept showing the security code. All fixed and now asserted in the browser test. |
+| 9 | 2026-10-29 | Full-suite flake | — | orchestrator | 0 / 1 (unidentified) | One protocol-suite test failed once in six full parallel runs (`cargo test --workspace -- --include-ignored`, with the Chrome tests competing for CPU). It was not captured and did not recur in five further runs. Likely candidates: the timing-sensitive burst test or the 1-second silence window. **Open; not claimed fixed.** |
+
+## Substitutions and gaps
+
+- Rows 1 to 5 and 7 to 8 had no second-model implementer; the orchestrator wrote the code directly. Review independence came from tests, mutation checks, proptest, and row 6.
+- **The attended-support code (`support.rs`, `support.js`) has had no cross-family review.** It must have one before anyone relies on it.
+- TLA+ (`docs/spec/JobDelivery.tla`) is written but **not model-checked**: running the downloaded Java runtime was not permitted in this session.
+
+## Standing rules (STD-001)
+
+- A finding can be right about the problem and wrong about the fix: adjudicate, then choose the fix.
+- Re-read diffs after a fix round. (Row 7 is why.)
+- Review reads diffs; connection lifetime, process crashes and shutdown ordering need live runs.
+- Verify before trusting, in both directions. A green suite is evidence about the tests: prove a new check can fail.
+- A dispatcher's report is a claim, not proof: check exit codes and output files.
+- Look at the screenshots. (Row 8 is why.)

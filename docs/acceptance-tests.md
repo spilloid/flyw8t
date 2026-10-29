@@ -44,8 +44,15 @@ Beyond the milestone:
 | AT-25 | Unacknowledged delivery past deadline is unknown, not expired | `unacknowledged_delivery_is_unknown_not_expired` |
 | AT-26 | Hostile frames close the connection; server keeps serving | `hostile_frames_close_the_connection` |
 | AT-27 | Replayed authentication refused | `replayed_authentication_is_refused` |
-| AT-28 | Every console page renders without overflow or browser errors at 3 widths × 2 themes | `ui_capture` (needs Chrome) |
+| AT-28 | Every console page (16) renders without overflow or browser errors at 3 widths × 2 themes | `ui_capture` (needs Chrome) |
 | AT-29 | At-most-once and eventual resolution under random faults | `crates/flyw8t-agent/tests/model.rs` |
+| AT-30 | Native TLS end to end; an agent without the CA cannot connect | `agent_enrolls_and_runs_jobs_over_native_tls` |
+| AT-31 | Repeated device reports are bounded; message bursts are cut off | `repeated_reports_are_counted_not_logged_and_bursts_are_cut_off` |
+| AT-32 | Cross-origin form posts (login CSRF) refused | `cross_origin_posts_are_refused` |
+| AT-33 | One agent process per state directory | `one_process_per_state_directory` |
+| AT-34 | Attended support: consent before signaling, single-use invitation, clean end | `consented_session_relays_signaling_and_ends_cleanly` |
+| AT-35 | Attended support: access control, cross-site sockets, expiry, guess limits, decline, revoke | `access_control_and_cross_site_sockets`, `invitations_expire_and_guessing_is_limited`, `decline_and_technician_revocation` |
+| AT-36 | Attended support in real browsers: WebRTC media flows, matching security codes, honest ended state | `two_browsers_pair_consent_and_share_a_tab` (needs Chrome) |
 
 ## Manual checks still owed
 

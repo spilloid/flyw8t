@@ -61,7 +61,7 @@ Every transition is a row-locked, conditional update inside a transaction that a
 created ──► authorized ──► queued ──► dispatched ──► acknowledged ──► running ──► completed
    │            │            │  ▲         │ │  │           │             │    ├─► failed
    └──► cancelled ◄──────────┘  │         │ │  └─► (any final, if the ack was lost)
-                             │  └─busy────┘ │                            ├─► timed_out
+                             │  └─unsent───┘ │                            ├─► timed_out
                              ▼              ▼                            ├─► cancelled
                           expired     outcome_unknown ◄──────────────────┘
                                             │
@@ -76,11 +76,11 @@ created ──► authorized ──► queued ──► dispatched ──► ack
 | `created`/`authorized`/`queued` | `cancelled` | Cancel before dispatch. **Guaranteed not executed.** |
 | `queued` | `dispatched` | The device is connected; the dispatch is committed, *then* the offer is written. |
 | `queued` | `expired` | `deliver_by` passed (default 15 min after creation). |
-| `dispatched` | `queued` | The device said `NotAccepted{busy}` (not journaled, so not run), or the offer could not be written after the dispatch committed. |
+| `dispatched` | `queued` | The offer could not be written to the connection after the dispatch committed (it never left the server), and no newer offer has been sent since. |
 | `dispatched` | `acknowledged` | Device report `Accepted`. |
 | `dispatched`/`acknowledged` | `running` | Device report `Started`. |
 | `dispatched`/`acknowledged`/`running` | final | Device report `Finished`. |
-| `dispatched` | `failed` | Device declined for a reason that will not change (invalid parameters, unsupported, cannot journal). |
+| `dispatched` | `failed` | The device declined for a reason that will not change (unknown action, invalid parameters). A *retryable* decline (`busy`, `storage_error`) changes nothing: the job stays `dispatched` and is re-offered after the redelivery interval, because another offer may already be in flight. A decline never resolves `outcome_unknown`. |
 | `dispatched` | `outcome_unknown` | `deliver_by` passed without an acknowledgement. The device may have received it. |
 | `acknowledged`/`running` | `outcome_unknown` | No result within `timeout + silence_grace` after acknowledgement, or the device reported `Interrupted`. |
 | `outcome_unknown` | final | A conclusive late device report. |
@@ -105,6 +105,8 @@ If a device reports on a job recorded as `queued` (possible after restoring a da
 | **Failed verification** | `completed` + `verification=failed`, headline "Verification failed", with the reason. | evidence unit tests |
 | **Lost message on a live connection** | An unacknowledged offer or cancel is repeated after `redelivery_after` (60 s); the agent re-sends unacknowledged final reports every heartbeat. | model test (this rule was added because the model found the gap) |
 | **Report about another device's job** | Ignored, audited as denied, not acknowledged. | `device_cannot_report_another_devices_job` |
+| **Stale decline** (an old offer's `busy` arriving after a newer offer was accepted) | Changes nothing. An earlier design moved `dispatched` back to `queued` on `busy`; the model test showed a cancel could then claim "never sent" while a redelivered offer ran. | model test; `a_decline_never_resolves_an_unknown_outcome` |
+| **Repeated reports** (duplicates, or a hostile device) | Counted in `jobs.unchanged_reports`; at most 50 events are kept per job; device-supplied text is truncated to 4,096 characters; more than 100 messages per second closes the connection. | `repeated_reports_are_counted_not_logged_and_bursts_are_cut_off` |
 
 ## Timestamps
 

@@ -1,6 +1,6 @@
 # Attended support
 
-**Status:** Phase A (architecture and threat model): this document. Phase B (browser screen view with consent): see the status table at the end. Phase C (native helper with input) is **designed only, and needs an operator decision** ([ADR-0010](decisions/ADR-0010-attended-support.md)), because it is remote-desktop control, which the founding brief said not to build from scratch.
+**Status:** Phase A (architecture and threat model): this document. Phase B (browser screen view with consent): **implemented and tested**; see the status table at the end. Phase C (native helper with input) is **designed only, and needs an operator decision** ([ADR-0010](decisions/ADR-0010-attended-support.md)), because it is remote-desktop control, which the founding brief said not to build from scratch.
 
 ## The experience
 
@@ -129,3 +129,32 @@ WebRTC media is DTLS-SRTP between the two browsers; neither the flyw8t server no
 - It exits and deletes everything at session end; nothing persists.
 
 This is remote-desktop control. The founding brief says not to build remote desktop from scratch and to use MeshCentral first. **Phase C proceeds only if the operator decides the attended helper is a distinct product need that MeshCentral does not meet** ([ADR-0010](decisions/ADR-0010-attended-support.md)).
+
+## Implementation status (2026-10-29)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Session state machine (`domain::support`) | Implemented | exhaustive transition tests; consent is the only way into `connecting` |
+| Code + link invitations, single use, hashed, 10-minute expiry | Implemented | `consented_session_relays_signaling_and_ends_cleanly`, `invitations_expire_and_guessing_is_limited` |
+| Consent page: requester identity, capability text, what they cannot do | Implemented | `support_browser` screenshots; `consented_session_…` asserts the wording |
+| No signaling relayed before consent; technician cannot consent for the participant | Implemented | `consented_session_…`; a mutant that relays early is caught |
+| WebRTC screen view between two browsers | Implemented | `two_browsers_pair_consent_and_share_a_tab`: headless Chrome, real media, video frames received |
+| Short authentication string over both DTLS fingerprints | Implemented | same test asserts both sides compute the same code |
+| End from either side; leaving mid-session ends it; credentials cleared | Implemented | `decline_and_technician_revocation`, `consented_session_…` |
+| Cross-site WebSocket handshakes refused (Origin) | Implemented | `access_control_and_cross_site_sockets` |
+| Per-technician session cap, per-IP code-guess limit | Implemented | `invitations_expire_and_guessing_is_limited` |
+| STUN/TURN through `FLYW8T_ICE_SERVERS` | Implemented (config); **only LAN/loopback tested** | no NAT or TURN path has been exercised |
+| Cross-family security review of the support code | **Not done** | blocking before anyone relies on it |
+| A person actually using it on two machines | **Not done** | tests use one machine and Chrome's fake screen source |
+| Native helper with keyboard and mouse (Phase C) | **Not built.** Needs the operator's decision (ADR-0010) | — |
+
+### Trying it locally with two browsers
+
+1. Start the server (see [deployment.md](deployment.md)) and sign in as an administrator or technician.
+2. **Support → Create invitation.** Copy the link (or note the 9-digit code).
+3. In a *different* browser, or a private window (it must not share the technician's cookies), open the link, or go to `/s` and type the code.
+4. Read the request, click **Allow, and choose what to share**, and pick a tab or window in the browser's picker.
+5. The technician's page shows the shared content and a 6-digit security code; the participant's page shows the same code.
+6. Either side clicks **End**. Both pages say it ended, and the link or code no longer works.
+
+For two machines on different networks, set `FLYW8T_ICE_SERVERS` (for example `[{"urls":"stun:stun.example.org:3478"}]`, plus a TURN server for restrictive networks) and serve over HTTPS: browsers allow screen capture only in secure contexts (`https://` or `localhost`).

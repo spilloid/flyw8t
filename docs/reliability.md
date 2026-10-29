@@ -10,12 +10,13 @@
 
 | # | Property | How it is enforced | Evidence |
 |---|---|---|---|
-| P1 | A job executes **at most once** on its device, under duplicate delivery, reconnects, server restarts and agent crashes. | Journal-before-ack and journal-before-start (`journal.rs`). | Unit tests; e2e `reconnect_and_duplicate_delivery_never_reexecutes` (real redelivery, identical timestamps); e2e crash test; model test (5,000 random fault sequences). |
+| P1 | A job executes **at most once** on its device, under duplicate delivery, reconnects, server restarts and agent crashes. | Journal-before-ack and journal-before-start (`journal.rs`). | Unit tests; e2e `reconnect_and_duplicate_delivery_never_reexecutes` (real redelivery, identical timestamps); e2e crash test; model test (400 random fault sequences per run; 5,000 and 3,000 in recorded runs on 2026-10-29). |
 | P2 | **No success without evidence.** "Succeeded" iff execution `completed` ∧ verification `verified`; `completed` only from a device report. | `domain::job::outcome`, `decide`, `evidence::evaluate`. | Exhaustive unit tests over all (state, verification) and (state, report) pairs; model test. |
-| P3 | **Never "not run" about something that ran.** `expired` / cancelled-before-dispatch / `NotStarted` imply zero executions. | Dispatch commits before the offer leaves; journal start record precedes execution. | Model test invariants; journal recovery tests. A deliberately broken recovery is caught (mutation check, see [dev-process.md](dev-process.md)). |
+| P3 | **Never "not run" about something that ran.** `expired` / cancelled-before-dispatch / `NotStarted` imply zero executions. | Dispatch commits before the offer leaves; journal start record precedes execution; a retryable decline never re-queues (another offer may be in flight); a failed send re-queues only if no newer offer was sent. | Model test invariants (the model found the decline re-queue violation; fixed); journal recovery tests; mutation checks ([dev-process.md](dev-process.md)). |
 | P4 | **Terminal states never change.** `outcome_unknown` only resolves to a final state on device evidence. | Transition table. | `terminal_states_have_no_exits`, `outcome_unknown_resolves_only_to_final_states`, model test. |
 | P5 | **No report can wedge the server.** Every (state, report) decision is a legal path, so no report causes an error-and-reconnect loop. | `decide` + exhaustive test. | `every_report_decision_is_a_legal_path`; e2e `report_for_job_recorded_as_queued_is_accepted_not_looped`. |
 | P6 | **Eventual resolution.** Once faults stop and the device reconnects, no job remains `dispatched`/`acknowledged`/`running`, every device report is acknowledged, and `outcome_unknown` remains only where the device itself has no conclusive evidence. | Bounded redelivery of offers and cancels, heartbeat re-send of final reports. | Model test liveness phase. **This property found two real gaps** (lost offer or cancel on a live connection; dropped final report), both fixed. |
+| P7 | **One agent process per device.** Two processes sharing a journal could each run a job once. | Exclusive OS lock on the state directory, held for the process lifetime. | `one_process_per_state_directory`. |
 
 Formal model: [`spec/JobDelivery.tla`](spec/JobDelivery.tla) states P1 to P4 in TLA+. **It has not been model-checked yet** (see [spec/README.md](spec/README.md)); the executed evidence above is what the claims rest on today.
 
@@ -87,5 +88,8 @@ Until that has run for a meaningful period, flyw8t's availability is **unknown**
 | Hostile or malformed frames, oversized messages | protocol tests |
 | Process timeout and kill | executor tests (real `PING.EXE` to TEST-NET-1) |
 | Agent disk full / journal write failure | **not yet** (code path exists; no test) |
+| Power loss between a journal rename and the disk | **not yet.** Unix fsyncs the directory after rename. Windows relies on NTFS journaling; `MoveFileEx(MOVEFILE_WRITE_THROUGH)` (an isolated `unsafe` call) is the planned fix. Raised by the cross-family review as plausible, not demonstrated. |
+| Two agent processes on one state directory | unit test (OS lock) |
+| Message floods and duplicate-report floods | protocol test |
 | PostgreSQL unavailable mid-request | **not yet** |
 | Clock skew between device and server | **not yet** (device timestamps are labelled as device clock; no server logic depends on them) |
