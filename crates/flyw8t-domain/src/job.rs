@@ -142,6 +142,86 @@ pub fn state_for_outcome(outcome: &ExecOutcome) -> ExecState {
     }
 }
 
+/// What a device report says, reduced to what the server's decision depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Report {
+    Accepted,
+    NotAccepted {
+        busy: bool,
+    },
+    Started,
+    /// A final report proving this execution state (see [`state_for_outcome`]).
+    Finished(ExecState),
+}
+
+/// The server's response to a device report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decision {
+    /// The device evidently holds a job the server still records as `Queued` (for example
+    /// after restoring an older database backup): record the implied dispatch first.
+    pub implied_dispatch: bool,
+    /// The state to move to, or `None` to record the report without changing state.
+    pub to: Option<ExecState>,
+    /// Acknowledge the report so the device stops re-sending it. Every final report is
+    /// acknowledged once stored, including ones that change nothing; otherwise a device would
+    /// re-send it forever.
+    pub ack: bool,
+}
+
+/// Decide how a device report changes a job. Every decision is a legal path through
+/// [`ExecState::can_transition_to`] (tested exhaustively below), so the server can never be
+/// driven into an illegal transition, and so never into a reconnect loop, by any report.
+pub fn decide(current: ExecState, report: Report) -> Decision {
+    use ExecState::*;
+    let implied = current == Queued;
+    let effective = if implied { Dispatched } else { current };
+    let none = |ack| Decision {
+        implied_dispatch: false,
+        to: None,
+        ack,
+    };
+    let go = |to, ack| Decision {
+        implied_dispatch: implied,
+        to: Some(to),
+        ack,
+    };
+    // Before the server has ever offered it (Created/Authorized exist only inside the
+    // creating transaction), or after a terminal state, reports change nothing.
+    if matches!(current, Created | Authorized) || current.is_terminal() {
+        return none(matches!(report, Report::Finished(_)));
+    }
+    match report {
+        Report::Accepted => match effective {
+            Dispatched => go(Acknowledged, false),
+            _ => none(false),
+        },
+        Report::NotAccepted { busy } => match effective {
+            // Provably not run, and the device may take it later.
+            Dispatched if busy => {
+                if implied {
+                    none(false)
+                } else {
+                    go(Queued, false)
+                }
+            }
+            // Provably not run, and it never will be.
+            Dispatched | OutcomeUnknown => go(Failed, false),
+            _ => none(false),
+        },
+        Report::Started => match effective {
+            Dispatched | Acknowledged => go(Running, false),
+            _ => none(false),
+        },
+        Report::Finished(target) => {
+            if effective == OutcomeUnknown && target == OutcomeUnknown {
+                none(true)
+            } else {
+                go(target, true)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verification {
@@ -324,6 +404,75 @@ mod tests {
                 from == Authorized || from == Dispatched,
                 "{from:?}"
             );
+        }
+    }
+
+    fn all_reports() -> Vec<Report> {
+        let mut r = vec![
+            Report::Accepted,
+            Report::Started,
+            Report::NotAccepted { busy: true },
+            Report::NotAccepted { busy: false },
+        ];
+        r.extend(
+            [Completed, Failed, TimedOut, Cancelled, OutcomeUnknown]
+                .into_iter()
+                .map(Report::Finished),
+        );
+        r
+    }
+
+    #[test]
+    fn every_report_decision_is_a_legal_path() {
+        for current in ALL_STATES {
+            for report in all_reports() {
+                let d = decide(current, report);
+                let mut at = current;
+                if d.implied_dispatch {
+                    assert!(at.can_transition_to(Dispatched), "{current:?} {report:?}");
+                    at = Dispatched;
+                }
+                if let Some(to) = d.to {
+                    assert!(
+                        at.can_transition_to(to),
+                        "{current:?} {report:?} -> {at:?} -> {to:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_final_report_is_acknowledged_and_nothing_else_is() {
+        for current in ALL_STATES {
+            for report in all_reports() {
+                let ack = decide(current, report).ack;
+                assert_eq!(
+                    ack,
+                    matches!(report, Report::Finished(_)),
+                    "{current:?} {report:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_states_ignore_reports() {
+        for current in ALL_STATES.into_iter().filter(|s| s.is_terminal()) {
+            for report in all_reports() {
+                assert_eq!(decide(current, report).to, None);
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_device_completion_report_produces_completed() {
+        for current in ALL_STATES {
+            for report in all_reports() {
+                if decide(current, report).to == Some(Completed) {
+                    assert_eq!(report, Report::Finished(Completed));
+                }
+            }
         }
     }
 

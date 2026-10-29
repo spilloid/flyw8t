@@ -21,6 +21,8 @@ pub struct Config {
     pub silence_grace: Duration,
     /// How long a job may wait for its device to connect before it expires unsent.
     pub delivery_window: Duration,
+    /// How long an offer may go unacknowledged on one connection before it is offered again.
+    pub redelivery_after: Duration,
     pub session_ttl: Duration,
 }
 
@@ -70,6 +72,7 @@ impl Config {
             sweep_interval: Duration::from_secs(5),
             silence_grace: Duration::from_secs(60),
             delivery_window: Duration::from_secs(15 * 60),
+            redelivery_after: Duration::from_secs(60),
             session_ttl: Duration::from_secs(12 * 60 * 60),
         }
     }

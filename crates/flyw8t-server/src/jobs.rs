@@ -9,7 +9,7 @@ use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
 use crate::Shared;
 use flyw8t_domain::evidence;
-use flyw8t_domain::job::{state_for_outcome, ExecState, Verification};
+use flyw8t_domain::job::{decide, state_for_outcome, ExecState, Report, Verification};
 use flyw8t_domain::Permission;
 use flyw8t_protocol::messages::{ExecOutcome, Finished, JobPhase, JobReport, NotAccepted};
 use flyw8t_protocol::{Action, ServerMsg};
@@ -312,8 +312,8 @@ pub enum Pass {
     /// A device just connected: also re-offer unacknowledged jobs and re-send pending
     /// cancels, since the previous connection may have lost them.
     NewConnection,
-    /// New or retryable work on an existing connection. Messages already written to a live
-    /// connection are not repeated: one WebSocket is ordered and reliable.
+    /// New or retryable work on an existing connection. An offer already written to this
+    /// connection is repeated only once it has gone unacknowledged for `redelivery_after`.
     NewWork,
 }
 
@@ -327,32 +327,43 @@ pub async fn dispatch_pending(state: &Shared, device_id: Uuid, pass: Pass) -> an
         "SELECT id FROM jobs
           WHERE device_id = $1 AND deliver_by > now()
             AND (state = 'queued'
-                 OR ($2 AND state = 'dispatched' AND cancel_requested_at IS NULL
-                     AND last_dispatch_conn IS DISTINCT FROM $3))
+                 OR (state = 'dispatched' AND cancel_requested_at IS NULL
+                     AND (($2 AND last_dispatch_conn IS DISTINCT FROM $3)
+                          OR last_dispatched_at <= now() - make_interval(secs => $4))))
           ORDER BY created_at",
     )
     .bind(device_id)
     .bind(pass == Pass::NewConnection)
     .bind(conn)
+    .bind(state.config.redelivery_after.as_secs_f64())
     .fetch_all(&state.db)
     .await?;
     for (id,) in ids {
         dispatch_one(state, id, conn).await?;
     }
-    if pass == Pass::NewWork {
-        return Ok(());
-    }
+    // Pending cancels: re-sent on a new connection, or after the redelivery interval. The
+    // agent answers a cancel for any job id, known or not, so repeating one is harmless.
     let cancels: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM jobs WHERE device_id = $1 AND cancel_requested_at IS NOT NULL
-            AND state IN ('dispatched', 'acknowledged', 'running', 'outcome_unknown')",
+            AND state IN ('dispatched', 'acknowledged', 'running', 'outcome_unknown')
+            AND ($2 OR last_cancel_sent_at IS NULL
+                 OR last_cancel_sent_at <= now() - make_interval(secs => $3))",
     )
     .bind(device_id)
+    .bind(pass == Pass::NewConnection)
+    .bind(state.config.redelivery_after.as_secs_f64())
     .fetch_all(&state.db)
     .await?;
     for (job_id,) in cancels {
-        state
+        if state
             .registry
-            .send(device_id, ServerMsg::JobCancel { job_id });
+            .send_on(device_id, conn, ServerMsg::JobCancel { job_id })
+        {
+            sqlx::query("UPDATE jobs SET last_cancel_sent_at = now() WHERE id = $1")
+                .bind(job_id)
+                .execute(&state.db)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -364,18 +375,24 @@ async fn dispatch_one(state: &Shared, job_id: Uuid, conn: Uuid) -> anyhow::Resul
     let Some(job) = lock(&mut tx, job_id).await? else {
         return Ok(());
     };
-    let (last_conn,): (Option<Uuid>,) =
-        sqlx::query_as("SELECT last_dispatch_conn FROM jobs WHERE id = $1")
-            .bind(job_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let (last_conn, stale): (Option<Uuid>, bool) = sqlx::query_as(
+        "SELECT last_dispatch_conn,
+                coalesce(last_dispatched_at <= now() - make_interval(secs => $2), true)
+           FROM jobs WHERE id = $1",
+    )
+    .bind(job_id)
+    .bind(state.config.redelivery_after.as_secs_f64())
+    .fetch_one(&mut *tx)
+    .await?;
     async fn record_conn(tx: &mut PgConnection, job_id: Uuid, conn: Uuid) -> sqlx::Result<()> {
-        sqlx::query("UPDATE jobs SET last_dispatch_conn = $2 WHERE id = $1")
-            .bind(job_id)
-            .bind(conn)
-            .execute(tx)
-            .await
-            .map(|_| ())
+        sqlx::query(
+            "UPDATE jobs SET last_dispatch_conn = $2, last_dispatched_at = now() WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(conn)
+        .execute(tx)
+        .await
+        .map(|_| ())
     }
     let action = job.action()?;
     let offer = ServerMsg::JobOffer {
@@ -423,7 +440,7 @@ async fn dispatch_one(state: &Shared, job_id: Uuid, conn: Uuid) -> anyhow::Resul
             }
         }
         ExecState::Dispatched
-            if last_conn != Some(conn)
+            if (last_conn != Some(conn) || stale)
                 && job.cancel_requested_at.is_none()
                 && state.registry.send_on(job.device_id, conn, offer) =>
         {
@@ -439,7 +456,7 @@ async fn dispatch_one(state: &Shared, job_id: Uuid, conn: Uuid) -> anyhow::Resul
                 None,
                 None,
                 "system",
-                json!({ "reason": "no acknowledgement on a previous connection" }),
+                json!({ "reason": if last_conn != Some(conn) { "not acknowledged on a previous connection" } else { "not acknowledged within the redelivery interval" } }),
             )
             .await?;
             tx.commit().await?;
@@ -483,180 +500,137 @@ pub async fn apply_report(
     };
     let actor = format!("device:{device_id}");
     let current = job.state();
-    let mut result = ReportResult::Stored;
-
-    match report.phase {
-        JobPhase::Accepted => match current {
-            ExecState::Dispatched => {
-                transition(
-                    &mut tx,
-                    &job,
-                    ExecState::Acknowledged,
-                    &actor,
+    let (reduced, detail, unchanged_kind) = match &report.phase {
+        JobPhase::Accepted => (Report::Accepted, json!({}), "acknowledged_again"),
+        JobPhase::NotAccepted { reason } => (
+            Report::NotAccepted {
+                busy: *reason == NotAccepted::Busy,
+            },
+            json!({ "reason": reason }),
+            "declined_late",
+        ),
+        JobPhase::Started { .. } => (Report::Started, json!({}), "started_report"),
+        JobPhase::Finished(f) => (
+            Report::Finished(state_for_outcome(&f.outcome)),
+            json!({ "outcome": f.outcome }),
+            "final_report_again",
+        ),
+    };
+    let decision = decide(current, reduced);
+    let mut job = job;
+    if decision.implied_dispatch {
+        transition(
+            &mut tx,
+            &job,
+            ExecState::Dispatched,
+            &actor,
+            "implied_dispatch",
+            json!({ "reason": "the device reported on a job recorded as queued" }),
+            Sets::default(),
+        )
+        .await?;
+        job.state = ExecState::Dispatched.as_str().into();
+    }
+    match decision.to {
+        None => {
+            let mut detail = detail;
+            detail["state"] = json!(current.as_str());
+            event(&mut tx, job.id, unchanged_kind, None, None, &actor, detail).await?;
+        }
+        Some(to) => {
+            let from = job.state();
+            let (kind, sets) = match report.phase {
+                JobPhase::Accepted => (
                     "acknowledged",
-                    json!({}),
                     Sets {
                         acknowledged: true,
                         ..Default::default()
                     },
-                )
-                .await?
-            }
-            _ => {
-                event(
-                    &mut tx,
-                    job.id,
-                    "acknowledged_again",
-                    None,
-                    None,
-                    &actor,
-                    json!({ "state": current.as_str() }),
-                )
-                .await?
-            }
-        },
-        JobPhase::NotAccepted { reason } => {
-            let detail = json!({ "reason": reason });
-            match (current, reason) {
-                (ExecState::Dispatched, NotAccepted::Busy) => {
-                    // Provably not run; the sweeper will offer it again.
-                    transition(
-                        &mut tx,
-                        &job,
-                        ExecState::Queued,
-                        &actor,
-                        "declined_busy",
-                        detail,
-                        Sets::default(),
-                    )
-                    .await?
+                ),
+                JobPhase::NotAccepted { .. } if to == ExecState::Queued => {
+                    ("declined_busy", Sets::default())
                 }
-                (ExecState::Dispatched | ExecState::OutcomeUnknown, _) => {
-                    let note = format!("The device declined the job ({reason:?}); it did not run.");
-                    transition(
-                        &mut tx,
-                        &job,
-                        ExecState::Failed,
-                        &actor,
-                        "declined",
-                        detail,
-                        Sets {
-                            state_note: Some(note),
-                            ..Default::default()
-                        },
-                    )
-                    .await?
-                }
-                _ => event(&mut tx, job.id, "declined_late", None, None, &actor, detail).await?,
-            }
-        }
-        JobPhase::Started { at } => match current {
-            ExecState::Dispatched | ExecState::Acknowledged => {
-                transition(
-                    &mut tx,
-                    &job,
-                    ExecState::Running,
-                    &actor,
+                JobPhase::NotAccepted { reason } => (
+                    "declined",
+                    Sets {
+                        state_note: Some(format!(
+                            "The device declined the job ({reason:?}); it did not run."
+                        )),
+                        ..Default::default()
+                    },
+                ),
+                JobPhase::Started { at } => (
                     "started",
-                    json!({}),
                     Sets {
                         started_at: Some(at),
                         acknowledged: true,
                         ..Default::default()
                     },
-                )
-                .await?
-            }
-            _ => {
-                event(
-                    &mut tx,
-                    job.id,
-                    "started_report",
-                    None,
-                    None,
-                    &actor,
-                    json!({ "state": current.as_str() }),
-                )
-                .await?
-            }
-        },
-        JobPhase::Finished(finished) => {
-            result = ReportResult::AckFinal;
-            let target = state_for_outcome(&finished.outcome);
-            let outcome = serde_json::to_value(&finished.outcome)?;
-            if current.is_terminal()
-                || (current == ExecState::OutcomeUnknown && target == ExecState::OutcomeUnknown)
-            {
-                event(
-                    &mut tx,
-                    job.id,
-                    "final_report_again",
-                    None,
-                    None,
-                    &actor,
-                    json!({ "outcome": outcome }),
-                )
-                .await?;
-            } else if target == ExecState::OutcomeUnknown {
-                let note = match &finished.outcome {
-                    ExecOutcome::Interrupted { reason } => reason.clone(),
-                    _ => "outcome unknown".into(),
-                };
-                transition(
-                    &mut tx,
-                    &job,
-                    ExecState::OutcomeUnknown,
-                    &actor,
-                    "interrupted",
-                    json!({ "outcome": outcome }),
-                    Sets {
-                        state_note: Some(note),
-                        finished: Some(*finished),
-                        ..Default::default()
-                    },
-                )
-                .await?;
-            } else {
-                let mut sets = Sets {
-                    finished: Some((*finished).clone()),
-                    acknowledged: true,
-                    ..Default::default()
-                };
-                let late = current == ExecState::OutcomeUnknown;
-                if target == ExecState::Completed {
-                    let verdict = evidence::evaluate(&job.action()?, &finished);
-                    sets.verification = Some(verdict.verification);
-                    sets.verification_note = Some(verdict.explanation);
-                    if verdict.verification == Verification::Verified {
-                        record_job_inventory(&mut tx, &job, &finished).await?;
-                    }
+                ),
+                JobPhase::Finished(finished) => {
+                    finished_sets(&mut tx, &job, from, to, *finished).await?
                 }
-                if late {
-                    sets.state_note = Some("Resolved by a result the device reported after the outcome was marked unknown.".into());
-                }
-                if let ExecOutcome::Cancelled { started } = finished.outcome {
-                    sets.state_note = Some(if started {
-                        "Cancelled while running; output is partial.".into()
-                    } else {
-                        "Cancelled before it started; it did not run.".into()
-                    });
-                }
-                let kind = if late { "resolved_late" } else { "finished" };
-                transition(
-                    &mut tx,
-                    &job,
-                    target,
-                    &actor,
-                    kind,
-                    json!({ "outcome": outcome }),
-                    sets,
-                )
-                .await?;
-            }
+            };
+            transition(&mut tx, &job, to, &actor, kind, detail, sets).await?;
         }
     }
     tx.commit().await?;
-    Ok(result)
+    Ok(if decision.ack {
+        ReportResult::AckFinal
+    } else {
+        ReportResult::Stored
+    })
+}
+
+/// Columns and event kind for a final report moving `from` -> `to`.
+async fn finished_sets(
+    tx: &mut PgConnection,
+    job: &JobCore,
+    from: ExecState,
+    to: ExecState,
+    finished: Finished,
+) -> anyhow::Result<(&'static str, Sets)> {
+    if to == ExecState::OutcomeUnknown {
+        let note = match &finished.outcome {
+            ExecOutcome::Interrupted { reason } => reason.clone(),
+            _ => "outcome unknown".into(),
+        };
+        return Ok((
+            "interrupted",
+            Sets {
+                state_note: Some(note),
+                finished: Some(finished),
+                ..Default::default()
+            },
+        ));
+    }
+    let late = from == ExecState::OutcomeUnknown;
+    let mut sets = Sets {
+        acknowledged: true,
+        ..Default::default()
+    };
+    if to == ExecState::Completed {
+        let verdict = evidence::evaluate(&job.action()?, &finished);
+        if verdict.verification == Verification::Verified {
+            record_job_inventory(tx, job, &finished).await?;
+        }
+        sets.verification = Some(verdict.verification);
+        sets.verification_note = Some(verdict.explanation);
+    }
+    if late {
+        sets.state_note = Some(
+            "Resolved by a result the device reported after the outcome was marked unknown.".into(),
+        );
+    }
+    if let ExecOutcome::Cancelled { started } = finished.outcome {
+        sets.state_note = Some(if started {
+            "Cancelled while running; output is partial.".into()
+        } else {
+            "Cancelled before it started; it did not run.".into()
+        });
+    }
+    sets.finished = Some(finished);
+    Ok((if late { "resolved_late" } else { "finished" }, sets))
 }
 
 async fn record_job_inventory(
@@ -733,7 +707,7 @@ pub async fn cancel(state: &Shared, p: &Principal, job_id: Uuid) -> AppResult<()
         )));
     }
     sqlx::query(
-        "UPDATE jobs SET cancel_requested_at = now(), cancel_requested_by = $2 WHERE id = $1",
+        "UPDATE jobs SET cancel_requested_at = now(), cancel_requested_by = $2, last_cancel_sent_at = now() WHERE id = $1",
     )
     .bind(job_id)
     .bind(p.user_id)

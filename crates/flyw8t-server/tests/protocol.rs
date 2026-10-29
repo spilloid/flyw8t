@@ -381,3 +381,54 @@ async fn newer_connection_supersedes_older() {
         .is_some());
     server.stop().await;
 }
+
+/// A device reports progress on a job the server records as `queued` (e.g. the database was
+/// restored from a backup taken before the dispatch committed). The server records the
+/// implied dispatch and accepts the evidence instead of rejecting it into a resend loop.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn report_for_job_recorded_as_queued_is_accepted_not_looped() {
+    let server = start_fresh().await;
+    let (admin, _org, agent) = enrolled(&server).await;
+    let mut raw = RawAgent::authenticate(&server, &agent).await;
+    let r = admin
+        .post(
+            &server,
+            &format!("/devices/{}/jobs", agent.device_id),
+            &[("action", "net.ipconfig")],
+        )
+        .await;
+    let job: Uuid = extract(&r.location(), r"/jobs/([0-9a-f-]{36})")
+        .unwrap()
+        .parse()
+        .unwrap();
+    raw.expect_offer().await;
+    sqlx::query("UPDATE jobs SET state = 'queued' WHERE id = $1")
+        .bind(job)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    raw.report(job, finished_exit0("Windows IP Configuration"))
+        .await;
+    let reply = next(&mut raw.ws).await;
+    assert!(
+        matches!(reply, ServerMsg::ReportAck { job_id } if job_id == job),
+        "got {reply:?}"
+    );
+    assert_eq!(
+        job_state(&server, job).await,
+        ("completed".into(), "verified".into())
+    );
+    assert!(event_kinds(&server, job)
+        .await
+        .contains(&"implied_dispatch".to_string()));
+    assert!(
+        server
+            .state
+            .registry
+            .connected_since(agent.device_id)
+            .is_some(),
+        "connection survives"
+    );
+    server.stop().await;
+}

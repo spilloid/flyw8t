@@ -159,15 +159,17 @@ CREATE TABLE jobs (
     queued_at            timestamptz,
     first_dispatched_at  timestamptz,
     dispatch_count       integer NOT NULL DEFAULT 0,
-    -- Server connection the latest offer was written to. Redelivery happens only on a
-    -- different connection: one WebSocket is ordered and reliable.
+    -- Connection and time of the latest offer. An unacknowledged offer is repeated on a new
+    -- connection, or on the same one after the redelivery interval (the agent deduplicates).
     last_dispatch_conn   uuid,
+    last_dispatched_at   timestamptz,
     acknowledged_at      timestamptz,
     started_at           timestamptz,   -- device clock
     finished_at          timestamptz,   -- device clock
     terminal_at          timestamptz,   -- server clock
     cancel_requested_at  timestamptz,
     cancel_requested_by  uuid REFERENCES users(id),
+    last_cancel_sent_at  timestamptz,
     exit_code            integer,
     stdout               text,
     stdout_truncated     boolean,

@@ -211,6 +211,13 @@ impl Agent {
                         running_jobs,
                     }).await?;
                     ws.send(Message::Ping(Vec::new().into())).await?;
+                    // A final report can be dropped on a live session (bounded event buffer).
+                    // Re-send every unacknowledged one; the server stores each idempotently.
+                    for report in self.journal.unreported() {
+                        if matches!(report.phase, JobPhase::Finished(_)) {
+                            send(&mut ws, &AgentMsg::Job(report)).await?;
+                        }
+                    }
                 }
                 _ = inventory_tick.tick() => {
                     let inventory = tokio::task::spawn_blocking(crate::collect::inventory).await?;
