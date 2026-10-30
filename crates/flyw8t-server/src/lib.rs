@@ -155,6 +155,8 @@ pub fn router(state: Shared) -> Router {
         .route("/support/{id}/end", post(support::end_handler))
         .route("/api/support/{id}/ws", get(support::technician_ws))
         .route("/api/support/participant/ws", get(support::participant_ws))
+        .route("/api/support/helper/ws", get(support::helper_ws))
+        .route("/s/helper/{file}", get(support::helper_download))
         .route("/s", get(support::entry_page).post(support::enter_code))
         .route(
             "/s/{invite}",

@@ -18,6 +18,8 @@ pub struct PageCtx {
     pub is_admin: bool,
     pub can_enroll: bool,
     pub can_support: bool,
+    /// May start sessions that include remote control (ADR-0012).
+    pub can_control: bool,
     pub flash: Option<Flash>,
 }
 
@@ -294,6 +296,8 @@ pub struct SupportInvite {
 #[derive(Debug, Clone)]
 pub struct SupportConsentView {
     pub session_id: Uuid,
+    /// The request includes remote control (the helper, ADR-0012).
+    pub control: bool,
     pub technician_name: String,
     pub technician_email: String,
     pub server_host: String,

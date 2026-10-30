@@ -34,6 +34,7 @@ For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pe
 | `FLYW8T_TLS_CERT`, `FLYW8T_TLS_KEY` | together | — | PEM chain and key for native TLS |
 | `FLYW8T_BOOTSTRAP_ADMIN_EMAIL`, `…_PASSWORD` | together | — | first administrator, created only while no users exist; password ≥ 12 characters |
 | `FLYW8T_REQUIRE_MFA` | no | `true` | every console user sets up two-step verification (TOTP) before reaching the console; `false` makes it optional per user |
+| `FLYW8T_HELPER_PATH` | no | — | the signed `flyw8t-helper.exe` offered to participants of remote-control sessions (ADR-0012). Without it, control sessions say the helper is not available; screen viewing is unaffected |
 | `RUST_LOG` | no | `info,sqlx=warn` | log filter |
 
 Migrations are embedded in the binary and applied at startup.

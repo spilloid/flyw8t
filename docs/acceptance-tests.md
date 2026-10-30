@@ -58,6 +58,7 @@ Beyond the milestone:
 | AT-39 | `support.js` fails closed and checks the committed certificate | `support_js` (Node.js; `crates/flyw8t-web/tests/support.test.mjs`) |
 | AT-40 | A real browser can sign in and post forms (Origin check vs referrer policy) | `two_browsers_pair_consent_and_share_a_tab` (signs in through the form) |
 | AT-41 | The console is installable as a mobile app: the manifest and every icon are served with their declared type and size; Chrome reports no installability errors | `the_console_is_installable_as_a_mobile_app`, `console_renders_cleanly_everywhere` |
+| AT-42 | Remote control (server): browser consent leads only to the helper step; launch tokens are single-use, expire, and are bound to the session; nothing relays before the helper's Allow; the browser page never relays; connected needs technician and helper; view sessions never issue tokens; control is permissioned | `control_needs_the_helper_and_its_own_consent`, `view_sessions_never_issue_a_helper_and_control_is_permissioned`, `helper_tokens_expire_and_unstarted_helpers_time_out`, `support_js` |
 
 ## Manual checks still owed
 

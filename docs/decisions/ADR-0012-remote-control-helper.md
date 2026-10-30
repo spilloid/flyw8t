@@ -19,7 +19,7 @@ It runs with the person's own rights. It cannot reach UAC prompts or the secure 
 
 ### 2. Pairing: a one-time launch token, bound to the consented session
 
-When the person allows control, the consent page asks the server for a **launch token**, which is:
+When the person allows control and downloads the helper, the server mints a **launch token** for that download (the download URL itself carries no secret, so nothing sensitive reaches proxy logs). The token is:
 - single-use and valid for 2 minutes;
 - bound to that participant's session and to the `control_input` capability;
 - stored as a hash.
@@ -69,7 +69,7 @@ Ending the session takes **Ctrl+Alt+Shift+S**, a combination no remote input can
 
 ## Build order
 
-1. Server: the `control_input` capability, launch tokens, the helper peer side, audit, and a migration. The domain state machine gains an `awaiting_helper` step.
+ 1. **Done (2026-10-30).** Server: the `control_input` capability (`RunControlSessions` permission), launch tokens, the helper peer side, audit, migration 0005, and the `awaiting_helper` state. The browser page offers the helper download (`FLYW8T_HELPER_PATH`); no helper binary exists yet.
 2. Helper: pairing, signaling, and WebRTC with a synthetic test pattern (no capture yet). An end-to-end test goes from browser technician to helper.
 3. Capture and encoding (Windows.Graphics.Capture and Media Foundation).
 4. Input: the data channel, `SendInput`, the indicator, and the hotkey.

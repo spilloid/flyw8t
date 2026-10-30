@@ -67,6 +67,7 @@ created ─► waiting ─► authorizing ─► connecting ─► connected ─
 | `created` | Recorded; invitation not yet issued (same transaction) | invitation issued | — |
 | `waiting` | Code and link valid; nobody has opened them | remote opens → `authorizing`; expiry → `expired`; technician ends → `revoked` | 10 min from creation |
 | `authorizing` | The remote participant is bound (the code is now spent) and sees the consent screen | Allow → `connecting`; Decline → `rejected`; expiry → `expired`; either ends → `revoked`/`closed` | 5 min |
+| `awaiting_helper` | Control sessions only: the browser allowed control; downloading the helper mints a 2-minute launch token; the helper must attach and be allowed in its own window | helper Allow → `connecting`; Decline (browser or helper) → `rejected`; technician ends → `revoked`; helper closes → `rejected`; timeout → `expired` | 5 min |
 | `connecting` | Consent given; WebRTC negotiating | both report media flowing → `connected`; failure or timeout → `connection_failed` | 60 s |
 | `connected` | Media flowing | either ends → `disconnecting`; transport lost → `connection_failed` | session cap 4 h |
 | `disconnecting` | Teardown in progress | → `closed` | 10 s |

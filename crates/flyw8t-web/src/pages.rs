@@ -1061,6 +1061,9 @@ pub fn support_list_page(
         }
         .into_any()
     };
+    let control_choice = ctx.can_control.then(|| view! {
+        <label class="inline"><input type="radio" name="capability" value="control"/>" View and control (needs the helper)"</label>
+    });
     let no_orgs = orgs.is_empty().then(|| view! { <p class="flash bad">"You are not assigned to any organization, so you cannot start a session. Ask an administrator."</p> });
     let org_options = orgs
         .into_iter()
@@ -1072,12 +1075,15 @@ pub fn support_list_page(
         {invite}
         <section class="card">
             <h2>"Start an attended session"</h2>
-            <p>"The person you are helping opens a link in their browser and chooses a tab, a window, or their screen to show you. "<strong>"You can see it. You cannot click, type, or control anything."</strong>" Nothing is installed, and the session ends when either of you ends it."</p>
+            <p>"The person you are helping opens a link in their browser and chooses a tab, a window, or their screen to show you. With "<strong>"view"</strong>" you can see it and nothing more. With "<strong>"control"</strong>" they also run the flyw8t helper and allow it there, and you can use their mouse and keyboard. Nothing is installed, and the session ends when either of you ends it."</p>
             <form method="post" action="/support" class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                 <label>"Organization"<select name="organization" required=true>{org_options}</select></label>
                 <label>"Who are you helping? (optional)"<input type="text" name="note" maxlength="200" placeholder="Front desk, printer issue"/></label>
-                <span class="badge neutral">"View screen (no control)"</span>
+                <fieldset class="inline"><legend>"Request"</legend>
+                    <label class="inline"><input type="radio" name="capability" value="view" checked=true/>" View screen"</label>
+                    {control_choice}
+                </fieldset>
                 <button type="submit">"Create invitation"</button>
             </form>
         </section>
@@ -1108,7 +1114,8 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
     let caps = s
         .capabilities
         .join(", ")
-        .replace("view_screen", "view screen (no control)");
+        .replace("view_screen", "view screen")
+        .replace("control_input", "keyboard and mouse (through the helper)");
     let data_state = if s.terminal { "ended" } else { s.state };
     // Only the technician who created the session receives its signaling. Anyone else allowed
     // to see it (an administrator) gets its state and an End button, and no script.
@@ -1201,17 +1208,52 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         .into_iter()
         .map(|c| view! { <li>{c}</li> })
         .collect_view();
-    let heading = format!("{} wants to see your screen", v.technician_name);
+    // A control request says so in the heading: it is not a screen-sharing request.
+    let heading = if v.control {
+        format!("{} wants to see and control your screen", v.technician_name)
+    } else {
+        format!("{} wants to see your screen", v.technician_name)
+    };
     let who = format!(
         "Requested by {} ({}), as known to {}.",
         v.technician_name, v.technician_email, v.server_host
     );
     let deciding = v.state == "authorizing";
+    let awaiting = v.state == "awaiting_helper";
+    let allow_label = if v.control {
+        "Allow, and get the flyw8t helper"
+    } else {
+        "Allow, and choose what to share"
+    };
+    let cannot = if v.control {
+        view! {
+            <ul>
+                <li>"Do anything before you also allow it in the helper\u{2019}s own window."</li>
+                <li>"Reach administrator (UAC) prompts or the sign-in screen."</li>
+                <li>"Keep access after you press Stop, end the session, or close the helper."</li>
+            </ul>
+        }
+        .into_any()
+    } else {
+        view! {
+            <ul>
+                <li>"Move your mouse, type, or click anything."</li>
+                <li>"See anything you do not choose in the next step."</li>
+                <li>"Keep access after you end the session or close this page."</li>
+            </ul>
+        }
+        .into_any()
+    };
+    let control = if v.control { "1" } else { "0" };
     participant_shell(
-        "Screen sharing request",
+        if v.control {
+            "Remote control request"
+        } else {
+            "Screen sharing request"
+        },
         true,
         view! {
-            <div id="support" data-role="participant" data-session=v.session_id.to_string() data-ice=ice_servers.to_string() data-state=v.state>
+            <div id="support" data-role="participant" data-session=v.session_id.to_string() data-ice=ice_servers.to_string() data-state=v.state data-control=control>
                 <h1>{heading}</h1>
                 <p>{who}</p>
                 // Live status and the way out come first, so ending is always one tap away.
@@ -1223,20 +1265,22 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
                         <strong>"Security code: "</strong><span id="sas" class="mono"></span>
                         <p class="muted">"Your technician should read you the same code. If it is different, end the session."</p>
                     </div>
+                    <div id="helper-box" class="card" hidden=!awaiting>
+                        <p><strong>"Next: run the flyw8t helper."</strong>" It opens a window that asks you once more, shows who is asking and a security code, and has a Stop button. It installs nothing."</p>
+                        <p><a id="helper-link" class="button" href="#">"Download the helper"</a></p>
+                        <p class="muted" id="helper-note">"The download works for two minutes. If it expires, decline and ask for a new session."</p>
+                        <button type="button" id="cancel-helper" class="bad">"Cancel"</button>
+                    </div>
                 </div>
                 <h2>"If you allow, they can"</h2>
                 <ul>{caps}</ul>
                 <h2>"They cannot"</h2>
-                <ul>
-                    <li>"Move your mouse, type, or click anything."</li>
-                    <li>"See anything you do not choose in the next step."</li>
-                    <li>"Keep access after you end the session or close this page."</li>
-                </ul>
+                {cannot}
                 <div id="decide" class="stack" hidden=!deciding>
-                    <button type="button" id="allow">"Allow, and choose what to share"</button>
+                    <button type="button" id="allow">{allow_label}</button>
                     <button type="button" id="decline" class="bad">"Decline"</button>
                 </div>
-                <noscript><p class="flash bad">"Sharing your screen needs JavaScript in this browser."</p></noscript>
+                <noscript><p class="flash bad">"This page needs JavaScript in this browser."</p></noscript>
             </div>
         },
     )
@@ -1440,6 +1484,7 @@ mod tests {
             is_admin: true,
             can_enroll: true,
             can_support: true,
+            can_control: true,
             flash: None,
         }
     }
