@@ -1,0 +1,4 @@
+[build]
+# Host toolchain may be GNU; the Windows agent ships as an MSVC binary (system C runtime,
+# conventional Authenticode signing). Linux builds (the server container, CI) pass --target.
+target = "x86_64-pc-windows-msvc"

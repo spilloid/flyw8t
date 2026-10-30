@@ -1,0 +1,7 @@
+/target
+*.pem
+*.key
+.env
+/deploy/compose/.env
+/agent-state/
+/docs/img/

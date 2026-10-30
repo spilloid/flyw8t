@@ -1,0 +1,47 @@
+[package]
+name = "flyw8t-server"
+description = "flyw8t control plane: agent gateway, job orchestration, web console and API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "flyw8t-server"
+path = "src/main.rs"
+
+[dependencies]
+flyw8t-protocol.workspace = true
+flyw8t-domain.workspace = true
+flyw8t-web.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ring.workspace = true
+base64.workspace = true
+hex.workspace = true
+rustls.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+sqlx.workspace = true
+argon2.workspace = true
+form_urlencoded = "1"
+
+[dev-dependencies]
+flyw8t-agent.workspace = true
+tokio-tungstenite.workspace = true
+rcgen.workspace = true
+tempfile = "3"
+proptest = "1"
+tower = { version = "0.5", features = ["util"] }
+regex-lite = "0.1"
