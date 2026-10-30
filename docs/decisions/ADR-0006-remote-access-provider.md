@@ -1,6 +1,6 @@
 # ADR-0006: Remote access behind a provider seam; MeshCentral first
 
-**Status:** accepted · **Date:** 2026-10-29
+**Status:** accepted for the provider seam; **superseded for remote control by [ADR-0013](ADR-0013-unattended-access.md)** (2026-10-30: our own engine, not MeshCentral) · **Date:** 2026-10-29
 
 ## Context
 

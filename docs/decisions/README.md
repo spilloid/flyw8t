@@ -15,4 +15,5 @@ Each ADR records one decision, the alternatives, and what would make us revisit 
 | [0009](ADR-0009-availability-and-scale-out.md) | Single instance now; documented path to multi-instance HA for a 99.99 % target | accepted (design) |
 | [0010](ADR-0010-attended-support.md) | Attended support: browser screen share via WebRTC with server signaling; consent-first native helper for remote control (approved 2026-10-30) | accepted |
 | [0011](ADR-0011-mobile-admin.md) | Mobile administration: the console as an installable mobile web app first, then a native client over the same API | accepted |
-| [0012](ADR-0012-remote-control-helper.md) | Attended remote control: a signed, uninstalled Rust helper; WebRTC media and an input data channel; two consents; Windows first | proposed |
+| [0012](ADR-0012-remote-control-helper.md) | Attended remote control: a signed, uninstalled Rust helper; WebRTC media and an input data channel; two consents; Windows first | accepted |
+| [0013](ADR-0013-unattended-access.md) | Unattended remote access on our own engine: per-device consent policy (notify with Stop by default), agent desktop component, Windows → X11 → macOS → Wayland | accepted |

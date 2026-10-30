@@ -1,6 +1,6 @@
 # ADR-0012: Attended remote control: the helper
 
-**Status:** proposed · **Date:** 2026-10-30 · Builds on [ADR-0010](ADR-0010-attended-support.md) (Phase C approved by the operator, D-0055)
+**Status:** accepted (design merged in #7; step 1 built in #9) · **Date:** 2026-10-30 · Builds on [ADR-0010](ADR-0010-attended-support.md) (Phase C approved by the operator, D-0055)
 
 ## Context
 

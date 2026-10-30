@@ -29,11 +29,15 @@ The minimum before flyw8t manages anything that matters:
 flyw8t stands alone (operator, 2026-10-30). Longer term it becomes a first-class RMM provider inside AnchorDesk, alongside Tactical, NinjaOne and Datto.
 
 
-- MeshCentral remote-access provider ([ADR-0006](decisions/ADR-0006-remote-access-provider.md)): device mapping, launch links, provider health shown honestly.
+- ~~MeshCentral remote-access provider~~: superseded by our own engine ([ADR-0013](decisions/ADR-0013-unattended-access.md)).
 - AnchorDesk `FlyweightProvider` + `FlyweightRunner` against `/api/v1` ([anchordesk-integration.md](anchordesk-integration.md)).
 - Attended support Phase B is already built (0.1).
 
-## 0.5: Attended remote control (approved 2026-10-30, ADR-0010)
+## 0.5: Remote control, attended and unattended (ADR-0012, ADR-0013)
+
+The `flyw8t-desktop` engine, proven through the attended helper, then the agent's desktop component for unattended access with per-device consent policy (default: notify with Stop). Platforms in order: Windows, Linux X11, macOS, Wayland. iOS and Android much later.
+
+### Attended first (approved 2026-10-30, ADR-0010)
 
 Design: [ADR-0012](decisions/ADR-0012-remote-control-helper.md) (proposed).
 
