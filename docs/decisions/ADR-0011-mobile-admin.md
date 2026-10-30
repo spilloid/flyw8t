@@ -1,6 +1,6 @@
 # ADR-0011: Mobile administration
 
-**Status:** proposed (goal accepted by the operator 2026-10-30, corporate-strategy D-0055; the approach below needs confirmation) · **Date:** 2026-10-30
+**Status:** accepted (goal and approach approved by the operator 2026-10-30, corporate-strategy D-0055; the native client still needs a separate cost approval) · **Date:** 2026-10-30
 
 ## Context
 
@@ -23,7 +23,7 @@ Today:
 | Effort | Small: manifest, icons, service worker for the shell, Web Push, touch-first layouts | Large: a second UI, API coverage for every console action, release pipelines |
 | Attended support from a phone | Viewing a shared screen works in mobile browsers | Same |
 
-## Proposed decision
+## Decision
 
 1. **First, the console becomes a first-class installable mobile web app.** It gets a web app manifest, touch-first layouts for the screens a technician needs on call (alerts, devices, run a diagnostic, jobs, support), and Web Push for findings and job outcomes. The service worker caches only the shell; data is never shown as current from a cache. No vendor accounts and nothing recurring.
 2. **Second, a native client, once the API covers every console action.** It would be built on the same `/api/v1` with device-bound, revocable, scoped tokens (STD-004's token plane), and it reuses the `flyw8t-protocol` and `flyw8t-domain` crates so outcome labels cannot drift from the server's. Store distribution and APNs/FCM involve recurring developer-account costs, so **that step needs the operator's approval** before it starts.

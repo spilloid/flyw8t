@@ -554,3 +554,60 @@ async fn cross_origin_posts_are_refused() {
     );
     server.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL (FLYW8T_TEST_DATABASE_URL)"]
+async fn the_console_is_installable_as_a_mobile_app() {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    let server = start_fresh().await;
+    let get = |p: &str| Request::get(p).body(Body::empty()).unwrap();
+    let m = server.request(get("/manifest.webmanifest")).await;
+    assert_eq!(m.status, StatusCode::OK);
+    assert_eq!(m.headers[header::CONTENT_TYPE], "application/manifest+json");
+    let manifest = m.json();
+    assert_eq!(manifest["display"], "standalone");
+    assert_eq!(manifest["start_url"], "/");
+    // Every icon the manifest names is served, with its declared type and, for PNGs, its
+    // declared size (read from the PNG header, not trusted from the file name).
+    let mut purposes = vec![];
+    for icon in manifest["icons"].as_array().unwrap() {
+        let r = server.request(get(icon["src"].as_str().unwrap())).await;
+        assert_eq!(r.status, StatusCode::OK, "{icon}");
+        assert_eq!(
+            r.headers[header::CONTENT_TYPE],
+            icon["type"].as_str().unwrap()
+        );
+        purposes.push(icon["purpose"].as_str().unwrap().to_string());
+    }
+    assert!(purposes.contains(&"maskable".to_string()));
+    // Sizes from the PNG headers (the test client returns bodies as text; read raw bytes).
+    // The served bodies come back as text here, so check the embedded PNGs directly.
+    for (name, _, bytes) in flyw8t_web::APP_ICONS
+        .iter()
+        .filter(|(_, t, _)| *t == "image/png")
+    {
+        assert_eq!(&bytes[1..4], b"PNG", "{name}");
+        let w = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let h = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        let want = name.trim_end_matches(".png").rsplit('-').next().unwrap();
+        let want: u32 = if *name == "apple-touch-icon.png" {
+            180
+        } else {
+            want.parse().unwrap()
+        };
+        assert_eq!((w, h), (want, want), "{name}");
+    }
+    assert_eq!(
+        server.request(get("/static/icons/nope.png")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    // Every page links the manifest, and the policy lets the browser fetch it.
+    let login = server.request(get("/login")).await;
+    assert!(login.body.contains(r#"rel="manifest""#));
+    let csp = login.headers[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("manifest-src 'self'"), "{csp}");
+    server.stop().await;
+}

@@ -2,6 +2,11 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## Unreleased
+
+### Added
+- The console installs to a phone's home screen as a standalone app (ADR-0011, accepted): web app manifest, regular and maskable icons, an Apple touch icon and a theme colour. `manifest-src 'self'` added to the content security policy. No script and no offline data.
+
 ## 0.1.0 — 2026-10-30 (pre-release)
 
 First vertical slice. **Not production-ready:** no OIDC or WebAuthn, no signed binaries; two cross-family review rounds on attended support and MFA are fixed, but the second round's fixes are not yet reviewed. See `docs/threat-model.md` § Open items.

@@ -57,6 +57,7 @@ Beyond the milestone:
 | AT-38 | Attended support hardening: creator-only attach, organization scope, link opening spends nothing, one session per browser, scheme-checked Origin, message flood cut off, race-free cap, reset ends live sessions | `only_the_creator_attaches_…`, `opening_a_link_spends_nothing_…`, `sockets_check_the_scheme_…`, `the_live_session_cap_…`, `resetting_a_technicians_sign_in_…` |
 | AT-39 | `support.js` fails closed and checks the committed certificate | `support_js` (Node.js; `crates/flyw8t-web/tests/support.test.mjs`) |
 | AT-40 | A real browser can sign in and post forms (Origin check vs referrer policy) | `two_browsers_pair_consent_and_share_a_tab` (signs in through the form) |
+| AT-41 | The console is installable as a mobile app: the manifest and every icon are served with their declared type and size; Chrome reports no installability errors | `the_console_is_installable_as_a_mobile_app`, `console_renders_cleanly_everywhere` |
 
 ## Manual checks still owed
 

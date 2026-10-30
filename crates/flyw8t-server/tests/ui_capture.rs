@@ -317,6 +317,26 @@ async fn console_renders_cleanly_everywhere() {
     }
 
     cdp.call("Network.setCookie", json!({"name": "flyw8t_session", "value": session_value, "url": base, "httpOnly": true, "sameSite": "Strict"})).await;
+
+    // Chrome itself judges the console installable (ADR-0011): it parsed the manifest and
+    // found usable icons. Errors here mean "Add to Home Screen" would not offer an app.
+    cdp.call("Page.navigate", json!({"url": format!("{base}/")}))
+        .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let manifest = cdp.call("Page.getAppManifest", json!({})).await;
+    let manifest_errors = &manifest["errors"];
+    if manifest_errors.as_array().is_none_or(|e| !e.is_empty()) {
+        failures.push(format!("manifest errors: {manifest_errors}"));
+    }
+    let install = cdp.call("Page.getInstallabilityErrors", json!({})).await;
+    eprintln!("installability: {install}");
+    if install["installabilityErrors"]
+        .as_array()
+        .is_none_or(|e| !e.is_empty())
+    {
+        failures.push(format!("not installable: {install}"));
+    }
+
     for (path, name) in &pages {
         for theme in THEMES {
             for (w, h, size) in SIZES {

@@ -14,4 +14,4 @@ Each ADR records one decision, the alternatives, and what would make us revisit 
 | [0008](ADR-0008-agent-updates.md) | No agent auto-update until manifests are signed by a key the server does not hold | accepted |
 | [0009](ADR-0009-availability-and-scale-out.md) | Single instance now; documented path to multi-instance HA for a 99.99 % target | accepted (design) |
 | [0010](ADR-0010-attended-support.md) | Attended support: browser screen share via WebRTC with server signaling; consent-first native helper for remote control (approved 2026-10-30) | accepted |
-| [0011](ADR-0011-mobile-admin.md) | Mobile administration: the console as an installable mobile web app first, then a native client over the same API | proposed |
+| [0011](ADR-0011-mobile-admin.md) | Mobile administration: the console as an installable mobile web app first, then a native client over the same API | accepted |

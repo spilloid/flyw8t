@@ -38,9 +38,10 @@ flyw8t stands alone (operator, 2026-10-30). Longer term it becomes a first-class
 - A signed, temporary Windows helper launched from the consent page: screen capture plus, after a **separate consent**, keyboard and mouse. It shows an always-visible indicator with Stop, persists nothing, never bypasses OS consent, and its input path is audited.
 - macOS and Linux (portal) helpers after Windows is proven.
 
-## Mobile administration (goal accepted 2026-10-30, ADR-0011)
+## Mobile administration (approved 2026-10-30, ADR-0011)
 
-- Next: the console as an installable mobile web app (manifest, touch-first on-call screens, Web Push for findings and job outcomes).
+- Done: the console installs to a phone's home screen (manifest, maskable icons, theme colour; Chrome confirms it installable in `ui_capture`). No script was needed.
+- Next: touch-first on-call screens, then Web Push for findings and job outcomes (VAPID keys only, no vendor account).
 - Later: a native client over `/api/v1`, after the operator approves the app-store and push-service costs.
 
 ## 0.6: Scripts, with consent and evidence

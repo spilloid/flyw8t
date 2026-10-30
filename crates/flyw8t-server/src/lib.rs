@@ -27,7 +27,7 @@ pub mod totp;
 pub mod web;
 
 use anyhow::Context;
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -163,6 +163,8 @@ pub fn router(state: Shared) -> Router {
         .route("/static/support.js", get(support_script))
         .route("/static/app.css", get(stylesheet))
         .route("/static/icon.svg", get(icon))
+        .route("/static/icons/{name}", get(app_icon))
+        .route("/manifest.webmanifest", get(manifest))
         .route("/favicon.ico", get(icon))
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
@@ -192,6 +194,31 @@ async fn icon() -> Response {
             (header::CACHE_CONTROL, "max-age=86400"),
         ],
         flyw8t_web::ICON_SVG,
+    )
+        .into_response()
+}
+
+async fn app_icon(Path(name): Path<String>) -> Response {
+    match flyw8t_web::APP_ICONS.iter().find(|(n, _, _)| *n == name) {
+        Some((_, ty, bytes)) => (
+            [
+                (header::CONTENT_TYPE, *ty),
+                (header::CACHE_CONTROL, "max-age=86400"),
+            ],
+            *bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn manifest() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/manifest+json"),
+            (header::CACHE_CONTROL, "max-age=3600"),
+        ],
+        flyw8t_web::MANIFEST,
     )
         .into_response()
 }
@@ -257,7 +284,7 @@ async fn security_headers(State(state): State<Shared>, req: Request, next: Next)
     set(
         h,
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; style-src 'self'; img-src 'self'; manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     );
     set(h, header::CACHE_CONTROL, "no-store");
     resp
