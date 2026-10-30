@@ -15,6 +15,8 @@ pub enum Nav {
     Support,
     Audit,
     Admin,
+    /// The signed-in user's own settings; reached from the name in the header.
+    Account,
 }
 
 fn render(view: impl IntoView + 'static) -> String {
@@ -93,7 +95,7 @@ fn shell_with(
                     <nav aria-label="Main">{nav}</nav>
                     <form class="logout" method="post" action="/logout">
                         <input type="hidden" name="csrf" value=csrf/>
-                        <span class="who">{user}</span>
+                        <a class="who" href="/account" title="Your account and two-step verification">{user}</a>
                         <button type="submit" class="link">"Sign out"</button>
                     </form>
                 </header>
@@ -886,6 +888,7 @@ pub fn admin_page(
                     <td data-label="User">{u.display_name.clone()}<div class="muted">{u.email.clone()}</div></td>
                     <td data-label="Role">{u.role.clone()}{u.disabled.then_some(" (disabled)")}</td>
                     <td data-label="Organizations">{if u.role == "admin" { "all".to_string() } else { u.organizations.join(", ") }}</td>
+                    <td data-label="Two-step">{mfa_cell(&u, &ctx.csrf)}</td>
                 </tr>
             }
         })
@@ -923,7 +926,7 @@ pub fn admin_page(
         <section>
             <h2>"Users"</h2>
             <table class="list">
-                <thead><tr><th scope="col">"User"</th><th scope="col">"Role"</th><th scope="col">"Organizations"</th></tr></thead>
+                <thead><tr><th scope="col">"User"</th><th scope="col">"Role"</th><th scope="col">"Organizations"</th><th scope="col">"Two-step"</th></tr></thead>
                 <tbody>{user_rows}</tbody>
             </table>
             <form method="post" action="/admin/users" class="card stack">
@@ -1197,6 +1200,189 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
             </div>
         },
     )
+}
+
+
+// ---------------------------------------------------------------------------------------
+// Two-step verification
+
+/// A QR code as one SVG path built from the module matrix: markup, not a script or an image
+/// resource, so it passes the console's `default-src 'none'` policy.
+fn qr_svg(data: &str) -> impl IntoView {
+    let Ok(code) = qrcode::QrCode::new(data.as_bytes()) else {
+        return view! { <p class="muted">"QR code unavailable; enter the key by hand."</p> }
+            .into_any();
+    };
+    let width = code.width();
+    let quiet = 4;
+    let mut d = String::new();
+    for (i, c) in code.to_colors().into_iter().enumerate() {
+        if c == qrcode::Color::Dark {
+            d.push_str(&format!(
+                "M{} {}h1v1h-1z",
+                i % width + quiet,
+                i / width + quiet
+            ));
+        }
+    }
+    let size = width + 2 * quiet;
+    let view_box = format!("0 0 {size} {size}");
+    view! {
+        <svg class="qr" viewBox=view_box role="img" aria-label="QR code for your authenticator app" shape-rendering="crispEdges">
+            <rect width="100%" height="100%" fill="#fff"/>
+            <path d=d fill="#000"/>
+        </svg>
+    }
+    .into_any()
+}
+
+/// A standalone card page, like sign-in, for steps before the console is reachable.
+fn card_page(title: &str, body: impl IntoView + 'static) -> String {
+    render(view! {
+        <html lang="en">
+            {head(format!("{title} · flyw8t"), None, false)}
+            <body class="login">
+                <main class="card narrow">{body}</main>
+            </body>
+        </html>
+    })
+}
+
+/// The second sign-in step: a code from the authenticator app, or a recovery code.
+pub fn mfa_challenge_page(csrf: String, error: Option<String>) -> String {
+    let err = error.map(|e| view! { <p class="flash bad" role="alert">{e}</p> });
+    card_page(
+        "Two-step verification",
+        view! {
+            <h1>"Two-step verification"</h1>
+            <p class="muted">"Enter the 6-digit code from your authenticator app."</p>
+            {err}
+            <form method="post" action="/login/mfa" class="stack">
+                <input type="hidden" name="csrf" value=csrf/>
+                <label>"Code"<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required=true autofocus=true maxlength="24" spellcheck="false"/></label>
+                <button type="submit">"Verify"</button>
+            </form>
+            <p class="muted">"Lost your device? Enter one of your recovery codes in the same box instead. Each works once."</p>
+            <p><a href="/login">"Sign in as someone else"</a></p>
+        },
+    )
+}
+
+pub fn mfa_setup_page(v: MfaSetupView) -> String {
+    let intro = if v.forced {
+        "This server requires two-step verification. Set it up now to continue."
+    } else {
+        "Add a second step to signing in."
+    };
+    let err = v
+        .error
+        .map(|e| view! { <p class="flash bad" role="alert">{e}</p> });
+    let cancel = (!v.forced).then(|| view! { <p><a href="/account">"Cancel"</a></p> });
+    card_page(
+        "Set up two-step verification",
+        view! {
+            <h1>"Set up two-step verification"</h1>
+            <p class="muted">{intro}</p>
+            {err}
+            <ol class="steps">
+                <li>"Scan this with an authenticator app (for example Aegis, 2FAS, Google Authenticator or a password manager)."</li>
+            </ol>
+            {qr_svg(&v.otpauth_uri)}
+            <p class="muted">"Can't scan? Enter this key for "<strong>{v.email}</strong>" (time-based, 6 digits, 30 seconds):"</p>
+            <pre class="output secret" id="totp-key">{v.secret}</pre>
+            <ol class="steps" start="2">
+                <li>"Enter the code the app shows to confirm it works."</li>
+            </ol>
+            <form method="post" action="/account/mfa" class="stack">
+                <input type="hidden" name="csrf" value=v.csrf/>
+                <label>"Code"<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required=true autofocus=true maxlength="12" spellcheck="false"/></label>
+                <button type="submit">"Turn on"</button>
+            </form>
+            {cancel}
+        },
+    )
+}
+
+/// Shown once, straight after the codes are made. Only their hashes are stored.
+pub fn recovery_codes_page(codes: Vec<String>, continue_href: &str) -> String {
+    let list = codes.join("\n");
+    let href = continue_href.to_string();
+    card_page(
+        "Recovery codes",
+        view! {
+            <h1>"Save your recovery codes"</h1>
+            <section class="reveal" role="alert">
+                <p><strong>"These are shown once."</strong>" Each one signs you in a single time if you lose your authenticator. Keep them somewhere safe, apart from your password."</p>
+                <pre class="output secret" id="recovery-codes">{list}</pre>
+            </section>
+            <p><a class="button" href=href>"I've saved them, continue"</a></p>
+        },
+    )
+}
+
+pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
+    let now = ctx.now;
+    let csrf = ctx.csrf.clone();
+    let mfa = match a.mfa_enabled_at {
+        Some(at) => {
+            let disable = (!a.require_mfa).then(|| {
+                view! {
+                    <form method="post" action="/account/mfa/disable" class="inline-form card">
+                        <input type="hidden" name="csrf" value=csrf.clone()/>
+                        <label>"Current code"<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required=true maxlength="12"/></label>
+                        <button type="submit" class="bad">"Turn off two-step verification"</button>
+                    </form>
+                }
+            });
+            let required = a.require_mfa.then(|| view! {
+                <p class="muted">"This server requires two-step verification, so it cannot be turned off here. If you lose your authenticator and your recovery codes, an administrator can reset it."</p>
+            });
+            view! {
+                <p><span class="badge good">"On"</span>" since "{time_cell(now, at)}". "{format!("{} unused recovery codes.", a.recovery_remaining)}</p>
+                <form method="post" action="/account/mfa/recovery-codes" class="inline-form card">
+                    <input type="hidden" name="csrf" value=csrf.clone()/>
+                    <label>"Current code"<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required=true maxlength="12"/></label>
+                    <button type="submit">"Replace recovery codes"</button>
+                </form>
+                {disable}
+                {required}
+            }
+            .into_any()
+        }
+        None => view! {
+            <p><span class="badge bad">"Off"</span>" Anyone with your password can sign in as you."</p>
+            <p><a class="button" href="/account/mfa">"Set up two-step verification"</a></p>
+        }
+        .into_any(),
+    };
+    let body = view! {
+        <h1>"Your account"</h1>
+        <dl class="facts">
+            <dt>"Name"</dt><dd>{a.display_name}</dd>
+            <dt>"Email"</dt><dd>{a.email}</dd>
+            <dt>"Role"</dt><dd>{ctx.role}</dd>
+        </dl>
+        <section>
+            <h2>"Two-step verification"</h2>
+            {mfa}
+        </section>
+    };
+    shell("Your account", ctx, Nav::Account, None, body)
+}
+
+fn mfa_cell(u: &UserRow, csrf: &str) -> impl IntoView {
+    if !u.mfa {
+        return view! { <span class="badge neutral">"Not set up"</span> }.into_any();
+    }
+    let url = format!("/admin/users/{}/mfa/reset", u.id);
+    view! {
+        <span class="badge good">"On"</span>
+        <form method="post" action=url class="inline-form">
+            <input type="hidden" name="csrf" value=csrf.to_string()/>
+            <button type="submit" class="link" title="Removes their authenticator and recovery codes and signs them out everywhere">"Reset"</button>
+        </form>
+    }
+    .into_any()
 }
 
 #[cfg(test)]

@@ -53,6 +53,7 @@ Beyond the milestone:
 | AT-34 | Attended support: consent before signaling, single-use invitation, clean end | `consented_session_relays_signaling_and_ends_cleanly` |
 | AT-35 | Attended support: access control, cross-site sockets, expiry, guess limits, decline, revoke | `access_control_and_cross_site_sockets`, `invitations_expire_and_guessing_is_limited`, `decline_and_technician_revocation` |
 | AT-36 | Attended support in real browsers: WebRTC media flows, matching security codes, honest ended state | `two_browsers_pair_consent_and_share_a_tab` (needs Chrome) |
+| AT-37 | Two-step verification: password alone reaches only set-up or the code page; session rotated; replay refused; recovery codes single-use; attempts limited; admin reset | `tests/mfa.rs` (four tests) |
 
 ## Manual checks still owed
 

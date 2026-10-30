@@ -49,9 +49,9 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 - **Residual:** a compromised device can lie about *its own* results and inventory. Verification checks evidence shape, not truth. Nothing inside a device can prove it is not compromised.
 
 ### T6: Compromised technician account
-- **Control:** Argon2id passwords (minimum 12 characters); login rate limits per IP and per email with a constant-time path for unknown users; sessions expire after 12 h and are revocable at sign-out; CSRF tokens on every form; every mutation audited with actor and credential.
-- **Evidence:** CSRF forgery test; audit assertions in `vertical_slice`.
-- **Residual: no MFA and no OIDC yet.** A phished password is full access within that user's scope. **This blocks production use.** There is no session list or force-logout UI yet.
+- **Control:** two-step verification (TOTP) required by default, with replay refusal, five wrong codes per partial session and ten per user per five minutes, single-use hashed recovery codes, and the session secret rotated when the second factor completes; Argon2id passwords (minimum 12 characters); login rate limits per IP and per email with a constant-time path for unknown users; sessions expire after 12 h and are revocable at sign-out; CSRF tokens on every form; every mutation audited with actor and credential.
+- **Evidence:** CSRF forgery test; audit assertions in `vertical_slice`; `tests/mfa.rs` (partial sessions shut out, replay refused, recovery codes single-use, attempts exhausted, admin reset), each mutation-checked.
+- **Residual:** TOTP is phishable in real time (a proxy that relays the code within 30 seconds); WebAuthn is the fix and is not built. TOTP secrets are stored unencrypted in PostgreSQL, so a database reader can mint codes (they can also read everything else; an application-held key would narrow this). `FLYW8T_REQUIRE_MFA=false` lets users opt out. No OIDC yet. No session list or force-logout UI beyond the administrator's MFA reset.
 
 ### T7: Fleet-wide abuse
 - **Control:** there is no fleet-wide or multi-device operation; one job targets one device. Actions are read-only.
@@ -96,7 +96,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 ## Open items before production
 
-1. MFA (TOTP/WebAuthn) and OIDC sign-in. **(blocking)**
+1. OIDC sign-in and WebAuthn. TOTP two-step verification is built and required by default (2026-10-29).
 2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Not yet done for attended support** (`support.rs`, `support.js`). **(blocking for support)**
 3. Authenticode-signed agent and server binaries; signed update manifests before any auto-update.
 4. Pin the server identity at enrollment.

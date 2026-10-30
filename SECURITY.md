@@ -10,7 +10,7 @@ Please include the version or commit, a description, and a reproduction against 
 
 ## Supported versions
 
-flyw8t is pre-1.0 and **not production-ready** (see `docs/threat-model.md` § Open items: no MFA/OIDC yet, unsigned binaries, attended support not yet independently reviewed). Fixes land on `main`.
+flyw8t is pre-1.0 and **not production-ready** (see `docs/threat-model.md` § Open items: no OIDC yet, unsigned binaries, attended support not yet independently reviewed). Fixes land on `main`.
 
 ## Design commitments
 

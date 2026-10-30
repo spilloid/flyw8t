@@ -199,7 +199,8 @@ pub async fn session_principal(
            FROM sessions s
            JOIN users u ON u.id = s.user_id
            LEFT JOIN user_organizations uo ON uo.user_id = u.id
-          WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.disabled_at IS NULL
+          WHERE s.token_hash = $1 AND s.stage = 'full' AND s.revoked_at IS NULL AND s.expires_at > now()
+            AND u.disabled_at IS NULL
           GROUP BY s.id, u.id"
     ))
     .bind(digest(raw))
@@ -269,18 +270,54 @@ pub async fn token_principal(state: &Shared, headers: &HeaderMap) -> AppResult<O
     .map(Some)
 }
 
+/// How far a browser session has got through sign-in. Only `Full` reaches the console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Password accepted; a second-factor code is owed.
+    Mfa,
+    /// Password accepted; MFA is required and this user must set it up first.
+    Enroll,
+    Full,
+}
+
+impl Stage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::Mfa => "mfa",
+            Stage::Enroll => "enroll",
+            Stage::Full => "full",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "mfa" => Some(Stage::Mfa),
+            "enroll" => Some(Stage::Enroll),
+            "full" => Some(Stage::Full),
+            _ => None,
+        }
+    }
+}
+
+/// A password-only session lives this long before the second factor must be finished.
+pub const PARTIAL_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Create a browser session; returns the `Set-Cookie` header value.
 pub async fn create_session(
     state: &Shared,
     user_id: Uuid,
     ip: &str,
     user_agent: &str,
+    stage: Stage,
 ) -> AppResult<String> {
     let secret = random_secret(32);
-    let ttl = state.config.session_ttl;
+    let ttl = match stage {
+        Stage::Full => state.config.session_ttl,
+        Stage::Mfa | Stage::Enroll => PARTIAL_SESSION_TTL,
+    };
     sqlx::query(
-        "INSERT INTO sessions (user_id, token_hash, csrf_token, expires_at, client_ip, user_agent)
-         VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5, $6)",
+        "INSERT INTO sessions (user_id, token_hash, csrf_token, expires_at, client_ip, user_agent, stage)
+         VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5, $6, $7)",
     )
     .bind(user_id)
     .bind(digest(&secret))
@@ -288,9 +325,82 @@ pub async fn create_session(
     .bind(ttl.as_secs_f64())
     .bind(ip)
     .bind(user_agent.chars().take(300).collect::<String>())
+    .bind(stage.as_str())
     .execute(&state.db)
     .await?;
     Ok(set_cookie(state, &secret, ttl.as_secs()))
+}
+
+/// Promote a partial session to a full one under a new secret and CSRF token, so a token
+/// seen before the second factor is worthless after it. Returns the `Set-Cookie` value.
+pub async fn promote_session(
+    state: &Shared,
+    exec: &mut sqlx::PgConnection,
+    session_id: Uuid,
+) -> AppResult<String> {
+    let secret = random_secret(32);
+    let ttl = state.config.session_ttl;
+    sqlx::query(
+        "UPDATE sessions SET token_hash = $2, csrf_token = $3, stage = 'full', pending_totp_secret = NULL,
+                mfa_attempts = 0, expires_at = now() + make_interval(secs => $4)
+          WHERE id = $1",
+    )
+    .bind(session_id)
+    .bind(digest(&secret))
+    .bind(random_secret(24))
+    .bind(ttl.as_secs_f64())
+    .execute(exec)
+    .await?;
+    Ok(set_cookie(state, &secret, ttl.as_secs()))
+}
+
+/// Any live session, at any stage, with what the second-factor pages need.
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub session_id: Uuid,
+    pub stage: Stage,
+    pub csrf: String,
+    pub user_id: Uuid,
+    pub email: String,
+    pub pending_secret: Option<Vec<u8>>,
+    pub totp_secret: Option<Vec<u8>>,
+}
+
+pub async fn any_session(state: &Shared, headers: &HeaderMap) -> AppResult<Option<SessionInfo>> {
+    let Some(raw) = cookie_value(headers, cookie_name(state)) else {
+        return Ok(None);
+    };
+    type Row = (
+        Uuid,
+        String,
+        String,
+        Uuid,
+        String,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT s.id, s.stage, s.csrf_token, u.id, u.email, s.pending_totp_secret, u.totp_secret
+           FROM sessions s JOIN users u ON u.id = s.user_id
+          WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()
+            AND u.disabled_at IS NULL",
+    )
+    .bind(digest(raw))
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((session_id, stage, csrf, user_id, email, pending_secret, totp_secret)) = row else {
+        return Ok(None);
+    };
+    Ok(Some(SessionInfo {
+        session_id,
+        stage: Stage::parse(&stage)
+            .ok_or_else(|| anyhow::anyhow!("bad session stage {stage:?}"))?,
+        csrf,
+        user_id,
+        email,
+        pending_secret,
+        totp_secret,
+    }))
 }
 
 pub fn set_cookie(state: &Shared, value: &str, max_age: u64) -> String {

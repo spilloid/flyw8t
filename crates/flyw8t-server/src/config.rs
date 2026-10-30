@@ -29,6 +29,8 @@ pub struct Config {
     /// Empty by default: LAN only, and no third party is contacted.
     pub ice_servers: String,
     pub session_ttl: Duration,
+    /// Every console user must set up a second factor before reaching the console.
+    pub require_mfa: bool,
 }
 
 impl Config {
@@ -60,6 +62,11 @@ impl Config {
             tls,
             bootstrap_admin,
             ice_servers: var("FLYW8T_ICE_SERVERS").unwrap_or_else(|| "[]".into()),
+            require_mfa: match var("FLYW8T_REQUIRE_MFA").as_deref() {
+                None | Some("true") => true,
+                Some("false") => false,
+                Some(other) => bail!("FLYW8T_REQUIRE_MFA must be true or false, not {other:?}"),
+            },
             ..Self::defaults()
         };
         cfg.validate()?;
@@ -82,6 +89,7 @@ impl Config {
             support_invite_ttl: Duration::from_secs(10 * 60),
             ice_servers: "[]".into(),
             session_ttl: Duration::from_secs(12 * 60 * 60),
+            require_mfa: true,
         }
     }
 

@@ -11,7 +11,7 @@ docker compose up -d --build
 docker compose logs -f server
 ```
 
-Open `http://localhost:8080`, sign in as the bootstrap administrator, then remove `FLYW8T_BOOTSTRAP_ADMIN_*` from `.env` (it is only used while no users exist, but it should not linger).
+Open `http://localhost:8080`, sign in as the bootstrap administrator (you will be asked to set up an authenticator app and to save recovery codes), then remove `FLYW8T_BOOTSTRAP_ADMIN_*` from `.env` (it is only used while no users exist, but it should not linger).
 
 By default the server publishes on **127.0.0.1 only** and the database is not published at all.
 
@@ -33,6 +33,7 @@ For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pe
 | `FLYW8T_BIND` | no | `127.0.0.1:8080` (image: `0.0.0.0:8080`) | listen address |
 | `FLYW8T_TLS_CERT`, `FLYW8T_TLS_KEY` | together | — | PEM chain and key for native TLS |
 | `FLYW8T_BOOTSTRAP_ADMIN_EMAIL`, `…_PASSWORD` | together | — | first administrator, created only while no users exist; password ≥ 12 characters |
+| `FLYW8T_REQUIRE_MFA` | no | `true` | every console user sets up two-step verification (TOTP) before reaching the console; `false` makes it optional per user |
 | `RUST_LOG` | no | `info,sqlx=warn` | log filter |
 
 Migrations are embedded in the binary and applied at startup.

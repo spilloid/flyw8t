@@ -17,11 +17,13 @@ pub mod error;
 pub mod gateway;
 pub mod jobs;
 pub mod metrics;
+pub mod mfa;
 pub mod queries;
 pub mod ratelimit;
 pub mod registry;
 pub mod remote_access;
 pub mod support;
+pub mod totp;
 pub mod web;
 
 use anyhow::Context;
@@ -112,6 +114,11 @@ pub fn router(state: Shared) -> Router {
     Router::new()
         .route("/login", get(web::login_form).post(web::login))
         .route("/logout", post(web::logout))
+        .route("/login/mfa", get(mfa::challenge_form).post(mfa::challenge))
+        .route("/account", get(mfa::account))
+        .route("/account/mfa", get(mfa::setup_form).post(mfa::setup))
+        .route("/account/mfa/recovery-codes", post(mfa::regenerate_codes))
+        .route("/account/mfa/disable", post(mfa::disable))
         .route("/", get(web::overview))
         .route("/devices", get(web::devices))
         .route("/devices/{id}", get(web::device))
@@ -137,6 +144,7 @@ pub fn router(state: Shared) -> Router {
         .route("/audit", get(web::audit))
         .route("/admin", get(web::admin))
         .route("/admin/users", post(web::create_user))
+        .route("/admin/users/{id}/mfa/reset", post(mfa::admin_reset))
         .route("/admin/tokens", post(web::create_api_token))
         .route("/admin/tokens/{id}/revoke", post(web::revoke_api_token))
         .route(

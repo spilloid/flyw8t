@@ -2,7 +2,7 @@
 //! CSRF token, answered with a redirect.
 
 use crate::audit::Audit;
-use crate::auth::{self, Principal, WebUser};
+use crate::auth::{self, Principal, Stage, WebUser};
 use crate::error::{AppError, AppResult};
 use crate::jobs::{self, NewJob};
 use crate::queries::{self, JobQuery};
@@ -45,7 +45,7 @@ impl Form {
     }
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -74,7 +74,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
 }
 
 /// Fixed flash messages selected by code, so a URL cannot inject arbitrary text.
-fn flash(code: Option<&str>) -> Option<Flash> {
+pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
     let (ok, message) = match code? {
         "job-cancelled" => (true, "Cancellation recorded."),
         "org-created" => (true, "Organization created."),
@@ -82,6 +82,9 @@ fn flash(code: Option<&str>) -> Option<Flash> {
         "token-revoked" => (true, "Token revoked."),
         "user-created" => (true, "User created."),
         "device-revoked" => (true, "Device credential revoked and its connection closed."),
+        "mfa-reset" => (true, "Two-step verification reset. That user was signed out everywhere and sets it up again at next sign-in."),
+        "mfa-disabled" => (true, "Two-step verification turned off."),
+        "codes-regenerated" => (true, "New recovery codes issued; the old ones no longer work."),
         _ => return None,
     };
     Some(Flash {
@@ -92,7 +95,7 @@ fn flash(code: Option<&str>) -> Option<Flash> {
 
 #[derive(Deserialize, Default)]
 pub struct MsgQuery {
-    m: Option<String>,
+    pub(crate) m: Option<String>,
 }
 
 pub fn error_response(ctx: Option<&PageCtx>, e: AppError) -> Response {
@@ -105,18 +108,18 @@ pub fn error_response(ctx: Option<&PageCtx>, e: AppError) -> Response {
         .into_response()
 }
 
-async fn page<F: Future<Output = AppResult<Response>>>(p: &Principal, f: F) -> Response {
+pub(crate) async fn page<F: Future<Output = AppResult<Response>>>(p: &Principal, f: F) -> Response {
     match f.await {
         Ok(r) => r,
         Err(e) => error_response(Some(&ctx(p, None)), e),
     }
 }
 
-fn html(s: String) -> AppResult<Response> {
+pub(crate) fn html(s: String) -> AppResult<Response> {
     Ok(Html(s).into_response())
 }
 
-fn to(path: impl AsRef<str>) -> AppResult<Response> {
+pub(crate) fn to(path: impl AsRef<str>) -> AppResult<Response> {
     Ok(Redirect::to(path.as_ref()).into_response())
 }
 
@@ -170,8 +173,8 @@ pub async fn login(
             false,
         );
     }
-    let user: Option<(Uuid, String, bool)> = match sqlx::query_as(
-        "SELECT id, password_hash, disabled_at IS NOT NULL FROM users WHERE email = $1",
+    let user: Option<(Uuid, String, bool, bool)> = match sqlx::query_as(
+        "SELECT id, password_hash, disabled_at IS NOT NULL, totp_enabled_at IS NOT NULL FROM users WHERE email = $1",
     )
     .bind(&email)
     .fetch_optional(&state.db)
@@ -181,14 +184,14 @@ pub async fn login(
         Err(e) => return error_response(None, e.into()),
     };
     let ok = match &user {
-        Some((_, hash, disabled)) => auth::verify_password(hash, password) && !disabled,
+        Some((_, hash, disabled, _)) => auth::verify_password(hash, password) && !disabled,
         None => {
             auth::burn_password_check(password);
             false
         }
     };
     let audit = Audit::anonymous("web", email.clone(), "user.login").ip(&ip);
-    let Some((user_id, _, _)) = user.filter(|_| ok) else {
+    let Some((user_id, _, _, has_totp)) = user.filter(|_| ok) else {
         let _ = audit.denied().record(&state.db).await;
         return fail(
             StatusCode::UNAUTHORIZED,
@@ -200,10 +203,27 @@ pub async fn login(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    match auth::create_session(&state, user_id, &ip, ua).await {
+    // The password alone reaches the console only when MFA is neither set up nor required.
+    let (stage, next) = if has_totp {
+        (Stage::Mfa, "/login/mfa")
+    } else if state.config.require_mfa {
+        (Stage::Enroll, "/account/mfa")
+    } else {
+        (Stage::Full, "/")
+    };
+    match auth::create_session(&state, user_id, &ip, ua, stage).await {
         Ok(cookie) => {
-            let _ = audit.target("user", user_id).record(&state.db).await;
-            ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
+            let audit = audit.target("user", user_id);
+            let audit = if stage == Stage::Full {
+                audit
+            } else {
+                Audit::anonymous("web", email.clone(), "user.login.password")
+                    .ip(&ip)
+                    .target("user", user_id)
+                    .detail(json!({ "next": stage.as_str() }))
+            };
+            let _ = audit.record(&state.db).await;
+            ([(header::SET_COOKIE, cookie)], Redirect::to(next)).into_response()
         }
         Err(e) => error_response(None, e),
     }

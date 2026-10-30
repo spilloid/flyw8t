@@ -214,6 +214,8 @@ pub struct UserRow {
     pub role: String,
     pub organizations: Vec<String>,
     pub disabled: bool,
+    /// Two-step verification is set up.
+    pub mfa: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -292,4 +294,26 @@ pub struct SupportConsentView {
     pub capabilities: Vec<String>,
     pub state: &'static str,
     pub state_label: &'static str,
+}
+
+/// Setting up an authenticator app: the secret, shown once, until a code confirms it.
+#[derive(Debug, Clone)]
+pub struct MfaSetupView {
+    pub csrf: String,
+    pub email: String,
+    /// Base32 secret, for typing into an app that cannot scan.
+    pub secret: String,
+    pub otpauth_uri: String,
+    /// MFA is required and this user has not reached the console yet.
+    pub forced: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountView {
+    pub email: String,
+    pub display_name: String,
+    pub mfa_enabled_at: Option<OffsetDateTime>,
+    pub recovery_remaining: i64,
+    pub require_mfa: bool,
 }

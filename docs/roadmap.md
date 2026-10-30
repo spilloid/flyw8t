@@ -10,7 +10,7 @@ One working vertical slice: enroll a Windows device, run allowlisted read-only d
 
 The minimum before flyw8t manages anything that matters:
 
-- **MFA** (TOTP, then WebAuthn) and **OIDC** sign-in (STD-004: local + OIDC + PAT planes). Authentik as the reference IdP.
+- ~~TOTP two-step verification~~ (built 2026-10-29, required by default). **WebAuthn** and **OIDC** sign-in (STD-004: local + OIDC + PAT planes). Authentik as the reference IdP.
 - Cross-family adversarial review of the gateway, journal and orchestrator (STD-001), with findings fixed.
 - Run the Windows service install path for real; Authenticode-sign the agent (Azure Artifact Signing, as netviz/PortGlass/tuldMi do).
 - Run Compose for real, then document and **rehearse** backup and restore.

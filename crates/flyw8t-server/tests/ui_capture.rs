@@ -194,6 +194,8 @@ async fn console_renders_cleanly_everywhere() {
         ("/audit".into(), "audit"),
         ("/admin".into(), "admin"),
         ("/support".into(), "support"),
+        ("/account".into(), "account"),
+        ("/account/mfa".into(), "mfa-setup"),
         (
             "/devices/00000000-0000-0000-0000-000000000000".into(),
             "not-found",
@@ -331,9 +333,17 @@ async fn console_renders_cleanly_everywhere() {
                 cdp.call("Page.navigate", json!({"url": format!("{base}{path}")}))
                     .await;
                 tokio::time::sleep(Duration::from_millis(400)).await;
-                let signed_in = cdp.eval("!!document.querySelector('header.top')").await;
+                // Set-up is a standalone card (it also serves sessions not yet in the console).
+                let marker = if *name == "mfa-setup" {
+                    "#totp-key"
+                } else {
+                    "header.top"
+                };
+                let signed_in = cdp
+                    .eval(&format!("!!document.querySelector('{marker}')"))
+                    .await;
                 if signed_in != Value::Bool(true) {
-                    failures.push(format!("{name}: rendered without the signed-in frame"));
+                    failures.push(format!("{name}: rendered without {marker}"));
                 }
                 let overflow = cdp
                     .eval("document.documentElement.scrollWidth > window.innerWidth")

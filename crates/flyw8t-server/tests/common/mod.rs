@@ -62,6 +62,8 @@ pub fn test_config(database_url: &str) -> Config {
         heartbeat_secs: 5,
         sweep_interval: Duration::from_millis(200),
         silence_grace: Duration::from_secs(1),
+        // MFA has its own suite (tests/mfa.rs); the rest sign in with a password alone.
+        require_mfa: false,
         ..Config::defaults()
     }
 }
@@ -139,20 +141,23 @@ impl TestServer {
             "login failed: {}",
             resp.body
         );
-        let cookie = resp.headers[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
+        self.browser(resp.cookie().expect("session cookie")).await
+    }
+
+    /// A browser holding `cookie`, which must be a full session: the console must load.
+    pub async fn browser(&self, cookie: String) -> Browser {
         let mut b = Browser {
             server_state: self.state.clone(),
             cookie,
             csrf: String::new(),
         };
         let home = b.get(self, "/").await;
-        assert_eq!(home.status, StatusCode::OK);
+        assert_eq!(
+            home.status,
+            StatusCode::OK,
+            "console did not load: {}",
+            home.location()
+        );
         b.csrf = extract(&home.body, r#"name="csrf" value="([^"]+)""#).expect("csrf token on page");
         b
     }
@@ -199,6 +204,12 @@ impl Response {
             .get(header::LOCATION)
             .map(|v| v.to_str().unwrap().to_string())
             .unwrap_or_default()
+    }
+    /// The `name=value` part of the `Set-Cookie` header, if any.
+    pub fn cookie(&self) -> Option<String> {
+        self.headers
+            .get(header::SET_COOKIE)
+            .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
     }
     pub fn json(&self) -> serde_json::Value {
         serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("not JSON ({e}): {}", self.body))
