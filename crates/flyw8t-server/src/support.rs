@@ -1292,7 +1292,15 @@ async fn run_socket(state: Shared, socket: WebSocket, id: Uuid, side: Side, who:
             }
             frame = stream.next() => {
                 if !bucket.take() {
+                    // Say why, close cleanly, and drain what the client already sent: dropping
+                    // a socket with unread input resets it, and the reset can discard the
+                    // explanation before the client reads it.
                     let _ = tokio::time::timeout(Duration::from_secs(1), sink.send(text(&Out::Error { message: "too many messages".into() }))).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(1), sink.send(Message::Close(None))).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                        while let Some(Ok(_)) = stream.next().await {}
+                    })
+                    .await;
                     break;
                 }
                 let text = match frame {
