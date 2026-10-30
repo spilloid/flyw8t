@@ -291,6 +291,12 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
     }
     let seen = cdp.eval(&part, "JSON.stringify({state: document.getElementById('state')?.textContent, error: document.getElementById('error')?.textContent, data: document.getElementById('support')?.dataset.state})").await;
     eprintln!("participant after Allow: {seen}");
+    if seen.as_str().is_some_and(|s| s.contains("Nothing was shared")) {
+        let probe = cdp
+            .call(Some(&part), "Runtime.evaluate", json!({"expression": "navigator.mediaDevices.getDisplayMedia({video: true}).then(s => 'ok ' + s.getTracks().length, e => e.name + ': ' + e.message)", "awaitPromise": true, "userGesture": true}))
+            .await;
+        eprintln!("direct getDisplayMedia: {}", probe["result"]["value"]);
+    }
     cdp.wait_for(
         &tech,
         "media to connect",
