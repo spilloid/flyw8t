@@ -1,0 +1,63 @@
+name: release
+
+# A pushed tag `vX.Y.Z` builds the server and agent for Windows and Linux and publishes them,
+# with SHA-256 sums, as a GitHub pre-release whose notes are that version's CHANGELOG section.
+# Binaries are not code-signed yet (docs/threat-model.md § Open items).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p flyw8t-server -p flyw8t-agent
+      - name: Collect binaries
+        shell: bash
+        run: |
+          mkdir dist
+          for b in flyw8t-server flyw8t-agent; do
+            cp "target/${{ matrix.target }}/release/$b${{ matrix.ext }}" "dist/$b-${GITHUB_REF_NAME}-${{ matrix.target }}${{ matrix.ext }}"
+          done
+      - uses: actions/upload-artifact@v5
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Notes from CHANGELOG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$0 ~ "^## " v " " {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for $version"; exit 1; }
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --prerelease --verify-tag --title "flyw8t $GITHUB_REF_NAME (pre-release)" --notes-file notes.md
