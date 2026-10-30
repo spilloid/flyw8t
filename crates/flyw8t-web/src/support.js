@@ -117,7 +117,15 @@
   async function securityCheck(conn, mine0) {
     const transport = mediaTransport();
     if (!transport) { refuseTopology(); return; }
-    const remote = transport.getRemoteCertificates ? transport.getRemoteCertificates() : [];
+    // The certificate can lag the "connected" event by a moment; wait briefly before saying
+    // this browser cannot show a code.
+    const certificates = () => (transport.getRemoteCertificates ? transport.getRemoteCertificates() : []);
+    let remote = certificates();
+    for (let i = 0; !remote.length && transport.getRemoteCertificates && i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (stale(conn, mine0)) return;
+      remote = certificates();
+    }
     if (!remote.length) {
       root.dataset.sas = 'unavailable';
       setText('sas', 'not available in this browser');

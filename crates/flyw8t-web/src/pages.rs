@@ -34,6 +34,11 @@ fn head(title: String, refresh: Option<u32>, script: bool) -> impl IntoView {
             {refresh.map(|s| view! { <meta http-equiv="refresh" content=s.to_string()/> })}
             <title>{title}</title>
             <link rel="icon" href="/static/icon.svg" type="image/svg+xml"/>
+            <link rel="manifest" href="/manifest.webmanifest"/>
+            <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png"/>
+            <meta name="theme-color" content="#2456c7"/>
+            <meta name="mobile-web-app-capable" content="yes"/>
+            <meta name="apple-mobile-web-app-title" content="flyw8t"/>
             <link rel="stylesheet" href="/static/app.css"/>
             {script.then(|| view! { <script src="/static/support.js" defer=true></script> })}
         </head>

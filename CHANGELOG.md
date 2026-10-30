@@ -4,7 +4,11 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## Unreleased
 
+### Added
+- The console installs to a phone's home screen as a standalone app (ADR-0011, accepted): web app manifest, regular and maskable icons, an Apple touch icon and a theme colour. `manifest-src 'self'` added to the content security policy. No script and no offline data.
+
 ### Fixed
+- The attended-support security code no longer falls back to "not available" when the browser reports the DTLS certificate a moment after the connection (seen intermittently on Linux CI).
 - A device that reconnected while its previous connection was still being set up could lose its new connection to the old one, leaving it on a stale connection. Connections are now ordered by authentication, and the newest always wins (found by Linux CI; this was the protocol-suite flake open since 0.1 development).
 
 ## 0.1.0 — 2026-10-30 (pre-release)

@@ -352,7 +352,10 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         sas_tech, sas_part,
         "both sides derive the same security code"
     );
-    assert!(sas_tech.as_str().unwrap().len() == 7);
+    assert!(
+        sas_tech.as_str().is_some_and(|s| s.len() == 7),
+        "a six-digit code on both pages: {sas_tech}"
+    );
     // The code came from the certificates in use, and the participant checked the technician's
     // commitment (a mismatch ends the session instead; tests/support.test.mjs).
     for tab in [&tech, &part] {

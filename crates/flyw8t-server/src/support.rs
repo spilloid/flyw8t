@@ -50,7 +50,7 @@ const GLOBAL_CODE_KEY: &str = "support-code-global";
 /// CSP for the support pages: the console's policy plus same-origin script and WebSocket.
 pub const SUPPORT_CSP: &str =
     "default-src 'none'; script-src 'self'; connect-src 'self'; media-src 'self' blob:; \
-     style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+     style-src 'self'; img-src 'self'; manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {

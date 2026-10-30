@@ -18,3 +18,36 @@ pub const SUPPORT_JS: &str = include_str!("support.js");
 
 /// Icon served at `/static/icon.svg` and `/favicon.ico`.
 pub const ICON_SVG: &str = include_str!("icon.svg");
+
+/// Web app manifest, served at `/manifest.webmanifest`: makes the console installable on a
+/// phone's home screen (ADR-0011). It names only static assets; no data is cached.
+pub const MANIFEST: &str = include_str!("manifest.webmanifest");
+
+/// Home-screen icons, served at `/static/icons/<name>`.
+pub const APP_ICONS: &[(&str, &str, &[u8])] = &[
+    (
+        "icon-192.png",
+        "image/png",
+        include_bytes!("icons/icon-192.png"),
+    ),
+    (
+        "icon-512.png",
+        "image/png",
+        include_bytes!("icons/icon-512.png"),
+    ),
+    (
+        "icon-maskable-512.png",
+        "image/png",
+        include_bytes!("icons/icon-maskable-512.png"),
+    ),
+    (
+        "apple-touch-icon.png",
+        "image/png",
+        include_bytes!("icons/apple-touch-icon.png"),
+    ),
+    (
+        "icon-maskable.svg",
+        "image/svg+xml",
+        include_bytes!("icons/icon-maskable.svg"),
+    ),
+];
