@@ -42,7 +42,7 @@ jobs:
           node-version: 22
       - run: rustup show
       - run: cargo clippy --workspace --all-targets --target $TARGET -- -D warnings
-      - run: cargo test --workspace --target $TARGET -- --include-ignored --skip console_renders_cleanly_everywhere
+      - run: cargo test --workspace --target $TARGET -- --include-ignored --skip console_renders_cleanly_everywhere --nocapture
       - name: STD-008 UI capture (headless Chrome)
         run: cargo test -p flyw8t-server --test ui_capture --target $TARGET -- --ignored
       - uses: actions/upload-artifact@v5
