@@ -6,6 +6,7 @@
 
 use flyw8t_protocol::ServerMsg;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
@@ -15,6 +16,9 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct Conn {
     pub conn_id: Uuid,
+    /// Order of authentication (`Registry::next_seq`), taken before any await, so a slow
+    /// older connection cannot displace a newer one that registered first.
+    pub seq: u64,
     pub since: OffsetDateTime,
     pub tx: mpsc::Sender<ServerMsg>,
     pub close: CancellationToken,
@@ -26,11 +30,24 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// A number that orders connections by when they authenticated.
+    pub fn next_seq() -> u64 {
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Register a connection; any older connection for the same device is told to close.
-    pub fn register(&self, device_id: Uuid, conn: Conn) {
-        if let Some(old) = self.conns.lock().unwrap().insert(device_id, conn) {
+    /// Returns `false`, registering nothing, if a newer connection is already registered:
+    /// the newest authentication always wins, whatever order the registrations arrive in.
+    pub fn register(&self, device_id: Uuid, conn: Conn) -> bool {
+        let mut conns = self.conns.lock().unwrap();
+        if conns.get(&device_id).is_some_and(|cur| cur.seq > conn.seq) {
+            return false;
+        }
+        if let Some(old) = conns.insert(device_id, conn) {
             old.close.cancel();
         }
+        true
     }
 
     /// Remove the device's entry only if it is still this connection.
@@ -88,5 +105,49 @@ impl Registry {
         if let Some(c) = self.conns.lock().unwrap().remove(&device_id) {
             c.close.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn(seq: u64) -> Conn {
+        let (tx, _rx) = mpsc::channel(1);
+        Conn {
+            conn_id: Uuid::new_v4(),
+            seq,
+            since: OffsetDateTime::now_utc(),
+            tx,
+            close: CancellationToken::new(),
+        }
+    }
+
+    #[test]
+    fn the_newest_authentication_wins_in_any_registration_order() {
+        let r = Registry::default();
+        let d = Uuid::new_v4();
+        let (older, newer) = (conn(1), conn(2));
+        let (older_close, newer_close) = (older.close.clone(), newer.close.clone());
+        let newer_id = newer.conn_id;
+        // The newer connection registers first; the older one arrives late.
+        assert!(r.register(d, newer));
+        assert!(
+            !r.register(d, older),
+            "a late, older connection must not displace a newer one"
+        );
+        assert_eq!(r.current_conn(d), Some(newer_id));
+        assert!(!newer_close.is_cancelled());
+        assert!(
+            !older_close.is_cancelled(),
+            "the caller refuses it; the registry did not hold it"
+        );
+        // In the usual order, the newer one supersedes the older.
+        let r = Registry::default();
+        let (older, newer) = (conn(3), conn(4));
+        let older_close = older.close.clone();
+        assert!(r.register(d, older));
+        assert!(r.register(d, newer));
+        assert!(older_close.is_cancelled());
     }
 }
