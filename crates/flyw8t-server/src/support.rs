@@ -226,7 +226,8 @@ impl SupportHub {
     fn attach(&self, session: Uuid, side: Side, control: bool, peer: Peer) -> bool {
         let mut s = self.sessions.lock().unwrap();
         let peers = s.entry(session).or_default();
-        peers.control = control;
+        // A session's capabilities never change; no socket can turn control off for it.
+        peers.control |= control;
         match peers.side(side).replace(peer) {
             Some(old) => {
                 old.close.cancel();
@@ -497,6 +498,23 @@ async fn change_with(
         .await?;
     } else {
         apply(&mut tx, id, current, to, &actor, kind, reason).await?;
+    }
+    // The grants that start something (the helper's consent to control, and media actually
+    // flowing) belong in the central audit log, not only in the session's own events.
+    let started = match kind {
+        "control_consented" => Some("support.control.helper_consent"),
+        "media_connected" => Some("support.media_connected"),
+        _ => None,
+    };
+    if let Some(action) = started {
+        let mut audit = who
+            .audit(action)
+            .target("support_session", id)
+            .detail(json!({ "state": to.as_str(), "reason": reason }));
+        if let Some(org) = org {
+            audit = audit.org(org);
+        }
+        audit.record(&mut *tx).await?;
     }
     if to.is_terminal() {
         let mut audit = who
@@ -1244,7 +1262,9 @@ pub async fn participant_ws(
             let who = Who::Participant {
                 ip: peer.ip().to_string(),
             };
-            let control = is_control(&state, id).await;
+            let Ok(control) = is_control(&state, id).await else {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
             ws.max_message_size(MAX_SIGNAL_BYTES)
                 .on_upgrade(move |socket| {
                     run_socket(state, socket, id, Side::Participant, control, who)
@@ -1455,22 +1475,7 @@ async fn on_message(
         // The browser's Allow: straight to media for a view session; for a control session,
         // to the helper step, which still needs the helper's own Allow.
         (Side::Participant, In::Approve) => {
-            if is_control(state, id).await {
-                if !allow_control_in_browser(state, id, who).await? {
-                    nothing(state, "nothing to approve");
-                }
-            } else if change(
-                state,
-                id,
-                &[Authorizing],
-                Connecting,
-                who,
-                "consented",
-                "participant allowed view_screen",
-            )
-            .await?
-            .is_none()
-            {
+            if !browser_allow(state, id, who).await? {
                 nothing(state, "nothing to approve");
             }
         }
@@ -1573,72 +1578,93 @@ async fn on_message(
 // ---------------------------------------------------------------------------------------
 // Control sessions: the helper (ADR-0012)
 
-/// How long a helper launch token works after the browser's Allow.
+/// How long a helper launch token works after it is issued by a download.
 const HELPER_TOKEN_TTL_SECS: u64 = 120;
 /// How long a session waits in `awaiting_helper` before it expires.
 const AWAITING_HELPER_TIMEOUT_SECS: f64 = 5.0 * 60.0;
+/// Where the participant's browser fetches the helper. It carries no secret: the launch token
+/// is minted when the bound browser downloads, and travels only in the file's name.
+const HELPER_DOWNLOAD: &str = "/s/helper/download";
 
-async fn is_control(state: &Shared, id: Uuid) -> bool {
-    sqlx::query_as::<_, (bool,)>(
+/// Whether a session requests control. Errors are errors: a failed lookup must never be read
+/// as "view only", which would let the browser page signal or skip the helper's consent.
+async fn is_control(state: &Shared, id: Uuid) -> anyhow::Result<bool> {
+    let row: Option<(bool,)> = sqlx::query_as(
         "SELECT 'control_input' = ANY (capabilities) FROM support_sessions WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .is_some_and(|r| r.0)
+    .await?;
+    row.map(|r| r.0)
+        .ok_or_else(|| anyhow::anyhow!("support session {id} not found"))
 }
 
-/// The browser's Allow in a control session: issue the one-time launch token and move to
-/// `awaiting_helper`. Nothing is relayed yet; the helper must attach and be allowed too.
-async fn allow_control_in_browser(state: &Shared, id: Uuid, who: &Who) -> anyhow::Result<bool> {
-    let token = auth::random_secret(32);
+/// The browser's Allow. The session's capabilities and state are read under one row lock, so
+/// the choice between "media now" (view) and "the helper next" (control) cannot go stale.
+async fn browser_allow(state: &Shared, id: Uuid, who: &Who) -> anyhow::Result<bool> {
     let mut tx = state.db.begin().await?;
-    let Some((current, org)) = lock_state(&mut tx, id).await? else {
+    let row: Option<(String, Option<Uuid>, bool)> = sqlx::query_as(
+        "SELECT state, organization_id, 'control_input' = ANY (capabilities)
+           FROM support_sessions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((current, org, control)) = row else {
         return Ok(false);
     };
-    if current != SupportState::Authorizing {
+    if SupportState::parse(&current) != Some(SupportState::Authorizing) {
         tx.rollback().await?;
         return Ok(false);
     }
-    sqlx::query(
-        "UPDATE support_sessions SET helper_token_hash = $2, awaiting_helper_at = now(),
-                helper_token_expires_at = now() + make_interval(secs => $3)
-          WHERE id = $1",
-    )
-    .bind(id)
-    .bind(auth::digest(&token))
-    .bind(HELPER_TOKEN_TTL_SECS as f64)
-    .execute(&mut *tx)
-    .await?;
+    let to = SupportState::after_browser_consent(control);
+    if control {
+        sqlx::query("UPDATE support_sessions SET awaiting_helper_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let reason = if control {
+        "participant allowed control_input in the browser"
+    } else {
+        "participant allowed view_screen"
+    };
     apply(
         &mut tx,
         id,
         SupportState::Authorizing,
-        SupportState::after_browser_consent(true),
+        to,
         &who.actor(),
         "consented",
-        "participant allowed control_input in the browser",
+        reason,
     )
     .await?;
     let mut audit = who
-        .audit("support.control.browser_consent")
+        .audit(if control {
+            "support.control.browser_consent"
+        } else {
+            "support.consented"
+        })
         .target("support_session", id);
     if let Some(org) = org {
         audit = audit.org(org);
     }
     audit.record(&mut *tx).await?;
     tx.commit().await?;
-    state.support.publish(id, SupportState::AwaitingHelper);
-    state.support.send(
-        id,
-        Side::Participant,
-        Out::Helper {
-            download: format!("/s/helper/flyw8t-helper-{token}.exe"),
-            expires_in_secs: HELPER_TOKEN_TTL_SECS,
-        },
-    );
+    if to == SupportState::Connecting {
+        state.support.open_relay(id);
+    }
+    state.support.publish(id, to);
+    if control {
+        state.support.send(
+            id,
+            Side::Participant,
+            Out::Helper {
+                download: HELPER_DOWNLOAD.into(),
+                expires_in_secs: HELPER_TOKEN_TTL_SECS,
+            },
+        );
+    }
     Ok(true)
 }
 
@@ -1724,58 +1750,65 @@ pub async fn helper_ws(
     }
 }
 
-/// `GET /s/helper/flyw8t-helper-<token>.exe`: the helper, named so it carries its launch
-/// token (ADR-0012 section 2). Only for the browser bound to that session, while it awaits
-/// its helper. Downloading spends nothing; attaching does.
+/// `GET /s/helper/download`: the helper, for the browser bound to a session that awaits its
+/// helper. The launch token is minted here, under the row lock, and travels only in the
+/// attachment's file name (ADR-0012 section 2), never in a URL a proxy might log. Each
+/// download replaces the previous token. Downloading spends nothing; attaching does.
 pub async fn helper_download(
     State(state): State<Shared>,
     headers: HeaderMap,
     Path(file): Path<String>,
 ) -> Response {
     let not_here = |msg: &str| participant_error(StatusCode::NOT_FOUND, msg);
-    let Some(token) = file
-        .strip_prefix("flyw8t-helper-")
-        .and_then(|f| f.strip_suffix(".exe"))
-    else {
+    if format!("/s/helper/{file}") != HELPER_DOWNLOAD {
         return not_here("That download is not valid.");
-    };
-    let found: Option<(Uuid,)> = match participant_session(&state, &headers).await {
-        Ok(Some((id, SupportState::AwaitingHelper))) => sqlx::query_as(
-            "SELECT id FROM support_sessions WHERE id = $1 AND helper_token_hash = $2
-                AND helper_token_expires_at > now()",
-        )
-        .bind(id)
-        .bind(auth::digest(token))
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten(),
-        _ => None,
-    };
-    if found.is_none() {
-        return not_here("This download has expired or is not for this browser. Go back to the support page and allow control again.");
     }
     let Some(path) = &state.config.helper_path else {
         return not_here("This server does not offer the flyw8t helper yet, so remote control is not available. Screen viewing still works.");
     };
-    match tokio::fs::read(path).await {
-        Ok(bytes) => (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    "application/vnd.microsoft.portable-executable".to_string(),
-                ),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{file}\""),
-                ),
-                (header::CACHE_CONTROL, "no-store".to_string()),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(e) => error_response(None, AppError::Internal(e.into())),
+    let session = match participant_session(&state, &headers).await {
+        Ok(Some((id, SupportState::AwaitingHelper))) => id,
+        Ok(_) => {
+            return not_here("This download is not for this browser, or the session is no longer waiting for the helper.")
+        }
+        Err(e) => return error_response(None, AppError::Internal(e)),
+    };
+    let bytes = match tokio::fs::read(path).await {
+        Ok(b) => b,
+        Err(e) => return error_response(None, AppError::Internal(e.into())),
+    };
+    let token = auth::random_secret(32);
+    let minted = sqlx::query(
+        "UPDATE support_sessions SET helper_token_hash = $2,
+                helper_token_expires_at = now() + make_interval(secs => $3)
+          WHERE id = $1 AND state = 'awaiting_helper'",
+    )
+    .bind(session)
+    .bind(auth::digest(&token))
+    .bind(HELPER_TOKEN_TTL_SECS as f64)
+    .execute(&state.db)
+    .await;
+    match minted {
+        Ok(r) if r.rows_affected() == 1 => {}
+        Ok(_) => return not_here("The session is no longer waiting for the helper."),
+        Err(e) => return error_response(None, AppError::Internal(e.into())),
     }
+    let name = format!("flyw8t-helper-{token}.exe");
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/vnd.microsoft.portable-executable".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------------------

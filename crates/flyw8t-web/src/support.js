@@ -311,10 +311,9 @@
     });
     const cancelHelper = $('cancel-helper');
     if (cancelHelper) {
-      cancelHelper.addEventListener('click', () => {
-        send({ type: 'decline' });
-        finish('rejected', 'Declined');
-      });
+      // End, not Decline: the helper may already have been allowed, and End stops the
+      // session whatever state it reached (the server decides under its row lock).
+      cancelHelper.addEventListener('click', () => endHere('closed', 'You cancelled. The session has ended.'));
     }
     $('decline').addEventListener('click', () => {
       send({ type: 'decline' });

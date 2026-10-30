@@ -19,7 +19,7 @@ It runs with the person's own rights. It cannot reach UAC prompts or the secure 
 
 ### 2. Pairing: a one-time launch token, bound to the consented session
 
-When the person allows control, the consent page asks the server for a **launch token**, which is:
+When the person allows control and downloads the helper, the server mints a **launch token** for that download (the download URL itself carries no secret, so nothing sensitive reaches proxy logs). The token is:
 - single-use and valid for 2 minutes;
 - bound to that participant's session and to the `control_input` capability;
 - stored as a hash.

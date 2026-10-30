@@ -970,8 +970,16 @@ async fn control_needs_the_helper_and_its_own_consent() {
     send(&mut part, json!({"type": "approve"})).await;
     let offer = recv_kind(&mut part, "helper").await;
     assert_eq!(db_state(&server, inv.session).await, "awaiting_helper");
+    // The link carries no secret: the token is minted by the download itself.
     let download = offer["download"].as_str().unwrap().to_string();
-    let token = extract(&download, r"/s/helper/flyw8t-helper-([A-Za-z0-9_-]+)\.exe").unwrap();
+    assert_eq!(download, "/s/helper/download");
+    let (minted,): (Option<Vec<u8>>,) =
+        sqlx::query_as("SELECT helper_token_hash FROM support_sessions WHERE id = $1")
+            .bind(inv.session)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert!(minted.is_none(), "no token exists before the download");
     until_state(&mut tech, "awaiting_helper").await;
     send(
         &mut tech,
@@ -997,11 +1005,25 @@ async fn control_needs_the_helper_and_its_own_consent() {
     );
     let file = server.request(get(Some(&cookie))).await;
     assert_eq!(file.status, StatusCode::OK);
-    assert!(file.headers[header::CONTENT_DISPOSITION]
+    let disposition = file.headers[header::CONTENT_DISPOSITION]
         .to_str()
         .unwrap()
-        .contains("flyw8t-helper-"));
+        .to_string();
+    let token = extract(&disposition, r"flyw8t-helper-([A-Za-z0-9_-]+)\.exe").unwrap();
     assert_eq!(file.body, "MZ test helper");
+    // A second download replaces the token: only the newest file can attach.
+    let again = server.request(get(Some(&cookie))).await;
+    let old_token = token;
+    let token = extract(
+        again.headers[header::CONTENT_DISPOSITION].to_str().unwrap(),
+        r"flyw8t-helper-([A-Za-z0-9_-]+)\.exe",
+    )
+    .unwrap();
+    assert_ne!(token, old_token);
+    assert!(
+        helper_ws(&server, &old_token).await.is_err(),
+        "a replaced token is dead"
+    );
 
     // The launch token: wrong tokens refused, the right one works once.
     assert!(helper_ws(&server, "not-the-token").await.is_err());
@@ -1076,7 +1098,12 @@ async fn control_needs_the_helper_and_its_own_consent() {
     ] {
         assert!(kinds.contains(&k.to_string()), "{k} missing from {kinds:?}");
     }
-    for a in ["support.control.browser_consent", "support.helper.attach"] {
+    for a in [
+        "support.control.browser_consent",
+        "support.helper.attach",
+        "support.control.helper_consent",
+        "support.media_connected",
+    ] {
         assert!(
             !audit_rows(&server, a).await.is_empty(),
             "audit missing {a}"
@@ -1137,7 +1164,11 @@ async fn view_sessions_never_issue_a_helper_and_control_is_permissioned() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn helper_tokens_expire_and_unstarted_helpers_time_out() {
-    let server = start_fresh().await;
+    let helper_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(helper_file.path(), b"MZ").unwrap();
+    let mut cfg = test_config(&fresh_database().await);
+    cfg.helper_path = Some(helper_file.path().to_path_buf());
+    let server = start(cfg).await;
     let admin = server.admin().await;
     let org = admin.create_org(&server, "Org").await;
     let inv = create_invite_with(&server, &admin, org, "control").await;
@@ -1152,10 +1183,18 @@ async fn helper_tokens_expire_and_unstarted_helpers_time_out() {
     .unwrap();
     until_state(&mut part, "authorizing").await;
     send(&mut part, json!({"type": "approve"})).await;
-    let offer = recv_kind(&mut part, "helper").await;
+    recv_kind(&mut part, "helper").await;
+    let file = server
+        .request(
+            Request::get("/s/helper/download")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
     let token = extract(
-        offer["download"].as_str().unwrap(),
-        r"flyw8t-helper-([A-Za-z0-9_-]+)\.exe",
+        file.headers[header::CONTENT_DISPOSITION].to_str().unwrap(),
+        r"flyw8t-helper-([A-Za-z0-9_-]+).exe",
     )
     .unwrap();
 

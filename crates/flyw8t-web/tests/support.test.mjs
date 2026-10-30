@@ -294,11 +294,11 @@ test('control session: Allow consents without a picker, then offers the helper',
   assert.equal(p.sent('approve').length, 1);
   await p.recv(state('awaiting_helper'));
   assert.equal(p.el('helper-box').hidden, false);
-  await p.recv({ type: 'helper', download: '/s/helper/flyw8t-helper-abc.exe', expires_in_secs: 120 });
-  assert.equal(p.el('helper-link').href, '/s/helper/flyw8t-helper-abc.exe');
+  await p.recv({ type: 'helper', download: '/s/helper/download', expires_in_secs: 120 });
+  assert.equal(p.el('helper-link').href, '/s/helper/download');
   // Only a same-server helper path is ever put in the link.
   await p.recv({ type: 'helper', download: 'https://evil.example/helper.exe', expires_in_secs: 120 });
-  assert.equal(p.el('helper-link').href, '/s/helper/flyw8t-helper-abc.exe');
+  assert.equal(p.el('helper-link').href, '/s/helper/download');
   // The browser page never makes an offer in a control session.
   await p.recv(state('connecting'));
   assert.equal(p.peers.length, 0);
@@ -306,11 +306,13 @@ test('control session: Allow consents without a picker, then offers the helper',
   assert.equal(p.el('helper-box').hidden, true);
 });
 
-test('control session: Cancel declines and ends', async () => {
+test('control session: Cancel ends the session even if the helper was already allowed', async () => {
   const p = await page({ role: 'participant', localDer: der('p'), remoteDer: der('t'), control: true });
   await p.el('allow').click();
   await p.recv(state('awaiting_helper'));
+  await p.recv(state('connecting'));
   p.el('cancel-helper').click();
-  assert.equal(p.sent('decline').length, 1);
+  assert.equal(p.sent('end').length, 1, 'End, which stops any state, not Decline');
+  assert.equal(p.sent('decline').length, 0);
   assert.equal(p.el('support').dataset.state, 'ended');
 });
