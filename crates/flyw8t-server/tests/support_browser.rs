@@ -180,6 +180,7 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         .arg("--use-fake-ui-for-media-stream")
         .arg("--auto-select-tab-capture-source-by-title=flyw8t-share-target")
         .arg("--auto-select-desktop-capture-source=flyw8t-share-target")
+        .arg("--auto-accept-this-tab-capture")
         .arg("--autoplay-policy=no-user-gesture-required")
         .arg("about:blank")
         .kill_on_drop(true)
@@ -273,6 +274,23 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         .await;
     cdp.click(&part, "#allow").await;
 
+    // If media never connects, say what the participant's page shows (the picker is the
+    // usual suspect on a new platform).
+    for _ in 0..150 {
+        if cdp
+            .eval(
+                &tech,
+                "document.getElementById('support').dataset.state === 'connected'",
+            )
+            .await
+            == json!(true)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let seen = cdp.eval(&part, "JSON.stringify({state: document.getElementById('state')?.textContent, error: document.getElementById('error')?.textContent, data: document.getElementById('support')?.dataset.state})").await;
+    eprintln!("participant after Allow: {seen}");
     cdp.wait_for(
         &tech,
         "media to connect",
