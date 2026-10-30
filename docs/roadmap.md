@@ -35,6 +35,8 @@ flyw8t stands alone (operator, 2026-10-30). Longer term it becomes a first-class
 
 ## 0.5: Attended remote control (approved 2026-10-30, ADR-0010)
 
+Design: [ADR-0012](decisions/ADR-0012-remote-control-helper.md) (proposed).
+
 - A signed, temporary Windows helper launched from the consent page: screen capture plus, after a **separate consent**, keyboard and mouse. It shows an always-visible indicator with Stop, persists nothing, never bypasses OS consent, and its input path is audited.
 - macOS and Linux (portal) helpers after Windows is proven.
 
