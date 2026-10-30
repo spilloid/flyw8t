@@ -521,7 +521,11 @@ async fn optional_mfa_can_be_set_up_and_turned_off() {
     assert_eq!(r.location(), "/account?m=mfa-disabled", "{}", r.body);
     let gone = raw(&server, "GET", "/login/mfa", Some(&pending), &[]).await;
     assert_eq!(gone.location(), "/login");
-    sign_out(&server, &b.cookie).await;
+    // Turning it off also rotates this session: the cookie from before no longer works.
+    let rotated = r.cookie().expect("a replacement cookie");
+    assert_ne!(rotated, b.cookie);
+    shut_out(&server, &b.cookie).await;
+    sign_out(&server, &rotated).await;
     let (next, _) = password(&server, ADMIN_EMAIL, ADMIN_PASSWORD).await;
     assert_eq!(next, "/");
     server.stop().await;

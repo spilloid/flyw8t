@@ -33,12 +33,12 @@ impl RateLimiter {
         entry.1 <= limit
     }
 
-    /// Whether `key` is still under `limit` in its current window, without counting anything.
-    /// Lets a caller budget only failures: check first, count with `allow` when one happens.
-    pub fn under(&self, key: &str, limit: u32, window: Duration) -> bool {
-        let w = self.windows.lock().unwrap();
-        w.get(key)
-            .is_none_or(|(start, n)| start.elapsed() >= window || *n < limit)
+    /// Give back one attempt counted by `allow`. Lets a caller budget only failures while
+    /// still reserving a place atomically before doing the work.
+    pub fn refund(&self, key: &str) {
+        if let Some((_, n)) = self.windows.lock().unwrap().get_mut(key) {
+            *n = n.saturating_sub(1);
+        }
     }
 }
 
@@ -56,13 +56,17 @@ mod tests {
     }
 
     #[test]
-    fn under_does_not_count() {
+    fn refunds_give_back_a_place() {
         let r = RateLimiter::default();
         let w = Duration::from_secs(60);
-        assert!((0..10).all(|_| r.under("f", 2, w)));
-        r.allow("f", 2, w);
-        assert!(r.under("f", 2, w));
-        r.allow("f", 2, w);
-        assert!(!r.under("f", 2, w));
+        assert!(r.allow("f", 2, w) && r.allow("f", 2, w));
+        assert!(!r.allow("f", 2, w));
+        r.refund("f");
+        r.refund("f");
+        assert!(
+            r.allow("f", 2, w),
+            "the refused third attempt counted too; two refunds free one place"
+        );
+        r.refund("never-seen");
     }
 }

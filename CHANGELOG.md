@@ -4,7 +4,7 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## 0.1.0 (unreleased)
 
-First vertical slice. **Not production-ready:** no OIDC or WebAuthn, no signed binaries; the attended-support and MFA fixes from cross-family review have not been re-reviewed. See `docs/threat-model.md` § Open items.
+First vertical slice. **Not production-ready:** no OIDC or WebAuthn, no signed binaries; two cross-family review rounds on attended support and MFA are fixed, but the second round's fixes are not yet reviewed. See `docs/threat-model.md` § Open items.
 
 ### Added
 - Attended support hardening after cross-family review: only the session's creator can attach (administrators observe and end); sessions belong to an organization; pages stop capture themselves when the server connection is lost, on End, on leaving the page, or when the picker is answered after the end; signaling sealed before an ending commits, with a final notice a full queue cannot drop; `connected` needs both sides; per-socket message limit; race-free per-technician cap; Argon2id-hashed codes and a global wrong-code budget; opening a link spends nothing; one live session per browser; failed attempts, attaches and endings audited by who caused them. Migration 0004.
@@ -18,5 +18,6 @@ First vertical slice. **Not production-ready:** no OIDC or WebAuthn, no signed b
 - Docs: architecture, threat model, agent protocol, job lifecycle, reliability, monitoring model, AnchorDesk integration, deployment, roadmap, attended support, ADR-0001 to ADR-0010, TLA+ spec (not yet model-checked).
 
 ### Fixed
+- Second-round review fixes: the security code is bound to the single transport carrying the shown video; support sockets end when the browser session that opened them is signed out, revoked or rotated; reset and endings decide their transition under the row lock; the global code budget is reserved before work; late asynchronous WebRTC steps cannot act after an ending; socket writes are bounded; turning MFA off rotates the session; the configured public origin is accepted behind a proxy that rewrites `Host`.
 - Every console form post from a real browser was refused as cross-origin: `Referrer-Policy: no-referrer` makes browsers send `Origin: null`, which the cross-origin check refuses. The policy is now `same-origin`, and the Chrome test signs in through the real form.
 - Two-step verification hardening after cross-family review: factor checks lock the user and the presented session in the same transaction; setting up or turning off the second factor rotates this session and signs out every other; an administrator's reset also ends the user's live support sessions.

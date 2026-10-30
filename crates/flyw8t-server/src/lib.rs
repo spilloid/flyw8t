@@ -352,7 +352,14 @@ pub(crate) fn origin_is_self(
         .public_url
         .split_once("://")
         .map_or("https", |(s, _)| s);
+    // The configured public origin always counts, so a reverse proxy that rewrites `Host`
+    // (to 127.0.0.1:8080, say) does not turn every browser request into a cross-origin one.
+    let public = config
+        .public_url
+        .split_once("://")
+        .map(|(s, rest)| format!("{s}://{}", rest.split('/').next().unwrap_or("")));
     Some(match (origin, host) {
+        (Some(o), _) if public.as_deref().is_some_and(|p| o.eq_ignore_ascii_case(p)) => true,
         (Some(o), Some(h)) => o.eq_ignore_ascii_case(&format!("{scheme}://{h}")),
         _ => false,
     })
@@ -405,6 +412,20 @@ mod tests {
         assert_eq!(
             origin_is_self(&https, &headers("rmm.example.com", None)),
             None
+        );
+        // Behind a proxy that rewrites Host, the configured public origin still matches.
+        let proxied = |o| headers("127.0.0.1:8080", Some(o));
+        assert_eq!(
+            origin_is_self(&https, &proxied("https://rmm.example.com")),
+            Some(true)
+        );
+        assert_eq!(
+            origin_is_self(&https, &proxied("http://rmm.example.com")),
+            Some(false)
+        );
+        assert_eq!(
+            origin_is_self(&https, &proxied("https://evil.example")),
+            Some(false)
         );
     }
 }

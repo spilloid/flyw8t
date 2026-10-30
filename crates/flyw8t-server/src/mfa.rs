@@ -391,6 +391,8 @@ pub async fn setup(
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
+        // Support sockets authenticated with a now-revoked session close as well.
+        state.support.recheck_user(s.user_id);
         let next = if s.stage == Stage::Enroll {
             "/"
         } else {
@@ -473,7 +475,7 @@ async fn confirm_current(
     let secret = auth::lock_user_factor(tx, p.user_id).await?;
     // The session that made this request must still be live now that the user is locked.
     let session = p.session_id.ok_or(AppError::Unauthorized)?;
-    auth::lock_session(tx, session, None, &[Stage::Full]).await?;
+    auth::lock_session(tx, session, p.session_token.as_deref(), &[Stage::Full]).await?;
     let Some(secret) = secret else {
         return Err(AppError::Conflict(
             "Two-step verification is not on.".into(),
@@ -541,13 +543,21 @@ pub async fn disable(State(state): State<Shared>, WebUser(p): WebUser, body: Byt
             return account_error(&state, &p, "That code is not valid, or was already used.").await;
         }
         clear_mfa(&mut tx, p.user_id).await?;
-        auth::revoke_other_sessions(&mut tx, p.user_id, p.session_id).await?;
+        // As with set-up: this session continues under a new secret, every other one ends.
+        let session = p.session_id.ok_or(AppError::Unauthorized)?;
+        let cookie = auth::promote_session(&state, &mut tx, session).await?;
+        auth::revoke_other_sessions(&mut tx, p.user_id, Some(session)).await?;
         Audit::user(&p, "user.mfa.disable")
             .target("user", p.user_id)
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
-        to("/account?m=mfa-disabled")
+        state.support.recheck_user(p.user_id);
+        Ok((
+            [(header::SET_COOKIE, cookie)],
+            Redirect::to("/account?m=mfa-disabled"),
+        )
+            .into_response())
     })
     .await
 }
@@ -592,6 +602,7 @@ pub async fn admin_reset(
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
+        state.support.recheck_user(id);
         // "Signed out everywhere" includes live attended-support sockets, which authenticated
         // once at their handshake.
         crate::support::end_all_created_by(

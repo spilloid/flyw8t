@@ -96,6 +96,9 @@ pub struct Principal {
     pub scopes: Option<Vec<String>>,
     pub csrf: String,
     pub session_id: Option<Uuid>,
+    /// Digest of the presented session cookie, so a check made under lock can tell that this
+    /// exact credential is still the session's (it changes on rotation). `None` for tokens.
+    pub session_token: Option<Vec<u8>>,
 }
 
 impl Principal {
@@ -165,6 +168,7 @@ fn principal(
         scopes,
         csrf,
         session_id,
+        session_token: None,
     })
 }
 
@@ -217,7 +221,24 @@ pub async fn session_principal(
         csrf,
         Some(sid),
     )
-    .map(Some)
+    .map(|mut p| {
+        p.session_token = Some(digest(raw));
+        Some(p)
+    })
+}
+
+/// Whether a browser session is still live and full, with this exact secret. Long-lived
+/// connections (support sockets) call this to notice sign-out, revocation and rotation.
+pub async fn session_still_valid(state: &Shared, session_id: Uuid, token: &[u8]) -> bool {
+    sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND token_hash = $2 AND stage = 'full'
+                          AND revoked_at IS NULL AND expires_at > now())",
+    )
+    .bind(session_id)
+    .bind(token)
+    .fetch_one(&state.db)
+    .await
+    .is_ok_and(|r| r.0)
 }
 
 pub async fn token_principal(state: &Shared, headers: &HeaderMap) -> AppResult<Option<Principal>> {
@@ -554,6 +575,7 @@ mod tests {
             scopes: scopes.map(|s| s.into_iter().map(String::from).collect()),
             csrf: String::new(),
             session_id: None,
+            session_token: None,
         }
     }
 

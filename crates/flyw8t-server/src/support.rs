@@ -45,6 +45,7 @@ const MESSAGE_BURST: f64 = 60.0;
 /// Wrong codes from everyone together before code entry pauses (links keep working).
 const GLOBAL_CODE_FAILURES: u32 = 300;
 const CODE_FAILURE_WINDOW: Duration = Duration::from_secs(600);
+const GLOBAL_CODE_KEY: &str = "support-code-global";
 
 /// CSP for the support pages: the console's policy plus same-origin script and WebSocket.
 pub const SUPPORT_CSP: &str =
@@ -144,6 +145,10 @@ struct Peer {
     /// The final notice, set before `close` is cancelled. Kept out of `tx` so a full queue
     /// can never drop it, and so nothing queued behind it is sent after the session ended.
     last: Arc<Mutex<Option<Out>>>,
+    /// The signed-in user behind a technician socket, and a signal to re-check their session
+    /// now (after a sign-out or revocation) rather than at the next periodic check.
+    user: Option<Uuid>,
+    recheck: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -239,6 +244,17 @@ impl SupportHub {
         match peers.side(to) {
             Some(p) if p.tx.try_send(Out::Signal { data }).is_ok() => Relay::Sent,
             _ => Relay::NoPeer,
+        }
+    }
+
+    /// Ask every technician socket of `user` to re-check its sign-in session now.
+    pub fn recheck_user(&self, user: Uuid) {
+        for peers in self.sessions.lock().unwrap().values() {
+            if let Some(p) = &peers.technician {
+                if p.user == Some(user) {
+                    p.recheck.notify_one();
+                }
+            }
         }
     }
 
@@ -365,15 +381,36 @@ pub async fn change(
     kind: &str,
     reason: &str,
 ) -> anyhow::Result<Option<SupportState>> {
+    change_with(
+        state,
+        id,
+        |current| from.contains(&current).then_some(to),
+        who,
+        kind,
+        reason,
+    )
+    .await
+}
+
+/// Like `change`, with the target chosen from the state read under the row lock, so the
+/// choice cannot go stale between reading the state and applying the transition.
+async fn change_with(
+    state: &Shared,
+    id: Uuid,
+    decide: impl FnOnce(SupportState) -> Option<SupportState>,
+    who: &Who,
+    kind: &str,
+    reason: &str,
+) -> anyhow::Result<Option<SupportState>> {
     let actor = who.actor();
     let mut tx = state.db.begin().await?;
     let Some((current, org)) = lock_state(&mut tx, id).await? else {
         return Ok(None);
     };
-    if !from.contains(&current) {
+    let Some(to) = decide(current) else {
         tx.rollback().await?;
         return Ok(None);
-    }
+    };
     if to == SupportState::Closed
         && matches!(current, SupportState::Connecting | SupportState::Connected)
     {
@@ -421,19 +458,16 @@ pub async fn change(
     Ok(Some(to))
 }
 
-/// End a session from whichever live state it is in, as `side`.
+/// End a session from whichever live state it is in (decided under the row lock), as `side`.
 async fn end(state: &Shared, id: Uuid, side: Side, who: &Who, reason: &str) -> anyhow::Result<()> {
     use SupportState::*;
-    let Some(current) = current(state, id).await else {
-        return Ok(());
+    let decide = |current| match (side, current) {
+        (_, Connecting | Connected) => Some(Closed),
+        (Side::Technician, Created | Waiting | Authorizing) => Some(Revoked),
+        (Side::Participant, Authorizing) => Some(Rejected),
+        _ => None,
     };
-    let to = match (side, current) {
-        (_, Connecting | Connected) => Closed,
-        (Side::Technician, Created | Waiting | Authorizing) => Revoked,
-        (Side::Participant, Authorizing) => Rejected,
-        _ => return Ok(()),
-    };
-    change(state, id, &[current], to, who, "ended", reason).await?;
+    change_with(state, id, decide, who, "ended", reason).await?;
     Ok(())
 }
 
@@ -921,18 +955,6 @@ async fn spend(
             "Too many attempts. Wait ten minutes, then try again.",
         );
     }
-    if matches!(via, Via::Code)
-        && !state.limiter.under(
-            "support-code-failures",
-            GLOBAL_CODE_FAILURES,
-            CODE_FAILURE_WINDOW,
-        )
-    {
-        return participant_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Code entry is paused because of many wrong codes. Ask your technician to send you the link instead.",
-        );
-    }
     // One support session per browser: binding another would silently replace it.
     match participant_session(state, headers).await {
         Ok(Some((_, st))) if !st.is_terminal() => {
@@ -943,6 +965,19 @@ async fn spend(
         }
         Ok(_) => {}
         Err(e) => return error_response(None, AppError::Internal(e)),
+    }
+    // Every code attempt reserves a place in the global budget before any work is done, so
+    // concurrent guesses cannot all slip under it; only a correct code gives its place back.
+    let reserved = matches!(via, Via::Code);
+    if reserved
+        && !state
+            .limiter
+            .allow(GLOBAL_CODE_KEY, GLOBAL_CODE_FAILURES, CODE_FAILURE_WINDOW)
+    {
+        return participant_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Code entry is paused because of many wrong codes. Ask your technician to send you the link instead.",
+        );
     }
     let digest = match via {
         Via::Code => match code_digest(credential.to_string()).await {
@@ -957,18 +992,14 @@ async fn spend(
         .unwrap_or("");
     match bind(state, via, &digest, &ip, ua).await {
         Ok(Some((_, participant))) => {
+            if reserved {
+                state.limiter.refund(GLOBAL_CODE_KEY);
+            }
             let cookie = participant_cookie(state, &participant, 4 * 3600);
             ([(header::SET_COOKIE, cookie)], Redirect::to("/s/session")).into_response()
         }
         // One answer for unknown, expired and already-used: no oracle.
         Ok(None) => {
-            if matches!(via, Via::Code) {
-                state.limiter.allow(
-                    "support-code-failures",
-                    GLOBAL_CODE_FAILURES,
-                    CODE_FAILURE_WINDOW,
-                );
-            }
             let _ = Audit::anonymous("support", "participant", "support.open")
                 .ip(&ip)
                 .denied()
@@ -1176,12 +1207,27 @@ fn text(msg: &Out) -> Message {
     Message::Text(serde_json::to_string(msg).unwrap_or_default().into())
 }
 
+/// How long one write to a socket may take before the socket is given up on.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often a technician socket re-checks the sign-in session it was opened with.
+const SESSION_RECHECK: Duration = Duration::from_secs(15);
+
 async fn run_socket(state: Shared, socket: WebSocket, id: Uuid, side: Side, who: Who) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Out>(PEER_BUFFER);
     let close = CancellationToken::new();
     let last = Arc::new(Mutex::new(None));
+    let recheck = Arc::new(tokio::sync::Notify::new());
     let conn_id = Uuid::new_v4();
+    // A technician socket stays authorized only while the browser session that opened it
+    // does: sign-out, revocation and rotation (setting up or turning off MFA) all end it.
+    let signed_in = match &who {
+        Who::User(p) => p
+            .session_id
+            .zip(p.session_token.clone())
+            .map(|s| (p.user_id, s)),
+        _ => None,
+    };
     let replaced = state.support.attach(
         id,
         side,
@@ -1190,6 +1236,8 @@ async fn run_socket(state: Shared, socket: WebSocket, id: Uuid, side: Side, who:
             tx,
             close: close.clone(),
             last: last.clone(),
+            user: signed_in.as_ref().map(|(u, _)| *u),
+            recheck: recheck.clone(),
         },
     );
     let _ = who
@@ -1203,6 +1251,10 @@ async fn run_socket(state: Shared, socket: WebSocket, id: Uuid, side: Side, who:
     }
 
     let mut bucket = Bucket::new();
+    let mut every = tokio::time::interval_at(
+        tokio::time::Instant::now() + SESSION_RECHECK,
+        SESSION_RECHECK,
+    );
     loop {
         tokio::select! {
             biased;
@@ -1217,14 +1269,30 @@ async fn run_socket(state: Shared, socket: WebSocket, id: Uuid, side: Side, who:
                 let _ = tokio::time::timeout(Duration::from_secs(1), sink.send(Message::Close(None))).await;
                 break;
             }
+            _ = async { tokio::select! { _ = recheck.notified() => {}, _ = every.tick() => {} } }, if signed_in.is_some() => {
+                let Some((_, (session, token))) = &signed_in else { continue };
+                if !auth::session_still_valid(&state, *session, token).await {
+                    let _ = end(&state, id, Side::Technician, &who, "technician signed out").await;
+                    if !close.is_cancelled() {
+                        break;
+                    }
+                }
+            }
             Some(msg) = rx.recv() => {
-                if sink.send(text(&msg)).await.is_err() {
-                    break;
+                // A peer that stops reading must not keep this task from noticing the end.
+                tokio::select! {
+                    biased;
+                    _ = close.cancelled() => {}
+                    r = tokio::time::timeout(WRITE_TIMEOUT, sink.send(text(&msg))) => {
+                        if !matches!(r, Ok(Ok(()))) {
+                            break;
+                        }
+                    }
                 }
             }
             frame = stream.next() => {
                 if !bucket.take() {
-                    let _ = sink.send(text(&Out::Error { message: "too many messages".into() })).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(1), sink.send(text(&Out::Error { message: "too many messages".into() }))).await;
                     break;
                 }
                 let text = match frame {
@@ -1444,6 +1512,8 @@ mod tests {
                 tx,
                 close: CancellationToken::new(),
                 last: last.clone(),
+                user: None,
+                recheck: Arc::default(),
             },
             rx,
             last,

@@ -6,7 +6,7 @@ flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP 
 
 > An operation either succeeds **with evidence**, fails **with an explanation**, or explicitly reports that its outcome is **unknown**. Never pretend otherwise.
 
-**Version 0.1.0, pre-release. Not production-ready.** No OIDC or WebAuthn yet (TOTP two-step verification is built and required by default), binaries are unsigned, and the attended-support fixes have not yet had a second review. See [docs/threat-model.md](docs/threat-model.md#open-items-before-production).
+**Version 0.1.0, pre-release. Not production-ready.** No OIDC or WebAuthn yet (TOTP two-step verification is built and required by default), binaries are unsigned, and the latest round of security fixes (dev-process row 15) has not yet been reviewed. See [docs/threat-model.md](docs/threat-model.md#open-items-before-production).
 
 ## What works today
 

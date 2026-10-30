@@ -825,3 +825,32 @@ async fn resetting_a_technicians_sign_in_ends_their_live_sessions() {
     assert_eq!(db_state(&server, inv.session).await, "closed");
     server.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn signing_out_ends_the_sockets_that_session_opened() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let inv = create_invite(&server, &admin).await;
+    let mut t = ws(
+        &server,
+        &format!("/api/support/{}/ws", inv.session),
+        &admin.cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    until_state(&mut t, "waiting").await;
+    // The socket authenticated once; signing that browser session out must still end it.
+    let r = admin.post(&server, "/logout", &[]).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(recv_kind(&mut t, "ended").await["state"], "revoked");
+    assert_eq!(db_state(&server, inv.session).await, "revoked");
+    let ends = audit_rows(&server, "support.end").await;
+    assert!(
+        ends.iter()
+            .any(|(_, _, d)| d.contains("technician signed out")),
+        "{ends:?}"
+    );
+    server.stop().await;
+}

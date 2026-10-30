@@ -97,7 +97,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 ## Open items before production
 
 1. OIDC sign-in and WebAuthn. TOTP two-step verification is built and required by default (2026-10-29).
-2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Done for attended support** (Codex gpt-5.6-sol, 2026-10-29: 13 findings, 12 fixed, 1 partly fixed); **a second review of the fixes and of two-step verification (rows 11 to 13) is still owed.**
+2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Done for attended support** (Codex gpt-5.6-sol, 2026-10-29: 13 findings, 12 fixed, 1 partly fixed); two-step verification reviewed (row 13) and both re-reviewed (row 15, 10 of 11 fixed); **the row 15 fixes are not yet reviewed.**
 3. Authenticode-signed agent and server binaries; signed update manifests before any auto-update.
 4. Pin the server identity at enrollment.
 5. Postgres row-level security as defense in depth for T2.

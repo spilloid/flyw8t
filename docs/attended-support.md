@@ -79,6 +79,7 @@ Rules:
 - `connected` needs **both** browsers to report media flowing; one side alone cannot claim it.
 - Capabilities are fixed when the session is created and shown on the consent screen. Asking for more (for example control) means **a new consent**; it can never activate from an existing grant.
 - Every terminal transition closes both sockets and invalidates the invitation and participant credentials in the same transaction.
+- A technician's signaling socket lives only as long as the browser session that opened it: it re-checks that session right after any sign-out, revocation or rotation (setting up or turning off MFA, an administrator's reset) and every 15 seconds, and ends the session when it is gone.
 - **Pages fail closed.** If a page loses its connection to the server, or the person ends the session, or the page is closed, the page itself stops capture and closes the media connection at once, without waiting for the server. A screen chosen in the picker after the session has ended is stopped immediately.
 - Sessions belong to an organization. A technician can create them only in organizations they are assigned to and sees only their own, in those organizations; anything else is 404. Resetting a technician's sign-in ends their live sessions.
 
@@ -104,6 +105,8 @@ WebRTC media is DTLS-SRTP between the two browsers; neither the flyw8t server no
 2. Right after consent, the technician's page sends a **commitment**: `SHA-256("flyw8t-sas-commit-v1|session|technician-certificate-fingerprint")`. The participant's page makes no offer until it has one, and the technician's page accepts one offer only (no renegotiation).
 3. When media connects, each page reads the certificate **the DTLS connection actually used** (`RTCDtlsTransport.getRemoteCertificates()`, not the SDP). The participant's page checks it against the commitment; a mismatch ends the session with "this connection is not the one your technician set up".
 4. Both pages show `SHA-256("flyw8t-sas-v1|session|technician-fingerprint|participant-fingerprint")` as six digits, which the people compare out loud.
+
+The code covers one transport, so the connection may have only one: one bundled transport (`max-bundle`), exactly one video media section in the offer and the answer (anything else is refused and ends the session), and exactly one received video track. The code is computed over the transport that carries the track on screen.
 
 The commitment is what makes six digits enough. Someone in the middle must choose the certificate it shows the participant before seeing the participant's, and the one it shows the technician before seeing the technician's. Each attempt to make the two codes match therefore succeeds with probability 10⁻⁶, and cannot be ground offline.
 
@@ -167,7 +170,8 @@ This is remote-desktop control. The founding brief says not to build remote desk
 | Opening a link spends nothing; one browser, one session | Implemented | `opening_a_link_spends_nothing_and_one_browser_holds_one_session` |
 | STUN/TURN through `FLYW8T_ICE_SERVERS` | Implemented (config); **only LAN/loopback tested** | no NAT or TURN path has been exercised |
 | Cross-family security review of the support code | **Done** (Codex gpt-5.6-sol, 2026-10-29): 13 findings, 12 fixed, 1 partly fixed (no global cap on concurrent sockets yet) | [dev-process.md](dev-process.md) rows 10 and 12 |
-| A second review of the fixes | **Not done** | the fixes are new code |
+| Re-review of the fixes | **Done** (Codex gpt-6.1-sol): 11 findings, 10 fixed; open: two link posts racing in one browser can bind two sessions | row 15 |
+| A review of the re-review fixes | **Not done** | |
 | A person actually using it on two machines | **Not done** | tests use one machine and Chrome's fake screen source |
 | Native helper with keyboard and mouse (Phase C) | **Not built.** Needs the operator's decision (ADR-0010) | — |
 

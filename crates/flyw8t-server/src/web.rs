@@ -256,6 +256,7 @@ pub async fn logout(State(state): State<Shared>, WebUser(p): WebUser, body: Byte
             .execute(&state.db)
             .await?;
         Audit::user(&p, "user.logout").record(&state.db).await?;
+        state.support.recheck_user(p.user_id);
         Ok((
             [(header::SET_COOKIE, auth::set_cookie(&state, "", 0))],
             Redirect::to("/login"),

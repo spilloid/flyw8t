@@ -33,7 +33,7 @@
   let commitment = null; // participant: the technician's commitment, from signaling
   let committed = false; // technician: commitment sent
   let offered = false; // technician: one offer per session, never a renegotiation
-  let picker = 0; // participant: generation of the screen picker; bumped to cancel it
+  let epoch = 0; // bumped by every teardown: async work started before it must not act after it
 
   const send = (msg) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); };
   const hex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -71,7 +71,7 @@
 
   // Stop every local media resource. Safe to call any number of times.
   function stopMedia() {
-    picker += 1; // a picker still open is now stale: whatever it returns is stopped at once
+    epoch += 1; // anything still in flight (a screen picker, an offer, an answer) is now stale
     if (pc) { pc.close(); pc = null; }
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
     const video = $('remote');
@@ -99,9 +99,25 @@
     send({ type: 'end' });
   }
 
-  async function securityCheck() {
-    const transport = ((pc.getSenders()[0] || pc.getReceivers()[0]) || {}).transport;
-    const remote = transport && transport.getRemoteCertificates ? transport.getRemoteCertificates() : [];
+  // Exactly one media section, carrying video: the screen. Anything else (a second section, a
+  // second transport) could carry media the security code does not cover, so it is refused.
+  const oneVideoSection = (sdp) => {
+    const m = String((sdp && sdp.sdp) || '').match(/^m=\S+/gm) || [];
+    return m.length === 1 && m[0] === 'm=video';
+  };
+  const refuseTopology = () => endHere('connection_failed', 'Stopped: the connection did not have the expected shape (one shared screen). Someone may be tampering with it.');
+
+  // The one transport that media uses: the participant's single sender, or the technician's
+  // single receiver (the one whose track is on screen).
+  function mediaTransport() {
+    const ends = role === 'participant' ? pc.getSenders() : pc.getReceivers();
+    return ends.length === 1 ? ends[0].transport : null;
+  }
+
+  async function securityCheck(conn, mine0) {
+    const transport = mediaTransport();
+    if (!transport) { refuseTopology(); return; }
+    const remote = transport.getRemoteCertificates ? transport.getRemoteCertificates() : [];
     if (!remote.length) {
       root.dataset.sas = 'unavailable';
       setText('sas', 'not available in this browser');
@@ -109,6 +125,7 @@
       return;
     }
     const theirs = await sha256(remote[0]);
+    if (stale(conn, mine0)) return;
     const mine = localFingerprint();
     if (role === 'participant' && (await commitTo(theirs)) !== commitment) {
       // The certificate in use is not the one the technician committed to.
@@ -117,49 +134,71 @@
       return;
     }
     const [tech, part] = role === 'technician' ? [mine, theirs] : [theirs, mine];
-    const d = new Uint8Array(await crypto.subtle.digest('SHA-256',
-      new TextEncoder().encode(`flyw8t-sas-v1|${sessionId}|${tech}|${part}`)));
-    const n = (((d[0] << 24) >>> 0) + (d[1] << 16) + (d[2] << 8) + d[3]) % 1000000;
-    const code = String(n).padStart(6, '0');
-    if (ended) return;
+    const code = await securityCode(sessionId, tech, part);
+    if (stale(conn, mine0)) return;
     root.dataset.sas = 'shown';
     setText('sas', `${code.slice(0, 3)} ${code.slice(3)}`);
     show('sas-box', true);
   }
 
+  async function securityCode(session, techFp, partFp) {
+    const d = new Uint8Array(await crypto.subtle.digest('SHA-256',
+      new TextEncoder().encode(`flyw8t-sas-v1|${session}|${techFp}|${partFp}`)));
+    const n = (((d[0] << 24) >>> 0) + (d[1] << 16) + (d[2] << 8) + d[3]) % 1000000;
+    return String(n).padStart(6, '0');
+  }
+
+  // An operation started before an ending, or for a connection since replaced, must not act.
+  const stale = (conn, mine) => ended || mine !== epoch || (conn !== undefined && pc !== conn);
+
   function newPeerConnection() {
-    pc = new RTCPeerConnection({ iceServers: ice, certificates: [cert] });
-    const mine = pc;
-    pc.onicecandidate = (e) => { if (e.candidate && pc === mine) send({ type: 'signal', data: { candidate: e.candidate.toJSON() } }); };
+    // One bundled transport for everything: the security code covers exactly that transport.
+    pc = new RTCPeerConnection({ iceServers: ice, certificates: [cert], bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
+    const conn = pc;
+    const mine = epoch;
+    let shown = false;
+    pc.onicecandidate = (e) => { if (e.candidate && !stale(conn, mine)) send({ type: 'signal', data: { candidate: e.candidate.toJSON() } }); };
     pc.onconnectionstatechange = () => {
-      if (pc !== mine) return;
-      if (pc.connectionState === 'connected') {
+      if (stale(conn, mine)) return;
+      if (conn.connectionState === 'connected') {
         send({ type: 'media', state: 'connected' });
-        securityCheck();
-      } else if (pc.connectionState === 'failed') {
+        securityCheck(conn, mine);
+      } else if (conn.connectionState === 'failed') {
         send({ type: 'media', state: 'failed' });
       }
     };
     pc.ontrack = (e) => {
+      if (stale(conn, mine)) return;
+      if (shown || e.track.kind !== 'video') { refuseTopology(); return; }
+      shown = true;
       const video = $('remote');
-      if (video && pc === mine) video.srcObject = e.streams[0] || new MediaStream([e.track]);
+      if (video) video.srcObject = e.streams[0] || new MediaStream([e.track]);
     };
   }
 
   async function onSignal(data) {
     if (ended) return;
+    const mine = epoch;
     if (data.commit && role === 'participant') {
       if (commitment === null) commitment = String(data.commit);
       await maybeStartSharing();
     } else if (data.sdp && role === 'technician' && data.sdp.type === 'offer') {
       if (offered) return; // the certificate was committed to once; no renegotiation
       offered = true;
+      if (!oneVideoSection(data.sdp)) { refuseTopology(); return; }
       await certReady;
+      if (stale(undefined, mine)) return;
       newPeerConnection();
-      await pc.setRemoteDescription(data.sdp);
-      await pc.setLocalDescription(await pc.createAnswer());
-      send({ type: 'signal', data: { sdp: pc.localDescription } });
+      const conn = pc;
+      await conn.setRemoteDescription(data.sdp);
+      if (stale(conn, mine)) return;
+      const answer = await conn.createAnswer();
+      if (stale(conn, mine)) return;
+      await conn.setLocalDescription(answer);
+      if (stale(conn, mine)) return;
+      send({ type: 'signal', data: { sdp: conn.localDescription } });
     } else if (data.sdp && role === 'participant' && data.sdp.type === 'answer' && pc && !pc.remoteDescription) {
+      if (!oneVideoSection(data.sdp)) { refuseTopology(); return; }
       await pc.setRemoteDescription(data.sdp);
     } else if (data.candidate && pc) {
       try { await pc.addIceCandidate(data.candidate); } catch (_) { /* stale candidate */ }
@@ -170,12 +209,17 @@
   // commitment in hand.
   async function maybeStartSharing() {
     if (ended || pc || !stream || commitment === null || root.dataset.state !== 'connecting') return;
+    const mine = epoch;
     await certReady;
-    if (ended || pc || !stream) return;
+    if (stale(undefined, mine) || pc || !stream) return;
     newPeerConnection();
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-    await pc.setLocalDescription(await pc.createOffer());
-    send({ type: 'signal', data: { sdp: pc.localDescription } });
+    const conn = pc;
+    stream.getVideoTracks().slice(0, 1).forEach((track) => conn.addTrack(track, stream));
+    const offer = await conn.createOffer();
+    if (stale(conn, mine)) return;
+    await conn.setLocalDescription(offer);
+    if (stale(conn, mine)) return;
+    send({ type: 'signal', data: { sdp: conn.localDescription } });
   }
 
   async function onState(msg) {
@@ -183,8 +227,11 @@
     if (msg.state !== 'connecting') return;
     if (role === 'technician' && !committed) {
       committed = true;
+      const mine = epoch;
       await certReady;
-      send({ type: 'signal', data: { commit: await commitTo(localFingerprint()) } });
+      const commit = await commitTo(localFingerprint());
+      if (stale(undefined, mine)) return;
+      send({ type: 'signal', data: { commit } });
     } else if (role === 'participant') {
       await maybeStartSharing();
     }
@@ -216,19 +263,19 @@
       if (ended || allow.disabled) return;
       setText('error', '');
       allow.disabled = true;
-      const mine = ++picker;
+      const mine = ++epoch;
       let chosen;
       try {
         // The browser's own picker: the person chooses exactly what to share, or nothing.
         chosen = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       } catch (_) {
-        if (mine === picker && !ended) {
+        if (mine === epoch && !ended) {
           allow.disabled = false;
           setText('error', 'Nothing was shared. You can try again, or decline.');
         }
         return;
       }
-      if (ended || mine !== picker) {
+      if (ended || mine !== epoch) {
         // The session ended while the picker was open: never start capturing now.
         chosen.getTracks().forEach((t) => t.stop());
         return;

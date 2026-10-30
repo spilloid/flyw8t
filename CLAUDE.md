@@ -47,7 +47,7 @@ Dated claims that no automated check covers (STD-003 rule 4):
 - **2026-10-29**: CI (`.github/workflows/ci.yml`) has never run; nothing has been pushed. The Linux job's assumptions (ping to TEST-NET-1 times out; `ip addr` exists; Chrome at `/usr/bin/google-chrome`) are unverified.
 - **2026-10-29**: `docs/spec/JobDelivery.tla` has not been model-checked with TLC.
 - **2026-10-29**: Attended support was exercised with headless Chrome's fake screen source on one machine. No NAT, STUN or TURN path, and no second physical machine, has been tried. The security code relies on `RTCDtlsTransport.getRemoteCertificates()`, verified only in Chrome; Firefox and Safari are untested.
-- **2026-10-29**: The attended-support and two-step-verification fixes (dev-process rows 12 and 13) have not had a second cross-family review.
+- **2026-10-29**: The second-round fixes (dev-process row 15) have not been reviewed. Open from that review: two link posts racing in one browser can bind two support sessions.
 - **2026-10-29**: Windows journal-rename durability across power loss is assumed from NTFS journaling, not proven (review finding 10).
 - **2026-10-29**: One unidentified protocol-suite failure in six full parallel runs (dev-process row 9).
 - **2026-10-29**: Console screenshots are not in the repository. `ui_capture` renders the test machine's real hostname, IP and MAC addresses, so `docs/img/` is git-ignored until captures come from a synthetic device (a fake agent with fabricated inventory).
