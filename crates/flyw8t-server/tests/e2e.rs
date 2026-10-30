@@ -71,9 +71,11 @@ async fn vertical_slice() {
             .await
             .unwrap();
     assert_eq!(exit, Some(0));
+    // `ipconfig /all` says "IPv4"; `ip addr` says "inet".
+    let out = stdout.unwrap().to_lowercase();
     assert!(
-        stdout.unwrap().to_lowercase().contains("ip"),
-        "real ipconfig output expected"
+        out.contains("ipv4") || out.contains("inet"),
+        "real adapter output expected: {out}"
     );
     let kinds = event_kinds(&server, job).await;
     for k in [
