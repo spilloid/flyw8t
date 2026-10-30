@@ -55,21 +55,19 @@ pub const SUPPORT_CSP: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Technician,
+    /// The person being helped, in their browser: consent, status and End.
     Participant,
+    /// The native helper on the participant's machine (control sessions, ADR-0012). In a
+    /// control session it, not the browser, is the technician's media peer.
+    Helper,
 }
 
 impl Side {
-    fn other(self) -> Side {
-        match self {
-            Side::Technician => Side::Participant,
-            Side::Participant => Side::Technician,
-        }
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Side::Technician => "technician",
             Side::Participant => "participant",
+            Side::Helper => "helper",
         }
     }
 }
@@ -80,6 +78,7 @@ pub enum Who {
     System,
     User(Box<Principal>),
     Participant { ip: String },
+    Helper { ip: String },
 }
 
 impl Who {
@@ -88,6 +87,7 @@ impl Who {
             Who::System => "system".into(),
             Who::User(p) => format!("user:{}", p.email),
             Who::Participant { .. } => "participant".into(),
+            Who::Helper { .. } => "helper".into(),
         }
     }
 
@@ -98,12 +98,13 @@ impl Who {
             Who::Participant { ip } => {
                 Audit::anonymous("support", "participant", action).ip(ip.clone())
             }
+            Who::Helper { ip } => Audit::anonymous("support", "helper", action).ip(ip.clone()),
         }
     }
 }
 
 // ---------------------------------------------------------------------------------------
-// Wire format (browser <-> server)
+// Wire format (browser or helper <-> server)
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -125,6 +126,12 @@ enum Out {
     },
     Signal {
         data: Value,
+    },
+    /// To the participant's browser in a control session, after its Allow: where to get the
+    /// helper. The link carries the one-time launch token (ADR-0012 section 2).
+    Helper {
+        download: String,
+        expires_in_secs: u64,
     },
     Ended {
         state: &'static str,
@@ -155,13 +162,17 @@ struct Peer {
 struct Peers {
     technician: Option<Peer>,
     participant: Option<Peer>,
+    helper: Option<Peer>,
+    /// A control session: the helper is the technician's media peer, and the participant's
+    /// browser carries no signaling at all.
+    control: bool,
     /// Signaling flows only while this is set: opened after consent commits, never reopened
     /// once `sealed`.
     relay_open: bool,
     /// Set before an ending commits, so no signal slips through between the commit and the
     /// sockets closing.
     sealed: bool,
-    /// Each side's report that media is flowing (technician, participant).
+    /// Each end's report that media is flowing: the technician, and its media peer.
     media: [bool; 2],
 }
 
@@ -170,7 +181,32 @@ impl Peers {
         match side {
             Side::Technician => &mut self.technician,
             Side::Participant => &mut self.participant,
+            Side::Helper => &mut self.helper,
         }
+    }
+
+    /// The technician's media peer: the helper in a control session, else the browser.
+    fn media_peer(&self) -> Side {
+        if self.control {
+            Side::Helper
+        } else {
+            Side::Participant
+        }
+    }
+
+    /// Where `from`'s signaling goes, if it may send any.
+    fn relay_target(&self, from: Side) -> Option<Side> {
+        match from {
+            Side::Technician => Some(self.media_peer()),
+            s if s == self.media_peer() => Some(Side::Technician),
+            _ => None,
+        }
+    }
+
+    fn all(self) -> impl Iterator<Item = Peer> {
+        [self.technician, self.participant, self.helper]
+            .into_iter()
+            .flatten()
     }
 }
 
@@ -187,9 +223,11 @@ pub struct SupportHub {
 
 impl SupportHub {
     /// Attach a socket; returns whether it replaced one already attached for that side.
-    fn attach(&self, session: Uuid, side: Side, peer: Peer) -> bool {
+    fn attach(&self, session: Uuid, side: Side, control: bool, peer: Peer) -> bool {
         let mut s = self.sessions.lock().unwrap();
-        match s.entry(session).or_default().side(side).replace(peer) {
+        let peers = s.entry(session).or_default();
+        peers.control = control;
+        match peers.side(side).replace(peer) {
             Some(old) => {
                 old.close.cancel();
                 true
@@ -208,7 +246,7 @@ impl SupportHub {
             {
                 *peers.side(side) = None;
             }
-            if peers.technician.is_none() && peers.participant.is_none() {
+            if peers.technician.is_none() && peers.participant.is_none() && peers.helper.is_none() {
                 s.remove(&session);
             }
         }
@@ -232,10 +270,14 @@ impl SupportHub {
         tx.is_some_and(|tx| tx.try_send(msg).is_ok())
     }
 
-    /// Relay signaling to `to`, checked and sent under one lock so it cannot race an ending.
-    fn relay(&self, session: Uuid, to: Side, data: Value) -> Relay {
+    /// Relay signaling from `from` to its peer, checked and sent under one lock so it cannot
+    /// race an ending. In a control session the browser has no peer: it never relays.
+    fn relay(&self, session: Uuid, from: Side, data: Value) -> Relay {
         let mut s = self.sessions.lock().unwrap();
         let Some(peers) = s.get_mut(&session) else {
+            return Relay::NotAllowed;
+        };
+        let Some(to) = peers.relay_target(from) else {
             return Relay::NotAllowed;
         };
         if !peers.relay_open || peers.sealed {
@@ -271,37 +313,56 @@ impl SupportHub {
         }
     }
 
-    /// Record that `side` sees media flowing; `true` once both sides have said so.
+    /// Record that `side` sees media flowing; `true` once the technician and its media peer
+    /// have both said so. Anyone else's report counts for nothing.
     fn media_connected(&self, session: Uuid, side: Side) -> bool {
         let mut s = self.sessions.lock().unwrap();
         let Some(p) = s.get_mut(&session) else {
             return false;
         };
-        p.media[side as usize] = true;
+        let slot = match side {
+            Side::Technician => 0,
+            s if s == p.media_peer() => 1,
+            _ => return false,
+        };
+        p.media[slot] = true;
         p.media == [true, true]
     }
 
-    /// Tell both sides the current state; on a terminal state, close both sockets with a
+    /// Tell every side the current state; on a terminal state, close every socket with a
     /// final notice that cannot be lost to a full queue.
     fn publish(&self, session: Uuid, state: SupportState) {
         if state.is_terminal() {
             let peers = self.sessions.lock().unwrap().remove(&session);
-            if let Some(peers) = peers {
-                for p in [peers.technician, peers.participant].into_iter().flatten() {
-                    *p.last.lock().unwrap() = Some(Out::Ended {
-                        state: state.as_str(),
-                        label: state.label(),
-                    });
-                    p.close.cancel();
-                }
+            for p in peers.into_iter().flat_map(Peers::all) {
+                *p.last.lock().unwrap() = Some(Out::Ended {
+                    state: state.as_str(),
+                    label: state.label(),
+                });
+                p.close.cancel();
             }
             return;
         }
-        for side in [Side::Technician, Side::Participant] {
+        let (media_peer, control) = {
+            let s = self.sessions.lock().unwrap();
+            s.get(&session)
+                .map_or((Side::Participant, false), |p| (p.media_peer(), p.control))
+        };
+        for side in [Side::Technician, Side::Participant, Side::Helper] {
+            if side == Side::Helper && !control {
+                continue;
+            }
+            // The technician wants to know whether its media peer is there; the others,
+            // whether the technician is.
+            let other = if side == Side::Technician {
+                media_peer
+            } else {
+                Side::Technician
+            };
             let msg = Out::State {
                 state: state.as_str(),
                 label: state.label(),
-                peer_present: self.present(session, side.other()),
+                peer_present: self.present(session, other),
             };
             self.send(session, side, msg);
         }
@@ -463,8 +524,8 @@ async fn end(state: &Shared, id: Uuid, side: Side, who: &Who, reason: &str) -> a
     use SupportState::*;
     let decide = |current| match (side, current) {
         (_, Connecting | Connected) => Some(Closed),
-        (Side::Technician, Created | Waiting | Authorizing) => Some(Revoked),
-        (Side::Participant, Authorizing) => Some(Rejected),
+        (Side::Technician, Created | Waiting | Authorizing | AwaitingHelper) => Some(Revoked),
+        (Side::Participant | Side::Helper, Authorizing | AwaitingHelper) => Some(Rejected),
         _ => None,
     };
     change_with(state, id, decide, who, "ended", reason).await?;
@@ -481,7 +542,7 @@ pub async fn end_all_created_by(
 ) -> anyhow::Result<()> {
     let ids: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM support_sessions WHERE created_by = $1
-            AND state IN ('created', 'waiting', 'authorizing', 'connecting', 'connected')",
+            AND state IN ('created', 'waiting', 'authorizing', 'awaiting_helper', 'connecting', 'connected')",
     )
     .bind(user)
     .fetch_all(&state.db)
@@ -539,9 +600,18 @@ pub async fn create(
     state: &Shared,
     p: &Principal,
     organization: Uuid,
+    control: bool,
     note: Option<String>,
 ) -> AppResult<Created> {
     p.require(Permission::RunSupportSessions)?;
+    if control {
+        p.require(Permission::RunControlSessions)?;
+    }
+    let capabilities: Vec<&str> = if control {
+        vec!["view_screen", "control_input"]
+    } else {
+        vec!["view_screen"]
+    };
     if !p.can_see_org(organization) {
         return Err(AppError::NotFound);
     }
@@ -556,7 +626,7 @@ pub async fn create(
         .await?;
     let (live,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM support_sessions WHERE created_by = $1
-            AND state IN ('created', 'waiting', 'authorizing', 'connecting', 'connected', 'disconnecting')",
+            AND state IN ('created', 'waiting', 'authorizing', 'awaiting_helper', 'connecting', 'connected', 'disconnecting')",
     )
     .bind(p.user_id)
     .fetch_one(&mut *tx)
@@ -568,7 +638,7 @@ pub async fn create(
     }
     let (id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO support_sessions (created_by, organization_id, capabilities, note, state, code_hash, invite_hash, invite_expires_at)
-         VALUES ($1, $2, ARRAY['view_screen'], $3, 'created', $4, $5, now() + make_interval(secs => $6)) RETURNING id",
+         VALUES ($1, $2, $7, $3, 'created', $4, $5, now() + make_interval(secs => $6)) RETURNING id",
     )
     .bind(p.user_id)
     .bind(organization)
@@ -576,6 +646,7 @@ pub async fn create(
     .bind(code_hash)
     .bind(link_digest(&invite))
     .bind(state.config.support_invite_ttl.as_secs_f64())
+    .bind(&capabilities)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match &e {
@@ -597,7 +668,7 @@ pub async fn create(
     Audit::user(p, "support.create")
         .org(organization)
         .target("support_session", id)
-        .detail(json!({ "capabilities": ["view_screen"] }))
+        .detail(json!({ "capabilities": capabilities }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -868,7 +939,13 @@ pub async fn create_handler(
             .map(str::trim)
             .filter(|n| !n.is_empty())
             .map(String::from);
-        let c = create(&state, &p, org, note).await?;
+        // View is the default; control must be chosen on purpose.
+        let control = match form.get("capability").unwrap_or("view") {
+            "view" => false,
+            "control" => true,
+            _ => return Err(AppError::BadRequest("Unknown capability.".into())),
+        };
+        let c = create(&state, &p, org, control, note).await?;
         list(&state, &p, Some((c.id, c.code, c.invite))).await
     }
     .await;
@@ -1096,6 +1173,7 @@ async fn consent_page(state: &Shared, headers: &HeaderMap) -> Response {
         .to_string();
     let view = SupportConsentView {
         session_id: id,
+        control: caps.iter().any(|c| c == "control_input"),
         technician_name: name,
         technician_email: email,
         server_host: host,
@@ -1141,13 +1219,15 @@ pub async fn technician_ws(
         _ => return StatusCode::UNAUTHORIZED.into_response(),
     };
     // Only the technician the participant is shown (the creator) may receive signaling.
-    match visible_session(&state, &p, id).await {
-        Ok(row) if row.created_by_id == p.user_id => {}
+    let control = match visible_session(&state, &p, id).await {
+        Ok(row) if row.created_by_id == p.user_id => {
+            row.capabilities.iter().any(|c| c == "control_input")
+        }
         _ => return StatusCode::NOT_FOUND.into_response(),
-    }
+    };
     let who = Who::User(Box::new(p));
     ws.max_message_size(MAX_SIGNAL_BYTES)
-        .on_upgrade(move |socket| run_socket(state, socket, id, Side::Technician, who))
+        .on_upgrade(move |socket| run_socket(state, socket, id, Side::Technician, control, who))
 }
 
 pub async fn participant_ws(
@@ -1164,8 +1244,11 @@ pub async fn participant_ws(
             let who = Who::Participant {
                 ip: peer.ip().to_string(),
             };
+            let control = is_control(&state, id).await;
             ws.max_message_size(MAX_SIGNAL_BYTES)
-                .on_upgrade(move |socket| run_socket(state, socket, id, Side::Participant, who))
+                .on_upgrade(move |socket| {
+                    run_socket(state, socket, id, Side::Participant, control, who)
+                })
         }
         _ => StatusCode::UNAUTHORIZED.into_response(),
     }
@@ -1217,7 +1300,14 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often a technician socket re-checks the sign-in session it was opened with.
 const SESSION_RECHECK: Duration = Duration::from_secs(15);
 
-async fn run_socket(state: Shared, socket: WebSocket, id: Uuid, side: Side, who: Who) {
+async fn run_socket(
+    state: Shared,
+    socket: WebSocket,
+    id: Uuid,
+    side: Side,
+    control: bool,
+    who: Who,
+) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Out>(PEER_BUFFER);
     let close = CancellationToken::new();
@@ -1236,6 +1326,7 @@ async fn run_socket(state: Shared, socket: WebSocket, id: Uuid, side: Side, who:
     let replaced = state.support.attach(
         id,
         side,
+        control,
         Peer {
             conn_id,
             tx,
@@ -1325,13 +1416,16 @@ async fn run_socket(state: Shared, socket: WebSocket, id: Uuid, side: Side, who:
         }
     }
     state.support.detach(id, side, conn_id);
-    // Leaving mid-session ends it: the safe default for screen sharing.
+    // Leaving mid-session ends it: the safe default for screen sharing. A helper that
+    // goes away after attaching ends the session too; it cannot come back (its token is spent).
     if let Some(st) = current(&state, id).await {
-        if matches!(st, SupportState::Connecting | SupportState::Connected) {
-            let reason = if side == Side::Technician {
-                "technician left"
-            } else {
-                "participant left"
+        let live = matches!(st, SupportState::Connecting | SupportState::Connected)
+            || (side == Side::Helper && st == SupportState::AwaitingHelper);
+        if live {
+            let reason = match side {
+                Side::Technician => "technician left",
+                Side::Participant => "participant left",
+                Side::Helper => "helper closed",
             };
             let _ = end(&state, id, side, &who, reason).await;
         } else if !st.is_terminal() {
@@ -1348,9 +1442,24 @@ async fn on_message(
     msg: In,
 ) -> anyhow::Result<()> {
     use SupportState::*;
+    let nothing = |state: &Shared, message: &str| {
+        state.support.send(
+            id,
+            side,
+            Out::Error {
+                message: message.into(),
+            },
+        );
+    };
     match (side, msg) {
+        // The browser's Allow: straight to media for a view session; for a control session,
+        // to the helper step, which still needs the helper's own Allow.
         (Side::Participant, In::Approve) => {
-            if change(
+            if is_control(state, id).await {
+                if !allow_control_in_browser(state, id, who).await? {
+                    nothing(state, "nothing to approve");
+                }
+            } else if change(
                 state,
                 id,
                 &[Authorizing],
@@ -1362,20 +1471,14 @@ async fn on_message(
             .await?
             .is_none()
             {
-                state.support.send(
-                    id,
-                    side,
-                    Out::Error {
-                        message: "nothing to approve".into(),
-                    },
-                );
+                nothing(state, "nothing to approve");
             }
         }
         (Side::Participant, In::Decline) => {
             change(
                 state,
                 id,
-                &[Authorizing],
+                &[Authorizing, AwaitingHelper],
                 Rejected,
                 who,
                 "declined",
@@ -1383,21 +1486,49 @@ async fn on_message(
             )
             .await?;
         }
+        // The second consent, given in the helper's own window (ADR-0012 section 4).
+        (Side::Helper, In::Approve) => {
+            if change(
+                state,
+                id,
+                &[AwaitingHelper],
+                Connecting,
+                who,
+                "control_consented",
+                "participant allowed control_input in the helper",
+            )
+            .await?
+            .is_none()
+            {
+                nothing(state, "nothing to approve");
+            }
+        }
+        (Side::Helper, In::Decline) => {
+            change(
+                state,
+                id,
+                &[AwaitingHelper],
+                Rejected,
+                who,
+                "declined",
+                "participant declined in the helper",
+            )
+            .await?;
+        }
         (_, In::Signal { data }) => {
-            // Nothing reaches the other side before consent or after the end.
-            let message = match state.support.relay(id, side.other(), data) {
+            // Nothing reaches the other side before consent or after the end, and a control
+            // session's browser page has nothing to relay at all.
+            let message = match state.support.relay(id, side, data) {
                 Relay::Sent => None,
                 Relay::NotAllowed => Some("not allowed before consent"),
                 Relay::NoPeer => Some("the other person is not connected"),
             };
             if let Some(m) = message {
-                state
-                    .support
-                    .send(id, side, Out::Error { message: m.into() });
+                nothing(state, m);
             }
         }
         (_, In::Media { state: media }) => match media.as_str() {
-            // Connected only when both browsers say media is flowing.
+            // Connected only when the technician and its media peer both say media flows.
             "connected" if state.support.media_connected(id, side) => {
                 change(
                     state,
@@ -1425,24 +1556,226 @@ async fn on_message(
             _ => {}
         },
         (_, In::End) => {
-            let reason = if side == Side::Technician {
-                "ended by technician"
-            } else {
-                "ended by participant"
+            let reason = match side {
+                Side::Technician => "ended by technician",
+                Side::Participant => "ended by participant",
+                Side::Helper => "ended in the helper",
             };
             end(state, id, side, who, reason).await?;
         }
         (Side::Technician, In::Approve | In::Decline) => {
-            state.support.send(
-                id,
-                side,
-                Out::Error {
-                    message: "only the person being helped can allow or decline".into(),
-                },
-            );
+            nothing(state, "only the person being helped can allow or decline");
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// Control sessions: the helper (ADR-0012)
+
+/// How long a helper launch token works after the browser's Allow.
+const HELPER_TOKEN_TTL_SECS: u64 = 120;
+/// How long a session waits in `awaiting_helper` before it expires.
+const AWAITING_HELPER_TIMEOUT_SECS: f64 = 5.0 * 60.0;
+
+async fn is_control(state: &Shared, id: Uuid) -> bool {
+    sqlx::query_as::<_, (bool,)>(
+        "SELECT 'control_input' = ANY (capabilities) FROM support_sessions WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|r| r.0)
+}
+
+/// The browser's Allow in a control session: issue the one-time launch token and move to
+/// `awaiting_helper`. Nothing is relayed yet; the helper must attach and be allowed too.
+async fn allow_control_in_browser(state: &Shared, id: Uuid, who: &Who) -> anyhow::Result<bool> {
+    let token = auth::random_secret(32);
+    let mut tx = state.db.begin().await?;
+    let Some((current, org)) = lock_state(&mut tx, id).await? else {
+        return Ok(false);
+    };
+    if current != SupportState::Authorizing {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE support_sessions SET helper_token_hash = $2, awaiting_helper_at = now(),
+                helper_token_expires_at = now() + make_interval(secs => $3)
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(auth::digest(&token))
+    .bind(HELPER_TOKEN_TTL_SECS as f64)
+    .execute(&mut *tx)
+    .await?;
+    apply(
+        &mut tx,
+        id,
+        SupportState::Authorizing,
+        SupportState::after_browser_consent(true),
+        &who.actor(),
+        "consented",
+        "participant allowed control_input in the browser",
+    )
+    .await?;
+    let mut audit = who
+        .audit("support.control.browser_consent")
+        .target("support_session", id);
+    if let Some(org) = org {
+        audit = audit.org(org);
+    }
+    audit.record(&mut *tx).await?;
+    tx.commit().await?;
+    state.support.publish(id, SupportState::AwaitingHelper);
+    state.support.send(
+        id,
+        Side::Participant,
+        Out::Helper {
+            download: format!("/s/helper/flyw8t-helper-{token}.exe"),
+            expires_in_secs: HELPER_TOKEN_TTL_SECS,
+        },
+    );
+    Ok(true)
+}
+
+/// Spend a launch token: once, before it expires, only while the session awaits its helper.
+async fn spend_helper_token(state: &Shared, token: &str, ip: &str) -> anyhow::Result<Option<Uuid>> {
+    let mut tx = state.db.begin().await?;
+    let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, organization_id FROM support_sessions
+          WHERE helper_token_hash = $1 AND state = 'awaiting_helper' AND helper_token_expires_at > now()
+          FOR UPDATE",
+    )
+    .bind(auth::digest(token))
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((id, org)) = row else {
+        return Ok(None);
+    };
+    sqlx::query(
+        "UPDATE support_sessions SET helper_token_hash = NULL, helper_attached_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO support_events (session_id, kind, actor, detail) VALUES ($1, 'helper_attached', 'helper', $2)")
+        .bind(id)
+        .bind(json!({ "ip": ip }))
+        .execute(&mut *tx)
+        .await?;
+    let mut audit = Audit::anonymous("support", "helper", "support.helper.attach")
+        .ip(ip)
+        .target("support_session", id);
+    if let Some(org) = org {
+        audit = audit.org(org);
+    }
+    audit.record(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(Some(id))
+}
+
+/// `GET /api/support/helper/ws` with `Authorization: Bearer <launch token>`. A browser page
+/// cannot set that header on a WebSocket, so only a native program can attach here.
+pub async fn helper_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::origin_is_self(&state.config, &headers) == Some(false) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let ip = peer.ip().to_string();
+    if !state.limiter.allow(
+        &format!("support-helper:{ip}"),
+        10,
+        Duration::from_secs(600),
+    ) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && t.len() <= 100)
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match spend_helper_token(&state, token, &ip).await {
+        Ok(Some(id)) => {
+            let who = Who::Helper { ip };
+            ws.max_message_size(MAX_SIGNAL_BYTES)
+                .on_upgrade(move |socket| run_socket(state, socket, id, Side::Helper, true, who))
+        }
+        Ok(None) => {
+            let _ = Audit::anonymous("support", "helper", "support.helper.attach")
+                .ip(&ip)
+                .denied()
+                .record(&state.db)
+                .await;
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        Err(e) => error_response(None, AppError::Internal(e)),
+    }
+}
+
+/// `GET /s/helper/flyw8t-helper-<token>.exe`: the helper, named so it carries its launch
+/// token (ADR-0012 section 2). Only for the browser bound to that session, while it awaits
+/// its helper. Downloading spends nothing; attaching does.
+pub async fn helper_download(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(file): Path<String>,
+) -> Response {
+    let not_here = |msg: &str| participant_error(StatusCode::NOT_FOUND, msg);
+    let Some(token) = file
+        .strip_prefix("flyw8t-helper-")
+        .and_then(|f| f.strip_suffix(".exe"))
+    else {
+        return not_here("That download is not valid.");
+    };
+    let found: Option<(Uuid,)> = match participant_session(&state, &headers).await {
+        Ok(Some((id, SupportState::AwaitingHelper))) => sqlx::query_as(
+            "SELECT id FROM support_sessions WHERE id = $1 AND helper_token_hash = $2
+                AND helper_token_expires_at > now()",
+        )
+        .bind(id)
+        .bind(auth::digest(token))
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten(),
+        _ => None,
+    };
+    if found.is_none() {
+        return not_here("This download has expired or is not for this browser. Go back to the support page and allow control again.");
+    }
+    let Some(path) = &state.config.helper_path else {
+        return not_here("This server does not offer the flyw8t helper yet, so remote control is not available. Screen viewing still works.");
+    };
+    match tokio::fs::read(path).await {
+        Ok(bytes) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    "application/vnd.microsoft.portable-executable".to_string(),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{file}\""),
+                ),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => error_response(None, AppError::Internal(e.into())),
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1450,7 +1783,14 @@ async fn on_message(
 
 pub async fn sweep(state: &Shared) -> anyhow::Result<()> {
     use SupportState::*;
-    let rules: [(&str, f64, SupportState, SupportState, &str); 4] = [
+    let rules: [(&str, f64, SupportState, SupportState, &str); 5] = [
+        (
+            "state = 'awaiting_helper' AND awaiting_helper_at + make_interval(secs => $1) <= now()",
+            AWAITING_HELPER_TIMEOUT_SECS,
+            AwaitingHelper,
+            Expired,
+            "the helper was not started",
+        ),
         (
             "state = 'waiting' AND invite_expires_at <= now()",
             0.0,
@@ -1539,29 +1879,26 @@ mod tests {
         let id = Uuid::new_v4();
         let (t, _trx, _) = peer();
         let (p, mut prx, _) = peer();
-        hub.attach(id, Side::Technician, t);
-        hub.attach(id, Side::Participant, p);
+        hub.attach(id, Side::Technician, false, t);
+        hub.attach(id, Side::Participant, false, p);
         assert!(matches!(
-            hub.relay(id, Side::Participant, json!(1)),
+            hub.relay(id, Side::Technician, json!(1)),
             Relay::NotAllowed
         ));
         hub.open_relay(id);
         assert!(matches!(
-            hub.relay(id, Side::Participant, json!(2)),
+            hub.relay(id, Side::Technician, json!(2)),
             Relay::Sent
         ));
         assert!(matches!(prx.try_recv(), Ok(Out::Signal { .. })));
         hub.seal(id);
         assert!(matches!(
-            hub.relay(id, Side::Participant, json!(3)),
+            hub.relay(id, Side::Technician, json!(3)),
             Relay::NotAllowed
         ));
         hub.open_relay(id);
         assert!(
-            matches!(
-                hub.relay(id, Side::Participant, json!(4)),
-                Relay::NotAllowed
-            ),
+            matches!(hub.relay(id, Side::Technician, json!(4)), Relay::NotAllowed),
             "a sealed session never reopens"
         );
     }
@@ -1572,7 +1909,7 @@ mod tests {
         let id = Uuid::new_v4();
         let (p, _rx, last) = peer();
         let close = p.close.clone();
-        hub.attach(id, Side::Participant, p);
+        hub.attach(id, Side::Participant, false, p);
         while hub.send(
             id,
             Side::Participant,
@@ -1596,7 +1933,7 @@ mod tests {
         let hub = SupportHub::default();
         let id = Uuid::new_v4();
         let (t, _a, _) = peer();
-        hub.attach(id, Side::Technician, t);
+        hub.attach(id, Side::Technician, false, t);
         assert!(!hub.media_connected(id, Side::Technician));
         assert!(
             !hub.media_connected(id, Side::Technician),

@@ -31,6 +31,9 @@ pub struct Config {
     pub session_ttl: Duration,
     /// Every console user must set up a second factor before reaching the console.
     pub require_mfa: bool,
+    /// The signed `flyw8t-helper.exe` offered to participants of control sessions. Without it,
+    /// the server says remote control is not available.
+    pub helper_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -62,6 +65,7 @@ impl Config {
             tls,
             bootstrap_admin,
             ice_servers: var("FLYW8T_ICE_SERVERS").unwrap_or_else(|| "[]".into()),
+            helper_path: var("FLYW8T_HELPER_PATH").map(PathBuf::from),
             require_mfa: match var("FLYW8T_REQUIRE_MFA").as_deref() {
                 None | Some("true") => true,
                 Some("false") => false,
@@ -90,6 +94,7 @@ impl Config {
             ice_servers: "[]".into(),
             session_ttl: Duration::from_secs(12 * 60 * 60),
             require_mfa: true,
+            helper_path: None,
         }
     }
 

@@ -22,7 +22,7 @@ const commitOf = async (d) => sha(`flyw8t-sas-commit-v1|${SID}|${await sha(d)}`)
 
 // A page with support.js loaded. `localDer` is this browser's certificate, `remoteDer` the
 // one the other end presents over DTLS.
-async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0 }) {
+async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, control = false }) {
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) {
@@ -34,7 +34,7 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
     }
     return els.get(id);
   };
-  el('support').dataset = { role, session: SID, ice: '[]', state: role === 'participant' ? 'authorizing' : 'waiting' };
+  el('support').dataset = { role, session: SID, ice: '[]', state: role === 'participant' ? 'authorizing' : 'waiting', control: control ? '1' : '0' };
   const sockets = [];
   const peers = [];
   let pickerCalls = 0;
@@ -285,4 +285,32 @@ test('a certificate that arrives just after "connected" still gives a code', asy
   await settle();
   assert.equal(t.el('support').dataset.sas, 'shown');
   assert.equal(t.sas(), await expectedCode(tDer, pDer));
+});
+
+test('control session: Allow consents without a picker, then offers the helper', async () => {
+  const p = await page({ role: 'participant', localDer: der('p'), remoteDer: der('t'), control: true });
+  await p.el('allow').click();
+  assert.equal(p.pickerCalls(), 0, 'the helper captures, not the browser');
+  assert.equal(p.sent('approve').length, 1);
+  await p.recv(state('awaiting_helper'));
+  assert.equal(p.el('helper-box').hidden, false);
+  await p.recv({ type: 'helper', download: '/s/helper/flyw8t-helper-abc.exe', expires_in_secs: 120 });
+  assert.equal(p.el('helper-link').href, '/s/helper/flyw8t-helper-abc.exe');
+  // Only a same-server helper path is ever put in the link.
+  await p.recv({ type: 'helper', download: 'https://evil.example/helper.exe', expires_in_secs: 120 });
+  assert.equal(p.el('helper-link').href, '/s/helper/flyw8t-helper-abc.exe');
+  // The browser page never makes an offer in a control session.
+  await p.recv(state('connecting'));
+  assert.equal(p.peers.length, 0);
+  await p.recv({ type: 'ended', state: 'closed', label: 'Ended' });
+  assert.equal(p.el('helper-box').hidden, true);
+});
+
+test('control session: Cancel declines and ends', async () => {
+  const p = await page({ role: 'participant', localDer: der('p'), remoteDer: der('t'), control: true });
+  await p.el('allow').click();
+  await p.recv(state('awaiting_helper'));
+  p.el('cancel-helper').click();
+  assert.equal(p.sent('decline').length, 1);
+  assert.equal(p.el('support').dataset.state, 'ended');
 });

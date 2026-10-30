@@ -69,7 +69,7 @@ Ending the session takes **Ctrl+Alt+Shift+S**, a combination no remote input can
 
 ## Build order
 
-1. Server: the `control_input` capability, launch tokens, the helper peer side, audit, and a migration. The domain state machine gains an `awaiting_helper` step.
+ 1. **Done (2026-10-30).** Server: the `control_input` capability (`RunControlSessions` permission), launch tokens, the helper peer side, audit, migration 0005, and the `awaiting_helper` state. The browser page offers the helper download (`FLYW8T_HELPER_PATH`); no helper binary exists yet.
 2. Helper: pairing, signaling, and WebRTC with a synthetic test pattern (no capture yet). An end-to-end test goes from browser technician to helper.
 3. Capture and encoding (Windows.Graphics.Capture and Media Foundation).
 4. Input: the data channel, `SendInput`, the indicator, and the hotkey.

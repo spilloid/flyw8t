@@ -16,6 +16,9 @@
   const root = document.getElementById('support');
   if (!root) return;
   const role = root.dataset.role;
+  // A control session: the native helper captures and takes input (ADR-0012); this page only
+  // consents, shows status, offers the helper and can end it.
+  const control = root.dataset.control === '1';
   const sessionId = root.dataset.session || '';
   const ice = JSON.parse(root.dataset.ice || '[]');
   const $ = (id) => document.getElementById(id);
@@ -62,6 +65,7 @@
     setBadge(state, label);
     if (role === 'participant') {
       show('decide', state === 'authorizing');
+      show('helper-box', control && state === 'awaiting_helper');
       show('end', state === 'connecting' || state === 'connected');
     } else {
       setText('peer', peerPresent ? 'The other person has this session open.' : 'The other person does not have this session open yet.');
@@ -90,6 +94,7 @@
     show('end-live', false);
     show('sas-box', false);
     show('viewer', false);
+    show('helper-box', false);
     setText('peer', '');
   }
 
@@ -255,6 +260,11 @@
         await onSignal(msg.data || {});
       } else if (msg.type === 'ended') {
         finish(msg.state, msg.label);
+      } else if (msg.type === 'helper' && control && role === 'participant') {
+        // Only a helper download from this server ever goes into the link.
+        const link = $('helper-link');
+        if (link && typeof msg.download === 'string' && msg.download.startsWith('/s/helper/')) link.href = msg.download;
+        show('helper-box', true);
       } else if (msg.type === 'error') {
         setText('error', msg.message);
       }
@@ -269,6 +279,12 @@
     const allow = $('allow');
     allow.addEventListener('click', async () => {
       if (ended || allow.disabled) return;
+      if (control) {
+        // No picker here: the helper captures, after its own consent.
+        allow.disabled = true;
+        send({ type: 'approve' });
+        return;
+      }
       setText('error', '');
       allow.disabled = true;
       const mine = ++epoch;
@@ -293,6 +309,13 @@
       stream.getTracks().forEach((t) => { t.onended = () => endHere('closed', 'You stopped sharing. The session has ended.'); });
       send({ type: 'approve' });
     });
+    const cancelHelper = $('cancel-helper');
+    if (cancelHelper) {
+      cancelHelper.addEventListener('click', () => {
+        send({ type: 'decline' });
+        finish('rejected', 'Declined');
+      });
+    }
     $('decline').addEventListener('click', () => {
       send({ type: 'decline' });
       finish('rejected', 'Declined');

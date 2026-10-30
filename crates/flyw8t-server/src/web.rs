@@ -69,6 +69,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
         is_admin: p.role == Role::Admin,
         can_enroll: p.can(Permission::ManageEnrollment),
         can_support: p.can(Permission::RunSupportSessions),
+        can_control: p.can(Permission::RunControlSessions),
         flash,
     }
 }

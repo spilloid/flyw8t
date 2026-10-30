@@ -5,6 +5,7 @@ All notable changes to flyw8t. Dates are UTC.
 ## Unreleased
 
 ### Added
+- Remote control, server side (ADR-0012 step 1): sessions can request `control_input` (new `RunControlSessions` permission). The browser's Allow issues a single-use, 2-minute helper launch token and moves to `awaiting_helper`. The helper attaches with that token (`/api/support/helper/ws`) and must be allowed in its own window before anything is relayed. In a control session the helper, not the browser, is the technician's media peer, and `connected` needs both of them. Migration 0005. No helper binary yet.
 - The console installs to a phone's home screen as a standalone app (ADR-0011, accepted): web app manifest, regular and maskable icons, an Apple touch icon and a theme colour. `manifest-src 'self'` added to the content security policy. No script and no offline data.
 
 ### Fixed

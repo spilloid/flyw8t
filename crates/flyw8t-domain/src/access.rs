@@ -25,6 +25,9 @@ pub enum Permission {
     ManageUsers,
     ViewAudit,
     RunSupportSessions,
+    /// Attended sessions that include remote keyboard and mouse (ADR-0012). Separate from
+    /// viewing so it can be withheld on its own.
+    RunControlSessions,
 }
 
 impl Role {
@@ -56,7 +59,12 @@ impl Role {
             Role::Admin => true,
             Role::Technician => matches!(
                 p,
-                ViewDevices | RunDiagnostics | CancelJobs | ManageEnrollment | RunSupportSessions
+                ViewDevices
+                    | RunDiagnostics
+                    | CancelJobs
+                    | ManageEnrollment
+                    | RunSupportSessions
+                    | RunControlSessions
             ),
             Role::ReadOnly => matches!(p, ViewDevices),
         }
@@ -77,6 +85,8 @@ mod tests {
             Permission::ManageOrganizations,
             Permission::ManageUsers,
             Permission::ViewAudit,
+            Permission::RunSupportSessions,
+            Permission::RunControlSessions,
         ] {
             assert!(!Role::ReadOnly.allows(p), "{p:?}");
         }

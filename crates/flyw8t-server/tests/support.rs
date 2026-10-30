@@ -30,12 +30,25 @@ async fn create_invite(server: &TestServer, b: &Browser) -> Invite {
 }
 
 async fn create_invite_in(server: &TestServer, b: &Browser, org: Uuid) -> Invite {
+    create_invite_with(server, b, org, "view").await
+}
+
+async fn create_invite_with(
+    server: &TestServer,
+    b: &Browser,
+    org: Uuid,
+    capability: &str,
+) -> Invite {
     let org = org.to_string();
     let r = b
         .post(
             server,
             "/support",
-            &[("organization", org.as_str()), ("note", "Front desk")],
+            &[
+                ("organization", org.as_str()),
+                ("note", "Front desk"),
+                ("capability", capability),
+            ],
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
@@ -888,5 +901,280 @@ async fn disabling_an_account_ends_its_live_sockets() {
     .unwrap();
     server.state.support.recheck_user(id);
     assert_eq!(recv_kind(&mut t, "ended").await["state"], "revoked");
+    server.stop().await;
+}
+
+// ---------------------------------------------------------------------------------------
+// Control sessions: the helper (ADR-0012)
+
+/// The native helper's socket: a bearer launch token and no Origin, as a program sends it.
+async fn helper_ws(server: &TestServer, token: &str) -> Result<Ws, String> {
+    let mut req = format!("ws://{}/api/support/helper/ws", server.addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    tokio_tungstenite::connect_async(req)
+        .await
+        .map(|(w, _)| w)
+        .map_err(|e| e.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn control_needs_the_helper_and_its_own_consent() {
+    let helper_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(helper_file.path(), b"MZ test helper").unwrap();
+    let mut cfg = test_config(&fresh_database().await);
+    cfg.helper_path = Some(helper_file.path().to_path_buf());
+    let server = start(cfg).await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Org").await;
+    let inv = create_invite_with(&server, &admin, org, "control").await;
+    let mut tech = ws(
+        &server,
+        &format!("/api/support/{}/ws", inv.session),
+        &admin.cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    let cookie = spend_code(&server, &inv.code).await.unwrap();
+    let page = server
+        .request(
+            Request::get("/s/session")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert!(
+        page.body.contains("wants to see and control your screen"),
+        "{}",
+        page.body
+    );
+    assert!(page.body.contains(r#"data-control="1""#));
+    let mut part = ws(
+        &server,
+        "/api/support/participant/ws",
+        &cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    until_state(&mut part, "authorizing").await;
+
+    // The browser's Allow does not start anything: it leads to the helper step.
+    send(&mut part, json!({"type": "approve"})).await;
+    let offer = recv_kind(&mut part, "helper").await;
+    assert_eq!(db_state(&server, inv.session).await, "awaiting_helper");
+    let download = offer["download"].as_str().unwrap().to_string();
+    let token = extract(&download, r"/s/helper/flyw8t-helper-([A-Za-z0-9_-]+)\.exe").unwrap();
+    until_state(&mut tech, "awaiting_helper").await;
+    send(
+        &mut tech,
+        json!({"type": "signal", "data": {"candidate": {"candidate": "early"}}}),
+    )
+    .await;
+    assert_eq!(
+        recv_kind(&mut tech, "error").await["message"],
+        "not allowed before consent"
+    );
+
+    // The download is for that browser only, and spends nothing.
+    let get = |c: Option<&str>| {
+        let mut r = Request::get(&download);
+        if let Some(c) = c {
+            r = r.header(header::COOKIE, c);
+        }
+        r.body(Body::empty()).unwrap()
+    };
+    assert_eq!(
+        server.request(get(None)).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let file = server.request(get(Some(&cookie))).await;
+    assert_eq!(file.status, StatusCode::OK);
+    assert!(file.headers[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("flyw8t-helper-"));
+    assert_eq!(file.body, "MZ test helper");
+
+    // The launch token: wrong tokens refused, the right one works once.
+    assert!(helper_ws(&server, "not-the-token").await.is_err());
+    let mut helper = helper_ws(&server, &token).await.unwrap();
+    assert!(
+        helper_ws(&server, &token).await.is_err(),
+        "a launch token works once"
+    );
+    until_state(&mut helper, "awaiting_helper").await;
+
+    // Nothing flows until the helper's own Allow; the browser cannot give it.
+    send(&mut part, json!({"type": "approve"})).await;
+    recv_kind(&mut part, "error").await;
+    assert_eq!(db_state(&server, inv.session).await, "awaiting_helper");
+    send(&mut helper, json!({"type": "approve"})).await;
+    until_state(&mut tech, "connecting").await;
+    until_state(&mut helper, "connecting").await;
+
+    // Signaling goes between the technician and the helper; the browser page has none.
+    send(
+        &mut tech,
+        json!({"type": "signal", "data": {"commit": "c"}}),
+    )
+    .await;
+    assert_eq!(
+        recv_kind(&mut helper, "signal").await["data"]["commit"],
+        "c"
+    );
+    send(
+        &mut helper,
+        json!({"type": "signal", "data": {"sdp": {"type": "offer", "sdp": "v=0"}}}),
+    )
+    .await;
+    assert_eq!(
+        recv_kind(&mut tech, "signal").await["data"]["sdp"]["type"],
+        "offer"
+    );
+    send(
+        &mut part,
+        json!({"type": "signal", "data": {"sdp": {"type": "offer", "sdp": "x"}}}),
+    )
+    .await;
+    assert_eq!(
+        recv_kind(&mut part, "error").await["message"],
+        "not allowed before consent"
+    );
+
+    // Connected needs the technician and the helper; the browser's report counts for nothing.
+    send(&mut tech, json!({"type": "media", "state": "connected"})).await;
+    send(&mut part, json!({"type": "media", "state": "connected"})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(db_state(&server, inv.session).await, "connecting");
+    send(&mut helper, json!({"type": "media", "state": "connected"})).await;
+    until_state(&mut tech, "connected").await;
+
+    // Ending in the helper ends it everywhere.
+    send(&mut helper, json!({"type": "end"})).await;
+    assert_eq!(recv_kind(&mut tech, "ended").await["state"], "closed");
+    assert_eq!(recv_kind(&mut part, "ended").await["state"], "closed");
+    let kinds: Vec<(String,)> =
+        sqlx::query_as("SELECT kind FROM support_events WHERE session_id = $1 ORDER BY id")
+            .bind(inv.session)
+            .fetch_all(&server.state.db)
+            .await
+            .unwrap();
+    let kinds: Vec<String> = kinds.into_iter().map(|k| k.0).collect();
+    for k in [
+        "consented",
+        "helper_attached",
+        "control_consented",
+        "media_connected",
+    ] {
+        assert!(kinds.contains(&k.to_string()), "{k} missing from {kinds:?}");
+    }
+    for a in ["support.control.browser_consent", "support.helper.attach"] {
+        assert!(
+            !audit_rows(&server, a).await.is_empty(),
+            "audit missing {a}"
+        );
+    }
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn view_sessions_never_issue_a_helper_and_control_is_permissioned() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Org").await;
+    let inv = create_invite_with(&server, &admin, org, "view").await;
+    let cookie = spend_code(&server, &inv.code).await.unwrap();
+    let mut part = ws(
+        &server,
+        "/api/support/participant/ws",
+        &cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    until_state(&mut part, "authorizing").await;
+    send(&mut part, json!({"type": "approve"})).await;
+    until_state(&mut part, "connecting").await;
+    let (token,): (Option<Vec<u8>>,) =
+        sqlx::query_as("SELECT helper_token_hash FROM support_sessions WHERE id = $1")
+            .bind(inv.session)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert!(token.is_none(), "a view session never gets a helper token");
+
+    // Unknown capabilities are refused; read-only users can request neither.
+    let o = org.to_string();
+    let r = admin
+        .post(
+            &server,
+            "/support",
+            &[("organization", o.as_str()), ("capability", "run_shell")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let ro = add_user(&server, &admin, "ro@example.test", "readonly", Some(org)).await;
+    let r = ro
+        .post(
+            &server,
+            "/support",
+            &[("organization", o.as_str()), ("capability", "control")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn helper_tokens_expire_and_unstarted_helpers_time_out() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Org").await;
+    let inv = create_invite_with(&server, &admin, org, "control").await;
+    let cookie = spend_code(&server, &inv.code).await.unwrap();
+    let mut part = ws(
+        &server,
+        "/api/support/participant/ws",
+        &cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    until_state(&mut part, "authorizing").await;
+    send(&mut part, json!({"type": "approve"})).await;
+    let offer = recv_kind(&mut part, "helper").await;
+    let token = extract(
+        offer["download"].as_str().unwrap(),
+        r"flyw8t-helper-([A-Za-z0-9_-]+)\.exe",
+    )
+    .unwrap();
+
+    // An expired token is refused even though the session still awaits its helper.
+    sqlx::query("UPDATE support_sessions SET helper_token_expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(inv.session)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    assert!(helper_ws(&server, &token).await.is_err());
+
+    // A helper never started: the session expires on its own.
+    sqlx::query(
+        "UPDATE support_sessions SET awaiting_helper_at = now() - interval '1 hour' WHERE id = $1",
+    )
+    .bind(inv.session)
+    .execute(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(recv_kind(&mut part, "ended").await["state"], "expired");
     server.stop().await;
 }
