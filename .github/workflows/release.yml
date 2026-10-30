@@ -2,7 +2,9 @@ name: release
 
 # A pushed tag `vX.Y.Z` builds the server and agent for Windows and Linux and publishes them,
 # with SHA-256 sums, as a GitHub pre-release whose notes are that version's CHANGELOG section.
-# Binaries are not code-signed yet (docs/threat-model.md § Open items).
+# Windows binaries are Authenticode-signed with Azure Artifact Signing and verified before
+# anything is uploaded (`.github/actions/sign-release`); a release cannot publish unsigned
+# Windows binaries. Linux binaries are covered by SHA256SUMS only.
 
 on:
   push:
@@ -13,6 +15,12 @@ permissions:
 
 jobs:
   build:
+    # The `release` environment holds the signing identity; only this workflow and the signing
+    # check may use it.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       matrix:
         include:
@@ -34,6 +42,17 @@ jobs:
           for b in flyw8t-server flyw8t-agent; do
             cp "target/${{ matrix.target }}/release/$b${{ matrix.ext }}" "dist/$b-${GITHUB_REF_NAME}-${{ matrix.target }}${{ matrix.ext }}"
           done
+      - name: Sign and verify Windows binaries
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/sign-release
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          account: ${{ vars.SIGNING_ACCOUNT }}
+          profile: ${{ vars.SIGNING_PROFILE }}
+          expected-subject: ${{ vars.SIGNING_EXPECTED_SUBJECT }}
       - uses: actions/upload-artifact@v5
         with:
           name: bin-${{ matrix.target }}
