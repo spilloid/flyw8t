@@ -1389,7 +1389,10 @@ async fn run_socket(
                 let Some((_, (session, token))) = &signed_in else { continue };
                 if !auth::session_still_valid(&state, *session, token).await {
                     let _ = end(&state, id, Side::Technician, &who, "technician signed out").await;
-                    if !close.is_cancelled() {
+                    // Someone else may have ended it a moment ago (an administrator's reset
+                    // also ends the technician's sessions) and be about to publish. Wait for
+                    // that, so this socket closes with the "ended" notice, not a bare reset.
+                    if tokio::time::timeout(Duration::from_secs(2), close.cancelled()).await.is_err() {
                         break;
                     }
                 }
