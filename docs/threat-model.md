@@ -78,7 +78,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 - **Residual:** a database superuser can drop the trigger. The triggers protect against application bugs and application-level compromise, not against DBA-level compromise. Off-host log shipping is a deployment concern ([deployment.md](deployment.md)).
 
 ### T13: Browser-side attacks on the console
-- **Control:** CSP `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'`; no inline script; `X-Frame-Options: DENY`; `nosniff`; `Referrer-Policy: no-referrer`; flash messages chosen from fixed codes so a URL cannot inject text.
+- **Control:** CSP `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'`; no inline script; `X-Frame-Options: DENY`; `nosniff`; `Referrer-Policy: same-origin` (`no-referrer` would make browsers send `Origin: null` on the console's own form posts); flash messages chosen from fixed codes so a URL cannot inject text.
 - **Login CSRF:** state-changing requests whose `Origin` names another site are refused before routing (covers sign-in, which has no session token yet). Evidence: `cross_origin_posts_are_refused`.
 - **Residual:** a browser that sends no `Origin` on a cross-site POST would bypass the login check (current browsers send it).
 
@@ -97,7 +97,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 ## Open items before production
 
 1. OIDC sign-in and WebAuthn. TOTP two-step verification is built and required by default (2026-10-29).
-2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Not yet done for attended support** (`support.rs`, `support.js`). **(blocking for support)**
+2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Done for attended support** (Codex gpt-5.6-sol, 2026-10-29: 13 findings, 12 fixed, 1 partly fixed); **a second review of the fixes and of two-step verification (rows 11 to 13) is still owed.**
 3. Authenticode-signed agent and server binaries; signed update manifests before any auto-update.
 4. Pin the server identity at enrollment.
 5. Postgres row-level security as defense in depth for T2.
@@ -106,4 +106,4 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 ## Attended support
 
-Attended (consent-based, browser screen view) sessions have their own threat analysis in [attended-support.md](attended-support.md#threats-specific-to-attended-support): consent before any signaling, single-use invitations, server-impersonation detection through a short authentication string, and no capability beyond viewing what the participant chooses.
+Attended (consent-based, browser screen view) sessions have their own threat analysis in [attended-support.md](attended-support.md#threats-specific-to-attended-support): consent before any signaling, single-use invitations, signaling-tampering detection through a committed security code (not a defense against a compromised flyw8t server), and no capability beyond viewing what the participant chooses.

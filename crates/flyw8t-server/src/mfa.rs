@@ -185,11 +185,17 @@ pub async fn challenge(
         );
     }
     let result: AppResult<Response> = async {
-        let Some(secret) = s.totp_secret.clone() else {
-            // Reset by an administrator since the password step.
+        let mut tx = state.db.begin().await?;
+        // The factor as it is now (it may have been replaced since this request began), and
+        // the session as it is now (it may have been revoked or promoted).
+        let secret = auth::lock_user_factor(&mut tx, s.user_id).await?;
+        let session_ok =
+            auth::lock_session(&mut tx, s.session_id, Some(&s.token_hash), &[Stage::Mfa])
+                .await
+                .is_ok();
+        let (Some(secret), true) = (secret, session_ok) else {
             return Ok(Redirect::to("/login").into_response());
         };
-        let mut tx = state.db.begin().await?;
         let audit = Audit::anonymous("web", s.email.clone(), "user.login")
             .ip(&ip)
             .target("user", s.user_id);
@@ -323,6 +329,22 @@ pub async fn setup(
             return Ok(again("Too many attempts. Wait a few minutes."));
         }
         let mut tx = state.db.begin().await?;
+        if auth::lock_user_factor(&mut tx, s.user_id).await?.is_some() {
+            return Err(AppError::Conflict(
+                "Two-step verification is already on for this account.".into(),
+            ));
+        }
+        // Still this session, still live, still holding the key this page showed.
+        let locked = auth::lock_session(
+            &mut tx,
+            s.session_id,
+            Some(&s.token_hash),
+            &[Stage::Enroll, Stage::Full],
+        )
+        .await;
+        if !matches!(&locked, Ok(Some(p)) if *p == secret) {
+            return Ok(Redirect::to("/login").into_response());
+        }
         if s.stage != Stage::Full && !spend_attempt(&mut tx, s.session_id).await? {
             tx.commit().await?;
             return Ok(Redirect::to("/login").into_response());
@@ -351,19 +373,16 @@ pub async fn setup(
             ));
         }
         let codes = issue_recovery_codes(&mut tx, s.user_id).await?;
-        let mut resp_cookie = None;
+        // This session continues under a new secret; every other session was established
+        // with the password alone and ends now.
+        let cookie = auth::promote_session(&state, &mut tx, s.session_id).await?;
+        auth::revoke_other_sessions(&mut tx, s.user_id, Some(s.session_id)).await?;
         if s.stage == Stage::Enroll {
-            resp_cookie = Some(auth::promote_session(&state, &mut tx, s.session_id).await?);
             Audit::anonymous("web", s.email.clone(), "user.login")
                 .ip(peer.ip().to_string())
                 .target("user", s.user_id)
                 .detail(json!({ "second_factor": "totp_enrolled" }))
                 .record(&mut *tx)
-                .await?;
-        } else {
-            sqlx::query("UPDATE sessions SET pending_totp_secret = NULL WHERE id = $1")
-                .bind(s.session_id)
-                .execute(&mut *tx)
                 .await?;
         }
         Audit::anonymous("web", s.email.clone(), "user.mfa.enable")
@@ -378,12 +397,12 @@ pub async fn setup(
             "/account"
         };
         let mut resp = no_store(Html(flyw8t_web::recovery_codes_page(codes, next)).into_response());
-        if let Some(c) = resp_cookie {
-            resp.headers_mut().insert(
-                header::SET_COOKIE,
-                c.parse().map_err(|_| anyhow::anyhow!("cookie header"))?,
-            );
-        }
+        resp.headers_mut().insert(
+            header::SET_COOKIE,
+            cookie
+                .parse()
+                .map_err(|_| anyhow::anyhow!("cookie header"))?,
+        );
         Ok(resp)
     }
     .await;
@@ -451,13 +470,10 @@ async fn confirm_current(
     if rate_limited(state, p.user_id) {
         return Ok(false);
     }
-    let secret: Option<Vec<u8>> = sqlx::query_as::<_, (Option<Vec<u8>>,)>(
-        "SELECT totp_secret FROM users WHERE id = $1 FOR UPDATE",
-    )
-    .bind(p.user_id)
-    .fetch_one(&mut *tx)
-    .await?
-    .0;
+    let secret = auth::lock_user_factor(tx, p.user_id).await?;
+    // The session that made this request must still be live now that the user is locked.
+    let session = p.session_id.ok_or(AppError::Unauthorized)?;
+    auth::lock_session(tx, session, None, &[Stage::Full]).await?;
     let Some(secret) = secret else {
         return Err(AppError::Conflict(
             "Two-step verification is not on.".into(),
@@ -525,6 +541,7 @@ pub async fn disable(State(state): State<Shared>, WebUser(p): WebUser, body: Byt
             return account_error(&state, &p, "That code is not valid, or was already used.").await;
         }
         clear_mfa(&mut tx, p.user_id).await?;
+        auth::revoke_other_sessions(&mut tx, p.user_id, p.session_id).await?;
         Audit::user(&p, "user.mfa.disable")
             .target("user", p.user_id)
             .record(&mut *tx)
@@ -568,18 +585,22 @@ pub async fn admin_reset(
             return Err(AppError::NotFound);
         };
         clear_mfa(&mut tx, id).await?;
-        sqlx::query(
-            "UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+        auth::revoke_other_sessions(&mut tx, id, None).await?;
         Audit::user(&p, "user.mfa.reset")
             .target("user", id)
             .detail(json!({ "email": email }))
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
+        // "Signed out everywhere" includes live attended-support sockets, which authenticated
+        // once at their handshake.
+        crate::support::end_all_created_by(
+            &state,
+            id,
+            &crate::support::Who::User(Box::new(p.clone())),
+            "technician signed out by an administrator",
+        )
+        .await?;
         if id == p.user_id {
             return Ok(Redirect::to("/login").into_response());
         }

@@ -54,6 +54,9 @@ Beyond the milestone:
 | AT-35 | Attended support: access control, cross-site sockets, expiry, guess limits, decline, revoke | `access_control_and_cross_site_sockets`, `invitations_expire_and_guessing_is_limited`, `decline_and_technician_revocation` |
 | AT-36 | Attended support in real browsers: WebRTC media flows, matching security codes, honest ended state | `two_browsers_pair_consent_and_share_a_tab` (needs Chrome) |
 | AT-37 | Two-step verification: password alone reaches only set-up or the code page; session rotated; replay refused; recovery codes single-use; attempts limited; admin reset | `tests/mfa.rs` (four tests) |
+| AT-38 | Attended support hardening: creator-only attach, organization scope, link opening spends nothing, one session per browser, scheme-checked Origin, message flood cut off, race-free cap, reset ends live sessions | `only_the_creator_attaches_…`, `opening_a_link_spends_nothing_…`, `sockets_check_the_scheme_…`, `the_live_session_cap_…`, `resetting_a_technicians_sign_in_…` |
+| AT-39 | `support.js` fails closed and checks the committed certificate | `support_js` (Node.js; `crates/flyw8t-web/tests/support.test.mjs`) |
+| AT-40 | A real browser can sign in and post forms (Origin check vs referrer policy) | `two_browsers_pair_consent_and_share_a_tab` (signs in through the form) |
 
 ## Manual checks still owed
 

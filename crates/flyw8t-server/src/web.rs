@@ -191,7 +191,7 @@ pub async fn login(
         }
     };
     let audit = Audit::anonymous("web", email.clone(), "user.login").ip(&ip);
-    let Some((user_id, _, _, has_totp)) = user.filter(|_| ok) else {
+    let Some((user_id, _, _, _)) = user.filter(|_| ok) else {
         let _ = audit.denied().record(&state.db).await;
         return fail(
             StatusCode::UNAUTHORIZED,
@@ -203,26 +203,45 @@ pub async fn login(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    // The password alone reaches the console only when MFA is neither set up nor required.
-    let (stage, next) = if has_totp {
-        (Stage::Mfa, "/login/mfa")
-    } else if state.config.require_mfa {
-        (Stage::Enroll, "/account/mfa")
-    } else {
-        (Stage::Full, "/")
-    };
-    match auth::create_session(&state, user_id, &ip, ua, stage).await {
-        Ok(cookie) => {
-            let audit = audit.target("user", user_id);
-            let audit = if stage == Stage::Full {
-                audit
-            } else {
-                Audit::anonymous("web", email.clone(), "user.login.password")
-                    .ip(&ip)
-                    .target("user", user_id)
-                    .detail(json!({ "next": stage.as_str() }))
+    let result: AppResult<(String, Stage)> = async {
+        // Decide the stage holding the user row (shared), so a second factor being set up
+        // in another request either happens first (and is seen here) or revokes this session
+        // when it commits. The password alone reaches the console only when MFA is neither
+        // set up nor required.
+        let mut tx = state.db.begin().await?;
+        let (has_totp,): (bool,) =
+            sqlx::query_as("SELECT totp_secret IS NOT NULL FROM users WHERE id = $1 FOR SHARE")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let stage = if has_totp {
+            Stage::Mfa
+        } else if state.config.require_mfa {
+            Stage::Enroll
+        } else {
+            Stage::Full
+        };
+        let cookie = auth::create_session(&state, &mut tx, user_id, &ip, ua, stage).await?;
+        let audit = if stage == Stage::Full {
+            audit.target("user", user_id)
+        } else {
+            Audit::anonymous("web", email.clone(), "user.login.password")
+                .ip(&ip)
+                .target("user", user_id)
+                .detail(json!({ "next": stage.as_str() }))
+        };
+        audit.record(&mut *tx).await?;
+        tx.commit().await?;
+        Ok((cookie, stage))
+    }
+    .await;
+    match result {
+        Ok((cookie, stage)) => {
+            let next = match stage {
+                Stage::Mfa => "/login/mfa",
+                Stage::Enroll => "/account/mfa",
+                Stage::Full => "/",
             };
-            let _ = audit.record(&state.db).await;
             ([(header::SET_COOKIE, cookie)], Redirect::to(next)).into_response()
         }
         Err(e) => error_response(None, e),

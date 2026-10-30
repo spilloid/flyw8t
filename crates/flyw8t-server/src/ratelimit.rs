@@ -32,6 +32,14 @@ impl RateLimiter {
         entry.1 += 1;
         entry.1 <= limit
     }
+
+    /// Whether `key` is still under `limit` in its current window, without counting anything.
+    /// Lets a caller budget only failures: check first, count with `allow` when one happens.
+    pub fn under(&self, key: &str, limit: u32, window: Duration) -> bool {
+        let w = self.windows.lock().unwrap();
+        w.get(key)
+            .is_none_or(|(start, n)| start.elapsed() >= window || *n < limit)
+    }
 }
 
 #[cfg(test)]
@@ -45,5 +53,16 @@ mod tests {
         assert!((0..3).all(|_| r.allow("a", 3, w)));
         assert!(!r.allow("a", 3, w));
         assert!(r.allow("b", 3, w));
+    }
+
+    #[test]
+    fn under_does_not_count() {
+        let r = RateLimiter::default();
+        let w = Duration::from_secs(60);
+        assert!((0..10).all(|_| r.under("f", 2, w)));
+        r.allow("f", 2, w);
+        assert!(r.under("f", 2, w));
+        r.allow("f", 2, w);
+        assert!(!r.under("f", 2, w));
     }
 }

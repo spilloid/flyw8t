@@ -1014,6 +1014,7 @@ fn support_state_badge(state: &str, label: &str) -> impl IntoView {
 pub fn support_list_page(
     ctx: &PageCtx,
     sessions: Vec<SupportSessionView>,
+    orgs: Vec<OrgRef>,
     invite: Option<SupportInvite>,
 ) -> String {
     let now = ctx.now;
@@ -1040,7 +1041,7 @@ pub fn support_list_page(
                 view! {
                     <tr>
                         <td data-label="Session"><a href=href class="mono">{fmt::short_id(s.id)}</a></td>
-                        <td data-label="For">{s.note.clone().unwrap_or_else(|| "—".into())}</td>
+                        <td data-label="For">{s.note.clone().unwrap_or_else(|| "—".into())}<div class="muted">{s.organization.clone()}</div></td>
                         <td data-label="State">{support_state_badge(s.state, s.state_label)}</td>
                         <td data-label="Created">{time_cell(now, s.created_at)}" · "{s.created_by.clone()}</td>
                     </tr>
@@ -1055,14 +1056,21 @@ pub fn support_list_page(
         }
         .into_any()
     };
+    let no_orgs = orgs.is_empty().then(|| view! { <p class="flash bad">"You are not assigned to any organization, so you cannot start a session. Ask an administrator."</p> });
+    let org_options = orgs
+        .into_iter()
+        .map(|o| view! { <option value=o.id.to_string()>{o.name}</option> })
+        .collect_view();
     let body = view! {
         <h1>"Support"</h1>
+        {no_orgs}
         {invite}
         <section class="card">
             <h2>"Start an attended session"</h2>
             <p>"The person you are helping opens a link in their browser and chooses a tab, a window, or their screen to show you. "<strong>"You can see it. You cannot click, type, or control anything."</strong>" Nothing is installed, and the session ends when either of you ends it."</p>
             <form method="post" action="/support" class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>"Organization"<select name="organization" required=true>{org_options}</select></label>
                 <label>"Who are you helping? (optional)"<input type="text" name="note" maxlength="200" placeholder="Front desk, printer issue"/></label>
                 <span class="badge neutral">"View screen (no control)"</span>
                 <button type="submit">"Create invitation"</button>
@@ -1097,6 +1105,12 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
         .join(", ")
         .replace("view_screen", "view screen (no control)");
     let data_state = if s.terminal { "ended" } else { s.state };
+    // Only the technician who created the session receives its signaling. Anyone else allowed
+    // to see it (an administrator) gets its state and an End button, and no script.
+    let observer = s.observer.then(|| view! {
+        <p class="flash">{format!("Only {} can view this session. You can end it.", s.created_by)}</p>
+    });
+    let script = live && !s.observer;
     let body = view! {
         <p class="crumbs"><a href="/support">"Support"</a>" / "</p>
         // The badge is updated live by support.js; it never shows the load-time state as current.
@@ -1105,8 +1119,11 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
             <p class="lead" id="state" aria-live="polite">{s.state_label}</p>
             <p class="muted" id="peer"></p>
             <p class="flash bad" id="error" aria-live="assertive"></p>
+            {observer}
             {ended}
             <dl class="facts card">
+                <dt>"Organization"</dt><dd>{s.organization.clone()}</dd>
+                <dt>"Technician"</dt><dd>{s.created_by.clone()}</dd>
                 <dt>"For"</dt><dd>{s.note.clone().unwrap_or_else(|| "—".into())}</dd>
                 <dt>"Granted"</dt><dd>{caps}</dd>
                 <dt>"Invitation valid until"</dt><dd>{fmt::timestamp(s.invite_expires_at)}</dd>
@@ -1123,7 +1140,7 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
             <noscript><p class="flash bad">"Viewing a shared screen needs JavaScript."</p></noscript>
         </div>
     };
-    shell_with(&title, ctx, Nav::Support, None, live, body)
+    shell_with(&title, ctx, Nav::Support, None, script, body)
 }
 
 /// The participant's pages: no account, no navigation.
@@ -1155,6 +1172,24 @@ pub fn support_entry_page(error: Option<String>) -> String {
     )
 }
 
+/// Opening an invitation link does not spend it: the person confirms first, so a link that
+/// is merely previewed or prefetched stays usable, and nothing binds a browser without a click.
+pub fn support_link_page(invite: &str) -> String {
+    let action = format!("/s/{invite}");
+    participant_shell(
+        "Get help",
+        false,
+        view! {
+            <h1>"Get help from your technician"</h1>
+            <p>"You were sent a link to share your screen with a technician. Continue to see who is asking and what they are asking for. Nothing is shared until you choose to."</p>
+            <form method="post" action=action class="stack">
+                <button type="submit">"Continue"</button>
+            </form>
+            <p class="muted">"The link works once, in one browser."</p>
+        },
+    )
+}
+
 pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String {
     let caps = v
         .capabilities
@@ -1171,7 +1206,7 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         "Screen sharing request",
         true,
         view! {
-            <div id="support" data-role="participant" data-ice=ice_servers.to_string() data-state=v.state>
+            <div id="support" data-role="participant" data-session=v.session_id.to_string() data-ice=ice_servers.to_string() data-state=v.state>
                 <h1>{heading}</h1>
                 <p>{who}</p>
                 // Live status and the way out come first, so ending is always one tap away.
@@ -1201,7 +1236,6 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         },
     )
 }
-
 
 // ---------------------------------------------------------------------------------------
 // Two-step verification

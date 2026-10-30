@@ -23,7 +23,21 @@ struct Invite {
 }
 
 async fn create_invite(server: &TestServer, b: &Browser) -> Invite {
-    let r = b.post(server, "/support", &[("note", "Front desk")]).await;
+    let org = b
+        .create_org(server, &format!("Org {}", Uuid::new_v4()))
+        .await;
+    create_invite_in(server, b, org).await
+}
+
+async fn create_invite_in(server: &TestServer, b: &Browser, org: Uuid) -> Invite {
+    let org = org.to_string();
+    let r = b
+        .post(
+            server,
+            "/support",
+            &[("organization", org.as_str()), ("note", "Front desk")],
+        )
+        .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     let code = extract(&r.body, r#"class="code-big">(\d{3} \d{3} \d{3})<"#)
         .expect("code shown once")
@@ -41,6 +55,21 @@ async fn create_invite(server: &TestServer, b: &Browser) -> Invite {
 }
 
 /// Spend a code like a browser would; returns the participant cookie (`name=value`).
+/// Spend a link: `POST /s/{token}` (a `GET` only shows a Continue button).
+async fn spend_link(server: &TestServer, token: &str) -> Result<String, StatusCode> {
+    let r = server
+        .request(
+            Request::post(format!("/s/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    if r.status != StatusCode::SEE_OTHER {
+        return Err(r.status);
+    }
+    Ok(r.cookie().unwrap())
+}
+
 async fn spend_code(server: &TestServer, code: &str) -> Result<String, StatusCode> {
     let r = server
         .request(
@@ -158,16 +187,9 @@ async fn consented_session_relays_signaling_and_ends_cleanly() {
         spend_code(&server, &inv.code).await,
         Err(StatusCode::NOT_FOUND)
     );
-    let r = server
-        .request(
-            Request::get(format!("/s/{}", inv.link_token))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
     assert_eq!(
-        r.status,
-        StatusCode::NOT_FOUND,
+        spend_link(&server, &inv.link_token).await,
+        Err(StatusCode::NOT_FOUND),
         "the link is spent together with the code"
     );
     until_state(&mut tech, "authorizing").await;
@@ -237,7 +259,15 @@ async fn consented_session_relays_signaling_and_ends_cleanly() {
         "offer"
     );
 
+    // Connected only once both browsers say media flows.
     send(&mut tech, json!({"type": "media", "state": "connected"})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        db_state(&server, inv.session).await,
+        "connecting",
+        "one side alone cannot claim media"
+    );
+    send(&mut part, json!({"type": "media", "state": "connected"})).await;
     until_state(&mut part, "connected").await;
 
     send(&mut part, json!({"type": "end"})).await;
@@ -500,5 +530,298 @@ async fn decline_and_technician_revocation() {
     until_state(&mut tech, "connecting").await;
     drop(part);
     assert_eq!(recv_kind(&mut tech, "ended").await["state"], "closed");
+    server.stop().await;
+}
+
+async fn add_user(
+    server: &TestServer,
+    admin: &Browser,
+    email: &str,
+    role: &str,
+    org: Option<Uuid>,
+) -> Browser {
+    let org = org.map(|o| o.to_string());
+    let mut fields = vec![
+        ("email", email),
+        ("display_name", "Someone"),
+        ("password", "long-enough-password"),
+        ("role", role),
+    ];
+    if let Some(o) = &org {
+        fields.push(("org", o.as_str()));
+    }
+    let r = admin.post(server, "/admin/users", &fields).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    server.login(email, "long-enough-password").await
+}
+
+async fn audit_rows(server: &TestServer, action: &str) -> Vec<(String, String, String)> {
+    sqlx::query_as(
+        "SELECT actor_type, outcome, detail::text FROM audit_events WHERE action = $1 ORDER BY id",
+    )
+    .bind(action)
+    .fetch_all(&server.state.db)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn only_the_creator_attaches_and_sessions_are_scoped_to_organizations() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let org_a = admin.create_org(&server, "Org A").await;
+    let org_b = admin.create_org(&server, "Org B").await;
+    let tech = add_user(
+        &server,
+        &admin,
+        "tech@example.test",
+        "technician",
+        Some(org_a),
+    )
+    .await;
+
+    // A technician cannot open a session in an organization they are not assigned to.
+    let b = org_b.to_string();
+    let r = tech
+        .post(&server, "/support", &[("organization", b.as_str())])
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let inv = create_invite_in(&server, &tech, org_a).await;
+    let tech_ws = format!("/api/support/{}/ws", inv.session);
+
+    // An administrator sees the session and can end it, but cannot receive its signaling:
+    // the participant consents to the technician they are shown, not to whoever attaches.
+    let page = admin
+        .get(&server, &format!("/support/{}", inv.session))
+        .await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page
+        .body
+        .contains("Only tech@example.test can view this session"));
+    assert!(
+        !page.body.contains("support.js"),
+        "no signaling script for an observer"
+    );
+    assert!(ws(&server, &tech_ws, &admin.cookie, origin(&server))
+        .await
+        .is_err());
+    let mut t = ws(&server, &tech_ws, &tech.cookie, origin(&server))
+        .await
+        .unwrap();
+    until_state(&mut t, "waiting").await;
+
+    // Losing the organization hides the session from the technician (404, not 403).
+    sqlx::query("DELETE FROM user_organizations WHERE organization_id = $1")
+        .bind(org_a)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        tech.get(&server, &format!("/support/{}", inv.session))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+
+    let r = admin
+        .post(&server, &format!("/support/{}/end", inv.session), &[])
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(recv_kind(&mut t, "ended").await["state"], "revoked");
+    let ends = audit_rows(&server, "support.end").await;
+    assert!(
+        ends.iter()
+            .any(|(actor, _, d)| actor == "user" && d.contains("ended by administrator")),
+        "the ending is attributed to the administrator: {ends:?}"
+    );
+    let attaches = audit_rows(&server, "support.attach").await;
+    assert!(attaches
+        .iter()
+        .any(|(actor, _, d)| actor == "user" && d.contains("technician")));
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn opening_a_link_spends_nothing_and_one_browser_holds_one_session() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let first = create_invite(&server, &admin).await;
+    for _ in 0..3 {
+        let r = server
+            .request(
+                Request::get(format!("/s/{}", first.link_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert!(
+            r.headers.get(header::SET_COOKIE).is_none(),
+            "a GET binds nothing"
+        );
+    }
+    let cookie = spend_link(&server, &first.link_token).await.unwrap();
+
+    // The same browser cannot be pulled into a second session while the first is live.
+    let second = create_invite(&server, &admin).await;
+    let r = server
+        .request(
+            Request::post(format!("/s/{}", second.link_token))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(
+        db_state(&server, second.session).await,
+        "waiting",
+        "not spent"
+    );
+    assert_eq!(db_state(&server, first.session).await, "authorizing");
+
+    // A guessed code is audited.
+    assert_eq!(
+        spend_code(&server, "000000001").await,
+        Err(StatusCode::NOT_FOUND)
+    );
+    assert!(audit_rows(&server, "support.open")
+        .await
+        .iter()
+        .any(|(_, o, d)| o == "denied" && d.contains("code")));
+
+    // Stored codes are not a fast hash of the code.
+    let (stored,): (Vec<u8>,) =
+        sqlx::query_as("SELECT code_hash FROM support_sessions WHERE id = $1")
+            .bind(second.session)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert_ne!(stored, flyw8t_server::auth::digest(&second.code));
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn sockets_check_the_scheme_and_floods_are_cut_off() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let inv = create_invite(&server, &admin).await;
+    let path = format!("/api/support/{}/ws", inv.session);
+    // Same host and port, different scheme: a different origin.
+    let https = Some(format!("https://{}", server.addr));
+    assert!(ws(&server, &path, &admin.cookie, https).await.is_err());
+
+    let cookie = spend_code(&server, &inv.code).await.unwrap();
+    let mut part = ws(
+        &server,
+        "/api/support/participant/ws",
+        &cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    until_state(&mut part, "authorizing").await;
+    for _ in 0..200 {
+        if part.send(Message::text("{}")).await.is_err() {
+            break;
+        }
+    }
+    let mut cut_off = false;
+    while let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_secs(5), part.next()).await {
+        if let Message::Text(t) = m {
+            if t.as_str().contains("too many messages") {
+                cut_off = true;
+            }
+        }
+    }
+    assert!(
+        cut_off,
+        "a flood is answered with an error and the socket closes"
+    );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn the_live_session_cap_holds_under_concurrent_creation() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Busy").await.to_string();
+    let fields = [("organization", org.as_str())];
+    let attempts = (0..10).map(|_| admin.post(&server, "/support", &fields));
+    let statuses: Vec<StatusCode> = futures_util::future::join_all(attempts)
+        .await
+        .into_iter()
+        .map(|r| r.status)
+        .collect();
+    let (live,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM support_sessions WHERE state = 'waiting'")
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert_eq!(live, 5, "{statuses:?}");
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::CONFLICT)
+            .count(),
+        5
+    );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn resetting_a_technicians_sign_in_ends_their_live_sessions() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Org").await;
+    let tech = add_user(
+        &server,
+        &admin,
+        "tech@example.test",
+        "technician",
+        Some(org),
+    )
+    .await;
+    let inv = create_invite_in(&server, &tech, org).await;
+    let cookie = spend_code(&server, &inv.code).await.unwrap();
+    let mut t = ws(
+        &server,
+        &format!("/api/support/{}/ws", inv.session),
+        &tech.cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    let mut part = ws(
+        &server,
+        "/api/support/participant/ws",
+        &cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    until_state(&mut part, "authorizing").await;
+    send(&mut part, json!({"type": "approve"})).await;
+    until_state(&mut t, "connecting").await;
+
+    // The socket authenticated once, at its handshake; signing the technician out must
+    // still cut it off.
+    let (tech_id,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM users WHERE email = 'tech@example.test'")
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    let r = admin
+        .post(&server, &format!("/admin/users/{tech_id}/mfa/reset"), &[])
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(recv_kind(&mut t, "ended").await["state"], "closed");
+    assert_eq!(recv_kind(&mut part, "ended").await["state"], "closed");
+    assert_eq!(db_state(&server, inv.session).await, "closed");
     server.stop().await;
 }

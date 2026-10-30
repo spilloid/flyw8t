@@ -85,7 +85,7 @@ impl Cdp {
                 return;
             }
             if tokio::time::Instant::now() > deadline {
-                let state = self.eval(session, "JSON.stringify({state: document.getElementById('state')?.textContent, error: document.getElementById('error')?.textContent, data: document.getElementById('support')?.dataset.state})").await;
+                let state = self.eval(session, "JSON.stringify({url: location.href, state: document.getElementById('state')?.textContent, error: document.getElementById('error')?.textContent, data: document.getElementById('support')?.dataset.state, body: document.body?.innerText.slice(0, 300)})").await;
                 panic!("timed out waiting for {what}: {state}");
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -147,7 +147,17 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
     std::fs::create_dir_all(&out_dir).unwrap();
     let server = start_fresh().await;
     let admin = server.admin().await;
-    let r = admin.post(&server, "/support", &[("note", "Demo")]).await;
+    let org = admin
+        .create_org(&server, "Contoso Dental")
+        .await
+        .to_string();
+    let r = admin
+        .post(
+            &server,
+            "/support",
+            &[("organization", org.as_str()), ("note", "Demo")],
+        )
+        .await;
     assert_eq!(r.status, StatusCode::OK);
     let session_id = extract(&r.body, r#"href="/support/([0-9a-f-]{36})""#).unwrap();
     let link_token = extract(&r.body, r"/s/([A-Za-z0-9_-]{43})").unwrap();
@@ -192,10 +202,39 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
             .unwrap();
     let mut cdp = Cdp { ws, next: 0 };
 
-    // The technician's tab, signed in.
-    let session_value = admin.cookie.split_once('=').unwrap().1.to_string();
-    cdp.call(None, "Storage.setCookies", json!({"cookies": [{"name": "flyw8t_session", "value": session_value, "url": base, "httpOnly": true, "sameSite": "Strict"}]})).await;
-    let tech = cdp.open(&format!("{base}/support/{session_id}")).await;
+    // The technician signs in through the real form: a browser's own form post must pass the
+    // cross-origin check (a `no-referrer` policy once made Chrome send `Origin: null` and every
+    // console post was refused; only a real browser shows that).
+    let tech = cdp.open(&format!("{base}/login")).await;
+    cdp.wait_for(
+        &tech,
+        "sign-in form",
+        "!!document.querySelector('input[name=password]')",
+        Duration::from_secs(15),
+    )
+    .await;
+    cdp.eval(
+        &tech,
+        &format!(
+            "document.querySelector('input[name=email]').value = '{ADMIN_EMAIL}'; \
+             document.querySelector('input[name=password]').value = '{ADMIN_PASSWORD}'; \
+             document.querySelector('form[action=\"/login\"]').submit(); true"
+        ),
+    )
+    .await;
+    cdp.wait_for(
+        &tech,
+        "the console after sign-in",
+        "location.pathname === '/' && !!document.querySelector('header.top')",
+        Duration::from_secs(15),
+    )
+    .await;
+    cdp.call(
+        Some(&tech),
+        "Page.navigate",
+        json!({"url": format!("{base}/support/{session_id}")}),
+    )
+    .await;
     cdp.wait_for(
         &tech,
         "technician page",
@@ -209,6 +248,15 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
 
     // The participant follows the link, sees who is asking, and allows.
     let part = cdp.open(&format!("{base}/s/{link_token}")).await;
+    // Opening the link spends nothing; the person continues on purpose.
+    cdp.wait_for(
+        &part,
+        "link page",
+        "!!document.querySelector('form[action^=\"/s/\"] button')",
+        Duration::from_secs(15),
+    )
+    .await;
+    cdp.click(&part, "form[action^=\"/s/\"] button").await;
     cdp.wait_for(
         &part,
         "consent screen",
@@ -271,6 +319,15 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         "both sides derive the same security code"
     );
     assert!(sas_tech.as_str().unwrap().len() == 7);
+    // The code came from the certificates in use, and the participant checked the technician's
+    // commitment (a mismatch ends the session instead; tests/support.test.mjs).
+    for tab in [&tech, &part] {
+        assert_eq!(
+            cdp.eval(tab, "document.getElementById('support').dataset.sas")
+                .await,
+            json!("shown")
+        );
+    }
     tokio::time::sleep(Duration::from_millis(800)).await;
     cdp.screenshot(&tech, out_dir.join("support-technician-connected.png"))
         .await;

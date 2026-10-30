@@ -434,12 +434,16 @@ async fn optional_mfa_can_be_set_up_and_turned_off() {
         setup.body.contains(">Cancel<"),
         "voluntary set-up can be cancelled"
     );
+    // A second password-only session, as someone who already had the password would hold.
+    let (_, other) = password(&server, ADMIN_EMAIL, ADMIN_PASSWORD).await;
     let e = enroll(&server, &full).await;
-    assert_eq!(
+    assert_ne!(
         e.cookie, full,
-        "a full session is not rotated by voluntary set-up"
+        "the enrolling session continues under a new secret"
     );
-    let b = server.browser(full.clone()).await;
+    shut_out(&server, &full).await;
+    shut_out(&server, &other).await;
+    let b = server.browser(e.cookie.clone()).await;
 
     // Turning it off needs a current code; a wrong one changes nothing.
     let r = b
@@ -450,26 +454,15 @@ async fn optional_mfa_can_be_set_up_and_turned_off() {
         )
         .await;
     assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
-    sign_out(&server, &full).await;
-    let (next, _) = password(&server, ADMIN_EMAIL, ADMIN_PASSWORD).await;
-    assert_eq!(next, "/login/mfa");
 
-    // Replace recovery codes, then turn it off, each with a fresh code.
-    let (_, partial) = password(&server, ADMIN_EMAIL, ADMIN_PASSWORD).await;
-    let csrf = csrf_of(
-        &raw(&server, "GET", "/login/mfa", Some(&partial), &[])
-            .await
-            .body,
-    );
-    let ok = raw(
-        &server,
-        "POST",
-        "/login/mfa",
-        Some(&partial),
-        &[("csrf", &csrf), ("code", &e.recovery[0])],
-    )
-    .await;
-    let b = server.browser(ok.cookie().unwrap()).await;
+    // Replacing recovery codes needs a valid, unspent code; a refusal changes nothing.
+    let replay = totp::code_at(&e.secret, e.step);
+    for bad in ["", replay.as_str()] {
+        let r = b
+            .post(&server, "/account/mfa/recovery-codes", &[("code", bad)])
+            .await;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}");
+    }
     let mut last = e.step;
     let r = b
         .post(
@@ -479,7 +472,45 @@ async fn optional_mfa_can_be_set_up_and_turned_off() {
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
-    assert!(r.body.contains("id=\"recovery-codes\"")); // fresh codes shown
+    let codes = extract(&r.body, r#"(?s)id="recovery-codes"[^>]*>([^<]+)<"#).unwrap();
+    let fresh: Vec<String> = codes.lines().map(str::to_string).collect();
+    assert_eq!(fresh.len(), totp::RECOVERY_CODES);
+    sign_out(&server, &b.cookie).await;
+
+    // The old codes died with the replacement; a new one works.
+    let (next, partial) = password(&server, ADMIN_EMAIL, ADMIN_PASSWORD).await;
+    assert_eq!(next, "/login/mfa");
+    let csrf = csrf_of(
+        &raw(&server, "GET", "/login/mfa", Some(&partial), &[])
+            .await
+            .body,
+    );
+    let old = raw(
+        &server,
+        "POST",
+        "/login/mfa",
+        Some(&partial),
+        &[("csrf", &csrf), ("code", &e.recovery[0])],
+    )
+    .await;
+    assert_eq!(
+        old.status,
+        StatusCode::UNAUTHORIZED,
+        "a replaced recovery code still worked"
+    );
+    let ok = raw(
+        &server,
+        "POST",
+        "/login/mfa",
+        Some(&partial),
+        &[("csrf", &csrf), ("code", &fresh[0])],
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::SEE_OTHER, "{}", ok.body);
+    let b = server.browser(ok.cookie().unwrap()).await;
+
+    // A sign-in waiting for a code does not survive the factor changing under it.
+    let (_, pending) = password(&server, ADMIN_EMAIL, ADMIN_PASSWORD).await;
     let r = b
         .post(
             &server,
@@ -488,6 +519,8 @@ async fn optional_mfa_can_be_set_up_and_turned_off() {
         )
         .await;
     assert_eq!(r.location(), "/account?m=mfa-disabled", "{}", r.body);
+    let gone = raw(&server, "GET", "/login/mfa", Some(&pending), &[]).await;
+    assert_eq!(gone.location(), "/login");
     sign_out(&server, &b.cookie).await;
     let (next, _) = password(&server, ADMIN_EMAIL, ADMIN_PASSWORD).await;
     assert_eq!(next, "/");

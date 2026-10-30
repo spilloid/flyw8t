@@ -156,7 +156,10 @@ pub fn router(state: Shared) -> Router {
         .route("/api/support/{id}/ws", get(support::technician_ws))
         .route("/api/support/participant/ws", get(support::participant_ws))
         .route("/s", get(support::entry_page).post(support::enter_code))
-        .route("/s/{invite}", get(support::open_invite))
+        .route(
+            "/s/{invite}",
+            get(support::open_invite).post(support::spend_invite),
+        )
         .route("/static/support.js", get(support_script))
         .route("/static/app.css", get(stylesheet))
         .route("/static/icon.svg", get(icon))
@@ -175,7 +178,10 @@ pub fn router(state: Shared) -> Router {
         .route("/api/v1/jobs/{id}", get(api::job))
         .route("/api/v1/jobs/{id}/cancel", post(api::cancel_job))
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
-        .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            security_headers,
+        ))
         .with_state(state)
 }
 
@@ -233,8 +239,8 @@ async fn metrics_handler(State(state): State<Shared>) -> Response {
     }
 }
 
-async fn security_headers(req: Request, next: Next) -> Response {
-    if is_cross_origin_write(&req) {
+async fn security_headers(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    if is_cross_origin_write(&state.config, &req) {
         return (StatusCode::FORBIDDEN, "cross-origin request refused").into_response();
     }
     let mut resp = next.run(req).await;
@@ -244,7 +250,10 @@ async fn security_headers(req: Request, next: Next) -> Response {
     };
     set(h, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
     set(h, header::X_FRAME_OPTIONS, "DENY");
-    set(h, header::REFERRER_POLICY, "no-referrer");
+    // Not `no-referrer`: under it, browsers send `Origin: null` on same-origin form posts,
+    // which the cross-origin check above must refuse. `same-origin` keeps referrers inside
+    // this site and lets same-origin posts carry their real Origin.
+    set(h, header::REFERRER_POLICY, "same-origin");
     set(
         h,
         header::CONTENT_SECURITY_POLICY,
@@ -322,19 +331,80 @@ pub async fn serve(
 /// `Origin` on cross-site POSTs, so this refuses login CSRF and is defense in depth behind
 /// the per-session CSRF token everywhere else. Requests without `Origin` (API clients,
 /// agents) are not affected; the JSON API accepts only bearer tokens anyway.
-fn is_cross_origin_write(req: &Request) -> bool {
+fn is_cross_origin_write(config: &config::Config, req: &Request) -> bool {
     use axum::http::Method;
     if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return false;
     }
-    let headers = req.headers();
-    let (Some(origin), Some(host)) = (
-        headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
-        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
-    ) else {
-        return false;
-    };
-    !origin
+    origin_is_self(config, req.headers()) == Some(false)
+}
+
+/// Whether the request's `Origin` is this server: the public URL's scheme with the requested
+/// host and port. `None` when there is no `Origin` header. Comparing the scheme too means an
+/// `http://` page on the same host name is a different origin from an HTTPS deployment.
+pub(crate) fn origin_is_self(
+    config: &config::Config,
+    headers: &axum::http::HeaderMap,
+) -> Option<bool> {
+    let origin = headers.get(header::ORIGIN)?.to_str().ok();
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let scheme = config
+        .public_url
         .split_once("://")
-        .is_some_and(|(_, authority)| authority.eq_ignore_ascii_case(host))
+        .map_or("https", |(s, _)| s);
+    Some(match (origin, host) {
+        (Some(o), Some(h)) => o.eq_ignore_ascii_case(&format!("{scheme}://{h}")),
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn headers(host: &str, origin: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, host.parse().unwrap());
+        if let Some(o) = origin {
+            h.insert(header::ORIGIN, o.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn origin_must_match_scheme_host_and_port() {
+        let https = config::Config {
+            public_url: "https://rmm.example.com".into(),
+            ..config::Config::defaults()
+        };
+        let h = |o| headers("rmm.example.com", Some(o));
+        assert_eq!(
+            origin_is_self(&https, &h("https://rmm.example.com")),
+            Some(true)
+        );
+        assert_eq!(
+            origin_is_self(&https, &h("HTTPS://RMM.example.com")),
+            Some(true)
+        );
+        assert_eq!(
+            origin_is_self(&https, &h("http://rmm.example.com")),
+            Some(false),
+            "scheme differs"
+        );
+        assert_eq!(
+            origin_is_self(&https, &h("https://rmm.example.com:8443")),
+            Some(false),
+            "port differs"
+        );
+        assert_eq!(
+            origin_is_self(&https, &h("https://evil.example")),
+            Some(false)
+        );
+        assert_eq!(origin_is_self(&https, &h("null")), Some(false));
+        assert_eq!(
+            origin_is_self(&https, &headers("rmm.example.com", None)),
+            None
+        );
+    }
 }

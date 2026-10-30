@@ -4,9 +4,9 @@
 
 ## The experience
 
-1. A technician opens flyw8t → **Support** → *New session*, and chooses what to request. Phase B offers only *view screen*.
+1. A technician opens flyw8t → **Support** → *New session*, picks one of their organizations, and chooses what to request. Phase B offers only *view screen*.
 2. flyw8t shows a **9-digit code** and an **invitation link**, both single-use and valid for 10 minutes.
-3. The person being helped opens the link (or goes to `/s` and types the code). **No account, no install.**
+3. The person being helped opens the link and presses *Continue* (opening it alone spends nothing), or goes to `/s` and types the code. **No account, no install.**
 4. They see **who** is asking (the technician's name and email, as flyw8t knows them), **what** is being asked for, in plain words, and a matching code to read aloud.
 5. They choose *Allow* or *Decline*. Allowing opens **the browser's own screen picker**; they choose a tab, window or screen, or cancel.
 6. The technician sees the shared content. Both sides see the connection state, the granted capabilities, and an *End session* button that works at any moment.
@@ -74,25 +74,42 @@ created ─► waiting ─► authorizing ─► connecting ─► connected ─
 
 Rules:
 - Only the server changes state, and only along the table (a domain function with exhaustive tests, like jobs).
-- **No SDP or ICE message is relayed before the participant's explicit consent.** The server drops signaling in `waiting`/`authorizing`, so a technician cannot start media before consent.
+- **No SDP or ICE message is relayed before the participant's explicit consent.** The relay opens only after the consent commits, so a technician cannot start media before consent. It is sealed *before* an ending commits and never reopens; signaling still queued when a session ends is discarded, and each socket gets only a final "ended" notice that a full queue cannot displace.
+- **Only the technician who created the session receives its signaling**, because that is the person the participant is shown and consents to. An administrator can see any session and end it, but cannot attach to it.
+- `connected` needs **both** browsers to report media flowing; one side alone cannot claim it.
 - Capabilities are fixed when the session is created and shown on the consent screen. Asking for more (for example control) means **a new consent**; it can never activate from an existing grant.
 - Every terminal transition closes both sockets and invalidates the invitation and participant credentials in the same transaction.
+- **Pages fail closed.** If a page loses its connection to the server, or the person ends the session, or the page is closed, the page itself stops capture and closes the media connection at once, without waiting for the server. A screen chosen in the picker after the session has ended is stopped immediately.
+- Sessions belong to an organization. A technician can create them only in organizations they are assigned to and sees only their own, in those organizations; anything else is 404. Resetting a technician's sign-in ends their live sessions.
 
 ## Credentials
 
 | Credential | Form | Lifetime | Stored as |
 |---|---|---|---|
-| Pairing code | 9 random digits | single use; 10 min | SHA-256 |
-| Invitation link | `/s/<32 random bytes, base64url>` | single use; 10 min | SHA-256 |
-| Participant credential | random cookie set when the code or link is spent (`HttpOnly`, `SameSite=Strict`, path `/s`) | until the session ends | SHA-256, cleared at end |
+| Pairing code | 9 random digits | single use; 10 min | Argon2id (fixed salt, so it can be looked up); a database reader cannot enumerate the 10⁹ codes quickly |
+| Invitation link | `/s/<32 random bytes, base64url>`; opening it shows *Continue*, and only that `POST` spends it | single use; 10 min | SHA-256 |
+| Participant credential | random cookie set when the code or link is spent: `HttpOnly; SameSite=Lax; Path=/`, named `__Host-flyw8t_support` and `Secure` over HTTPS. Lax because people arrive from a link in an email or chat; every state change goes over the Origin-checked WebSocket | until the session ends | SHA-256, cleared at end |
 
-A code or link **is not authorization.** It only gets someone to the consent screen. Spending it binds the session to that one browser, so a second person with the same code is refused. Authorization is the person's explicit Allow, and then the browser's own picker.
+A code or link **is not authorization.** It only gets someone to the consent screen. Spending it binds the session to that one browser, so a second person with the same code is refused, and a browser already in a live session cannot be bound to a second one. Authorization is the person's explicit Allow, and then the browser's own picker.
 
-Code guessing: 9 digits give a 10⁹ space; with a handful of sessions live at once and code entry limited to 10 attempts per IP per 10 minutes, a single source's success probability per window is about 10⁻⁸. Codes are compared as hashes, and a wrong code gives the same response as an expired one.
+Code guessing: 9 digits give a 10⁹ space. Code entry is limited to 10 attempts per IP per 10 minutes, and to **300 wrong codes per 10 minutes from everyone together**; past that, code entry pauses (links keep working) and the page says to ask for the link. With a handful of sessions live, a distributed guesser's chance per window is therefore about 300 × live sessions / 10⁹. A wrong code gives the same response as an expired one, and every failed attempt is audited.
 
 ## End-to-end encryption and the server's position
 
-WebRTC media is DTLS-SRTP between the two browsers; neither the flyw8t server nor a TURN relay sees plaintext. **However, the signaling server carries each side's DTLS fingerprint inside the SDP, so a malicious or compromised signaling server could substitute its own and sit in the middle.** Mitigation: both pages compute a **short authentication string** from the two DTLS fingerprints actually in use (SHA-256 of the sorted fingerprints, shown as three groups of digits). The technician reads theirs aloud; the user checks it matches. A relay that intercepted the media would produce different fingerprints and a different code. This is the same defense used by Signal and ZRTP-style calls, and it is what makes "public relay operators cannot impersonate participants" true rather than assumed.
+WebRTC media is DTLS-SRTP between the two browsers; neither the flyw8t server nor a TURN relay sees plaintext. **However, signaling carries each side's DTLS fingerprint inside the SDP, so whoever relays signaling could substitute their own and sit in the middle.**
+
+### Security code
+
+1. Each page fixes its DTLS certificate (ECDSA P-256) before any signaling.
+2. Right after consent, the technician's page sends a **commitment**: `SHA-256("flyw8t-sas-commit-v1|session|technician-certificate-fingerprint")`. The participant's page makes no offer until it has one, and the technician's page accepts one offer only (no renegotiation).
+3. When media connects, each page reads the certificate **the DTLS connection actually used** (`RTCDtlsTransport.getRemoteCertificates()`, not the SDP). The participant's page checks it against the commitment; a mismatch ends the session with "this connection is not the one your technician set up".
+4. Both pages show `SHA-256("flyw8t-sas-v1|session|technician-fingerprint|participant-fingerprint")` as six digits, which the people compare out loud.
+
+The commitment is what makes six digits enough. Someone in the middle must choose the certificate it shows the participant before seeing the participant's, and the one it shows the technician before seeing the technician's. Each attempt to make the two codes match therefore succeeds with probability 10⁻⁶, and cannot be ground offline.
+
+**What this does not protect against.** The pages, and so the script that computes the code, come from the flyw8t server. A compromised flyw8t server can serve a script that shows any code it likes, and no in-page check can prevent that. The code protects against a party that can alter signaling but cannot change the page script. Today nobody separate does both, because the same server serves both. The protection becomes meaningful once signaling or TURN is run by someone else while the pages come from your own server. Protection from a compromised server needs client code trusted independently of it (a signed native helper; see Phase C).
+
+**Browser support.** Browsers without `getRemoteCertificates` show "not available in this browser" in place of a code, never a code derived from the SDP. Tested: Chrome.
 
 ## Relay, NAT traversal and deployment
 
@@ -113,10 +130,12 @@ WebRTC media is DTLS-SRTP between the two browsers; neither the flyw8t server no
 | Malicious technician escalates (view → control) | Capabilities fixed at creation; escalation requires a new session and a new consent; Phase B has no control capability at all. |
 | Technician impersonation (a scammer with a flyw8t install) | The consent page states the requester's name, email and organization **as asserted by this flyw8t server**, and the server's own hostname, so a user can see which server is asking. A self-hosted server can lie about its own users; the page says "verified by <hostname>", not "verified". |
 | Code interception / shoulder-surfing | Single use; binding to the first browser; 10-minute expiry; consent still required. |
-| Code brute force | Per-IP limits; uniform responses; hashed codes. |
-| Signaling-server man-in-the-middle | Short authentication string over the DTLS fingerprints. |
-| Malicious remote participant attacks the technician | Signaling messages are size-capped (64 KiB), typed, and relayed only to the paired peer; the viewer renders a `<video>` element only; no file or clipboard channel exists. |
-| Resource exhaustion | Per-technician cap on concurrent sessions; per-IP creation and guess limits; every state has a timeout. |
+| Code brute force | Per-IP limit, global wrong-code budget, uniform responses, Argon2id-hashed codes, failed attempts audited. |
+| Signaling man-in-the-middle | Committed security code over the certificates DTLS actually uses (see above); not a defense against a compromised flyw8t server. |
+| Someone other than the named technician receives the screen | Only the session's creator can attach; administrators can observe and end, not attach; every attach and replacement is audited. |
+| Capture keeps running after the session should have ended | Pages fail closed on lost connection, End, page exit, or a picker answered late. |
+| Malicious remote participant attacks the technician | Signaling messages are size-capped (64 KiB), rate-limited (20 per second, burst 60, then the socket closes), typed, and relayed only to the paired peer; the viewer renders a `<video>` element only; no file or clipboard channel exists. |
+| Resource exhaustion | Per-technician cap on concurrent sessions (serialized, so concurrent requests cannot overshoot); per-IP creation and guess limits; per-socket message limit; every state has a timeout. Not yet: a global cap on concurrent support sockets. |
 | Session outlives intent | 4-hour hard cap; ending from either side is immediate; the server closes both sockets on any terminal state. |
 | Unattended persistence via an attended session | Impossible in Phase B (nothing is installed). Phase C's helper deletes its credentials on exit, installs no service, and cannot enroll. |
 
@@ -139,22 +158,26 @@ This is remote-desktop control. The founding brief says not to build remote desk
 | Consent page: requester identity, capability text, what they cannot do | Implemented | `support_browser` screenshots; `consented_session_…` asserts the wording |
 | No signaling relayed before consent; technician cannot consent for the participant | Implemented | `consented_session_…`; a mutant that relays early is caught |
 | WebRTC screen view between two browsers | Implemented | `two_browsers_pair_consent_and_share_a_tab`: headless Chrome, real media, video frames received |
-| Short authentication string over both DTLS fingerprints | Implemented | same test asserts both sides compute the same code |
+| Committed security code over the certificates in use | Implemented | `support.test.mjs` (mismatch ends the session; no offer before the commitment; one offer only; both roles derive the same code); the Chrome run asserts both pages verified and show the same code |
+| Pages fail closed (lost connection, End, page exit, late picker) | Implemented | `support.test.mjs`, each check mutation-tested |
 | End from either side; leaving mid-session ends it; credentials cleared | Implemented | `decline_and_technician_revocation`, `consented_session_…` |
-| Cross-site WebSocket handshakes refused (Origin) | Implemented | `access_control_and_cross_site_sockets` |
-| Per-technician session cap, per-IP code-guess limit | Implemented | `invitations_expire_and_guessing_is_limited` |
+| Only the creator attaches; organization scope; administrator observes and ends | Implemented | `only_the_creator_attaches_and_sessions_are_scoped_to_organizations` |
+| Cross-site WebSocket handshakes refused (Origin, scheme included) | Implemented | `access_control_and_cross_site_sockets`, `sockets_check_the_scheme_and_floods_are_cut_off` |
+| Per-technician session cap (race-free), per-IP and global code-guess limits, per-socket message limit | Implemented | `the_live_session_cap_holds_under_concurrent_creation`, `invitations_expire_and_guessing_is_limited`, `sockets_check_…` |
+| Opening a link spends nothing; one browser, one session | Implemented | `opening_a_link_spends_nothing_and_one_browser_holds_one_session` |
 | STUN/TURN through `FLYW8T_ICE_SERVERS` | Implemented (config); **only LAN/loopback tested** | no NAT or TURN path has been exercised |
-| Cross-family security review of the support code | **Not done** | blocking before anyone relies on it |
+| Cross-family security review of the support code | **Done** (Codex gpt-5.6-sol, 2026-10-29): 13 findings, 12 fixed, 1 partly fixed (no global cap on concurrent sockets yet) | [dev-process.md](dev-process.md) rows 10 and 12 |
+| A second review of the fixes | **Not done** | the fixes are new code |
 | A person actually using it on two machines | **Not done** | tests use one machine and Chrome's fake screen source |
 | Native helper with keyboard and mouse (Phase C) | **Not built.** Needs the operator's decision (ADR-0010) | — |
 
 ### Trying it locally with two browsers
 
 1. Start the server (see [deployment.md](deployment.md)) and sign in as an administrator or technician.
-2. **Support → Create invitation.** Copy the link (or note the 9-digit code).
-3. In a *different* browser, or a private window (it must not share the technician's cookies), open the link, or go to `/s` and type the code.
+2. **Support**, choose an organization (create one first under **Organizations** if there is none), then **Create invitation.** Copy the link (or note the 9-digit code).
+3. In a *different* browser, or a private window (it must not share the technician's cookies), open the link and press **Continue**, or go to `/s` and type the code.
 4. Read the request, click **Allow, and choose what to share**, and pick a tab or window in the browser's picker.
-5. The technician's page shows the shared content and a 6-digit security code; the participant's page shows the same code.
+5. The technician's page shows the shared content and a 6-digit security code; the participant's page shows the same code (Chrome or Edge; other browsers say the code is not available).
 6. Either side clicks **End**. Both pages say it ended, and the link or code no longer works.
 
 For two machines on different networks, set `FLYW8T_ICE_SERVERS` (for example `[{"urls":"stun:stun.example.org:3478"}]`, plus a TURN server for restrictive networks) and serve over HTTPS: browsers allow screen capture only in secure contexts (`https://` or `localhost`).

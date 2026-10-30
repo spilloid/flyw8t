@@ -259,6 +259,11 @@ pub struct DeviceFilter {
 pub struct SupportSessionView {
     pub id: Uuid,
     pub created_by: String,
+    pub organization: String,
+    /// The viewer did not create this session (an administrator): they may see its state and
+    /// end it, but never attach to its signaling.
+    #[serde(skip)]
+    pub observer: bool,
     pub note: Option<String>,
     pub state: &'static str,
     pub state_label: &'static str,
@@ -288,6 +293,7 @@ pub struct SupportInvite {
 /// What the person being helped sees before deciding.
 #[derive(Debug, Clone)]
 pub struct SupportConsentView {
+    pub session_id: Uuid,
     pub technician_name: String,
     pub technician_email: String,
     pub server_host: String,

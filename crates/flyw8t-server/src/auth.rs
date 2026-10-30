@@ -302,9 +302,12 @@ impl Stage {
 /// A password-only session lives this long before the second factor must be finished.
 pub const PARTIAL_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
-/// Create a browser session; returns the `Set-Cookie` header value.
+/// Create a browser session; returns the `Set-Cookie` header value. The caller decides the
+/// stage while holding the user row (see `web::login`), so the decision cannot interleave
+/// with a second factor being set up.
 pub async fn create_session(
     state: &Shared,
+    exec: &mut sqlx::PgConnection,
     user_id: Uuid,
     ip: &str,
     user_agent: &str,
@@ -326,13 +329,14 @@ pub async fn create_session(
     .bind(ip)
     .bind(user_agent.chars().take(300).collect::<String>())
     .bind(stage.as_str())
-    .execute(&state.db)
+    .execute(exec)
     .await?;
     Ok(set_cookie(state, &secret, ttl.as_secs()))
 }
 
-/// Promote a partial session to a full one under a new secret and CSRF token, so a token
-/// seen before the second factor is worthless after it. Returns the `Set-Cookie` value.
+/// Promote a session to a full one under a new secret and CSRF token, so a token seen
+/// before the second factor is worthless after it. Returns the `Set-Cookie` value. Fails
+/// if the session was revoked meanwhile; callers hold its row lock (`lock_session`).
 pub async fn promote_session(
     state: &Shared,
     exec: &mut sqlx::PgConnection,
@@ -340,10 +344,10 @@ pub async fn promote_session(
 ) -> AppResult<String> {
     let secret = random_secret(32);
     let ttl = state.config.session_ttl;
-    sqlx::query(
+    let r = sqlx::query(
         "UPDATE sessions SET token_hash = $2, csrf_token = $3, stage = 'full', pending_totp_secret = NULL,
                 mfa_attempts = 0, expires_at = now() + make_interval(secs => $4)
-          WHERE id = $1",
+          WHERE id = $1 AND revoked_at IS NULL",
     )
     .bind(session_id)
     .bind(digest(&secret))
@@ -351,13 +355,78 @@ pub async fn promote_session(
     .bind(ttl.as_secs_f64())
     .execute(exec)
     .await?;
+    if r.rows_affected() != 1 {
+        return Err(AppError::Unauthorized);
+    }
     Ok(set_cookie(state, &secret, ttl.as_secs()))
+}
+
+/// Lock a user's row and read their current TOTP secret. Every change to a user's second
+/// factor, and every check of one, takes this lock first (then any session lock), so a check
+/// always sees the factor as it is now, never one replaced while the request was in flight.
+pub async fn lock_user_factor(
+    exec: &mut sqlx::PgConnection,
+    user_id: Uuid,
+) -> AppResult<Option<Vec<u8>>> {
+    let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(
+        "SELECT totp_secret FROM users WHERE id = $1 AND disabled_at IS NULL FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(exec)
+    .await?;
+    row.map(|r| r.0).ok_or(AppError::Unauthorized)
+}
+
+/// Re-check, under its row lock, that the session this request presented is still live, at
+/// one of `stages`, and still holds the same secret. Returns its pending TOTP secret.
+pub async fn lock_session(
+    exec: &mut sqlx::PgConnection,
+    session_id: Uuid,
+    token_hash: Option<&[u8]>,
+    stages: &[Stage],
+) -> AppResult<Option<Vec<u8>>> {
+    let row: Option<(String, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT stage, pending_totp_secret FROM sessions
+          WHERE id = $1 AND ($2::bytea IS NULL OR token_hash = $2)
+            AND revoked_at IS NULL AND expires_at > now()
+          FOR UPDATE",
+    )
+    .bind(session_id)
+    .bind(token_hash)
+    .fetch_optional(exec)
+    .await?;
+    match row {
+        Some((stage, pending)) if Stage::parse(&stage).is_some_and(|s| stages.contains(&s)) => {
+            Ok(pending)
+        }
+        _ => Err(AppError::Unauthorized),
+    }
+}
+
+/// Sign a user out everywhere except `keep`: after their second factor changes, no session
+/// established under the old arrangement survives.
+pub async fn revoke_other_sessions(
+    exec: &mut sqlx::PgConnection,
+    user_id: Uuid,
+    keep: Option<Uuid>,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE sessions SET revoked_at = now()
+          WHERE user_id = $1 AND revoked_at IS NULL AND ($2::uuid IS NULL OR id <> $2)",
+    )
+    .bind(user_id)
+    .bind(keep)
+    .execute(exec)
+    .await?;
+    Ok(())
 }
 
 /// Any live session, at any stage, with what the second-factor pages need.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub session_id: Uuid,
+    /// Digest of the presented cookie, to re-check the session under lock.
+    pub token_hash: Vec<u8>,
     pub stage: Stage,
     pub csrf: String,
     pub user_id: Uuid,
@@ -393,6 +462,7 @@ pub async fn any_session(state: &Shared, headers: &HeaderMap) -> AppResult<Optio
     };
     Ok(Some(SessionInfo {
         session_id,
+        token_hash: digest(raw),
         stage: Stage::parse(&stage)
             .ok_or_else(|| anyhow::anyhow!("bad session stage {stage:?}"))?,
         csrf,

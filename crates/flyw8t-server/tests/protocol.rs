@@ -538,8 +538,18 @@ async fn cross_origin_posts_are_refused() {
         server.request(req("https://evil.example")).await.status,
         StatusCode::FORBIDDEN
     );
+    // The test server's public URL is http://, so an https:// page on the same host is a
+    // different origin.
     assert_eq!(
         server.request(req("https://rmm.example.test")).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        server.request(req("null")).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        server.request(req("http://rmm.example.test")).await.status,
         StatusCode::SEE_OTHER
     );
     server.stop().await;
