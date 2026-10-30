@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flyw8t-protocol",
  "serde",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flyw8t-domain",
  "flyw8t-protocol",
