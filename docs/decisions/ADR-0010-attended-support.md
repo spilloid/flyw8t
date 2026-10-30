@@ -1,6 +1,6 @@
 # ADR-0010: Attended support
 
-**Status:** proposed (Phase B direction accepted for implementation; Phase C needs the operator's decision) · **Date:** 2026-10-29
+**Status:** accepted · **Date:** 2026-10-29; Phase C decided 2026-10-30
 
 ## Context
 
@@ -11,7 +11,7 @@ A later operator brief asks for zero-configuration attended support: a technicia
 1. **Phase B (browser screen view) is consistent with both briefs.** It adds no remote-control capability, uses the browser's own capture APIs and consent, and needs no agent. It reuses flyw8t's auth, audit, rate limiting and console. The flyw8t server is the signaling and pairing service; media is WebRTC (DTLS-SRTP, end-to-end), with optional STUN/TURN configured by the operator. Default: no third-party servers.
 2. **The console's no-script rule ([ADR-0003](ADR-0003-web-ui-ssr-first.md)) gets one scoped exception:** the support pages load a same-origin script (`/static/support.js`), because WebRTC and `getDisplayMedia` exist only as browser JavaScript APIs. The CSP for those pages adds `script-src 'self'` and `connect-src 'self'`, still with no inline script and no third-party origins.
 3. **Signaling tampering is detected, not assumed away:** both pages show a security code derived from the DTLS certificates actually in use, with the technician committing to its certificate before the participant offers (amended 2026-10-29 after cross-family review: the first version hashed SDP fingerprints, which a relay could pad). It cannot protect against a compromised flyw8t server, which serves the page script; see attended-support.md § Security code.
-4. **Phase C (native helper with input injection) is deferred** pending an operator decision. It conflicts with "don't build remote desktop from scratch". The alternatives are MeshCentral's own attended-session features through the provider seam ([ADR-0006](ADR-0006-remote-access-provider.md)), or building a narrow, consent-first helper as a distinct product. That choice affects scope and cost and is the operator's to make.
+4. **Phase C (a native helper with keyboard and mouse) is approved** (operator, 2026-10-30; corporate-strategy D-0055). Attended remote control is its own product need, and flyw8t builds it as a narrow, consent-first helper. This supersedes the founding brief's "MeshCentral first" for *attended* control only; MeshCentral stays the planned provider for unattended remote access ([ADR-0006](ADR-0006-remote-access-provider.md)). The guardrails in attended-support.md § Phase C still bind it: input needs a separate consent, an indicator with Stop is always visible, OS consent is never bypassed, nothing persists after the session, and the helper is signed.
 
 ## Consequences
 

@@ -26,11 +26,24 @@ The minimum before flyw8t manages anything that matters:
 
 ## 0.4: Remote access and AnchorDesk
 
+flyw8t stands alone (operator, 2026-10-30). Longer term it becomes a first-class RMM provider inside AnchorDesk, alongside Tactical, NinjaOne and Datto.
+
+
 - MeshCentral remote-access provider ([ADR-0006](decisions/ADR-0006-remote-access-provider.md)): device mapping, launch links, provider health shown honestly.
 - AnchorDesk `FlyweightProvider` + `FlyweightRunner` against `/api/v1` ([anchordesk-integration.md](anchordesk-integration.md)).
-- Attended support Phase B (browser screen share with consent), if the operator confirms the direction ([attended-support.md](attended-support.md)).
+- Attended support Phase B is already built (0.1).
 
-## 0.5: Scripts, with consent and evidence
+## 0.5: Attended remote control (approved 2026-10-30, ADR-0010)
+
+- A signed, temporary Windows helper launched from the consent page: screen capture plus, after a **separate consent**, keyboard and mouse. It shows an always-visible indicator with Stop, persists nothing, never bypasses OS consent, and its input path is audited.
+- macOS and Linux (portal) helpers after Windows is proven.
+
+## Mobile administration (goal accepted 2026-10-30, ADR-0011)
+
+- Next: the console as an installable mobile web app (manifest, touch-first on-call screens, Web Push for findings and job outcomes).
+- Later: a native client over `/api/v1`, after the operator approves the app-store and push-service costs.
+
+## 0.6: Scripts, with consent and evidence
 
 The first state-changing capability, and the biggest risk change in the product:
 
@@ -52,6 +65,6 @@ The first state-changing capability, and the biggest risk change in the product:
 
 ## Explicitly not planned
 
-- Forking Tactical RMM, rewriting AnchorDesk, porting MeshAgent now, or building remote desktop from scratch.
+- Forking Tactical RMM, rewriting AnchorDesk, porting MeshAgent now, or building a general unattended remote-desktop product from scratch. (Attended, consent-first remote control is approved: ADR-0010.)
 - AI features before the core is proven reliable on a real fleet.
 - Mandatory SaaS components, Redis, Kubernetes or a message broker without a demonstrated need.

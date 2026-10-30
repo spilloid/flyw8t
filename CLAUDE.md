@@ -15,8 +15,8 @@ Read [`docs/architecture.md`](docs/architecture.md), [`docs/job-lifecycle.md`](d
 - **Tenancy never comes from the device.**
 - **Secrets are write-only:** stored hashed, shown once, never logged, never in URLs (except the single-use support invitation, which is spent on first use).
 - **Live is not cached.** Connection badges come only from the registry; device-reported data shows its age.
-- **Attended support never grants more than consented**, never relays signaling before consent, and never installs anything. Remote control (Phase C) needs the operator's decision first (ADR-0010).
-- **Don't build remote desktop from scratch or port MeshAgent** (founding brief; ADR-0006).
+- **Attended support never grants more than consented**, never relays signaling before consent, and never installs anything. Remote control (Phase C) is approved (ADR-0010) and needs its own, separate consent for input.
+- **Don't build general unattended remote desktop or port MeshAgent** (founding brief; ADR-0006). Attended, consent-first remote control is approved (ADR-0010, 2026-10-30) and keeps its guardrails.
 
 ## Routing (STD-001)
 

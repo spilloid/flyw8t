@@ -1,6 +1,6 @@
 # Attended support
 
-**Status:** Phase A (architecture and threat model): this document. Phase B (browser screen view with consent): **implemented and tested**; see the status table at the end. Phase C (native helper with input) is **designed only, and needs an operator decision** ([ADR-0010](decisions/ADR-0010-attended-support.md)), because it is remote-desktop control, which the founding brief said not to build from scratch.
+**Status:** Phase A (architecture and threat model): this document. Phase B (browser screen view with consent): **implemented and tested**; see the status table at the end. Phase C (native helper with input) is **approved (operator, 2026-10-30) and not yet built** ([ADR-0010](decisions/ADR-0010-attended-support.md)).
 
 ## The experience
 
@@ -142,7 +142,7 @@ The commitment is what makes six digits enough. Someone in the middle must choos
 | Session outlives intent | 4-hour hard cap; ending from either side is immediate; the server closes both sockets on any terminal state. |
 | Unattended persistence via an attended session | Impossible in Phase B (nothing is installed). Phase C's helper deletes its credentials on exit, installs no service, and cannot enroll. |
 
-## Phase C: temporary native helper (proposed, not built)
+## Phase C: temporary native helper (approved 2026-10-30, not built)
 
 - A signed (Authenticode / Developer ID) Rust binary, downloaded from the consent page and run by the user; it shows a persistent, always-visible indicator with a *Stop* button.
 - It pairs to the same session using the participant credential (passed via a one-time launch token, not a URL the browser could leak), and offers capture (Windows Desktop Duplication / macOS ScreenCaptureKit / PipeWire portal) and, **after a separate consent**, input (Windows `SendInput`, macOS Accessibility, portal remote-desktop).
@@ -150,7 +150,7 @@ The commitment is what makes six digits enough. Someone in the middle must choos
 - File transfer, shell and elevation are separate capabilities with their own consents and policies, and are out of scope until the core helper is proven.
 - It exits and deletes everything at session end; nothing persists.
 
-This is remote-desktop control. The founding brief says not to build remote desktop from scratch and to use MeshCentral first. **Phase C proceeds only if the operator decides the attended helper is a distinct product need that MeshCentral does not meet** ([ADR-0010](decisions/ADR-0010-attended-support.md)).
+The operator decided (2026-10-30) that attended remote control is a distinct product need, and that flyw8t builds it ([ADR-0010](decisions/ADR-0010-attended-support.md)). MeshCentral remains the plan for unattended access.
 
 ## Implementation status (2026-10-29)
 
@@ -173,7 +173,7 @@ This is remote-desktop control. The founding brief says not to build remote desk
 | Re-review of the fixes | **Done** (Codex gpt-6.1-sol): 11 findings, 10 fixed; open: two link posts racing in one browser can bind two sessions | row 15 |
 | A review of the re-review fixes | **Not done** | |
 | A person actually using it on two machines | **Not done** | tests use one machine and Chrome's fake screen source |
-| Native helper with keyboard and mouse (Phase C) | **Not built.** Needs the operator's decision (ADR-0010) | — |
+| Native helper with keyboard and mouse (Phase C) | **Approved 2026-10-30; not built** | — |
 
 ### Trying it locally with two browsers
 
