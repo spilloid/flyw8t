@@ -22,7 +22,7 @@ const commitOf = async (d) => sha(`flyw8t-sas-commit-v1|${SID}|${await sha(d)}`)
 
 // A page with support.js loaded. `localDer` is this browser's certificate, `remoteDer` the
 // one the other end presents over DTLS.
-async function page({ role, localDer, remoteDer, transports = 1, delayCert = false }) {
+async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0 }) {
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) {
@@ -58,7 +58,11 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
       this.remoteDescription = null; this.localDescription = null; peers.push(this);
     }
     addTrack(t) { this.tracks.push(t); }
-    ends() { return Array.from({ length: transports }, () => ({ transport: { getRemoteCertificates: () => [remoteDer] } })); }
+    ends() {
+      return Array.from({ length: transports }, () => ({
+        transport: { getRemoteCertificates: () => (lateCerts-- > 0 ? [] : [remoteDer]) },
+      }));
+    }
     getSenders() { return role === 'participant' ? this.ends() : []; }
     getReceivers() { return role === 'technician' ? this.ends() : []; }
     async createOffer() { return { type: 'offer', sdp: VIDEO_SDP }; }
@@ -268,4 +272,17 @@ test('leaving the page ends the session', async () => {
   p.windowHandlers.pagehide();
   assert.equal(p.track.stopped, true);
   assert.equal(p.sent('end').length, 1);
+});
+
+test('a certificate that arrives just after "connected" still gives a code', async () => {
+  const tDer = der('technician');
+  const pDer = der('participant');
+  const t = await page({ role: 'technician', localDer: tDer, remoteDer: pDer, lateCerts: 3 });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  t.peers[0].connect();
+  await new Promise((r) => setTimeout(r, 600));
+  await settle();
+  assert.equal(t.el('support').dataset.sas, 'shown');
+  assert.equal(t.sas(), await expectedCode(tDer, pDer));
 });
