@@ -20,6 +20,12 @@ impl Default for RateLimiter {
 impl RateLimiter {
     /// Count one attempt against `key`; `false` when it exceeds `limit` per `window`.
     pub fn allow(&self, key: &str, limit: u32, window: Duration) -> bool {
+        self.reserve(key, limit, window).is_some()
+    }
+
+    /// Like `allow`, returning the place taken so it can be given back with `refund`.
+    /// Lets a caller budget only failures while reserving atomically before the work.
+    pub fn reserve(&self, key: &str, limit: u32, window: Duration) -> Option<Reservation> {
         let now = Instant::now();
         let mut w = self.windows.lock().unwrap();
         if w.len() > 50_000 {
@@ -30,16 +36,28 @@ impl RateLimiter {
             *entry = (now, 0);
         }
         entry.1 += 1;
-        entry.1 <= limit
+        (entry.1 <= limit).then(|| Reservation {
+            key: key.to_string(),
+            window_start: entry.0,
+        })
     }
 
-    /// Give back one attempt counted by `allow`. Lets a caller budget only failures while
-    /// still reserving a place atomically before doing the work.
-    pub fn refund(&self, key: &str) {
-        if let Some((_, n)) = self.windows.lock().unwrap().get_mut(key) {
-            *n = n.saturating_sub(1);
+    /// Give back a place, but only to the window it was taken from: a refund that arrives
+    /// after the window rolled over must not free a place in the new one.
+    pub fn refund(&self, r: Reservation) {
+        if let Some((start, n)) = self.windows.lock().unwrap().get_mut(&r.key) {
+            if *start == r.window_start {
+                *n = n.saturating_sub(1);
+            }
         }
     }
+}
+
+/// One counted attempt, from `RateLimiter::reserve`.
+#[derive(Debug)]
+pub struct Reservation {
+    key: String,
+    window_start: Instant,
 }
 
 #[cfg(test)]
@@ -56,17 +74,29 @@ mod tests {
     }
 
     #[test]
-    fn refunds_give_back_a_place() {
+    fn refunds_give_back_a_place_in_their_own_window_only() {
         let r = RateLimiter::default();
-        let w = Duration::from_secs(60);
-        assert!(r.allow("f", 2, w) && r.allow("f", 2, w));
-        assert!(!r.allow("f", 2, w));
-        r.refund("f");
-        r.refund("f");
+        let w = Duration::from_millis(200);
+        let a = r.reserve("f", 2, w).unwrap();
+        let b = r.reserve("f", 2, w).unwrap();
         assert!(
-            r.allow("f", 2, w),
-            "the refused third attempt counted too; two refunds free one place"
+            r.reserve("f", 2, w).is_none(),
+            "full, and the refused attempt counts too"
         );
-        r.refund("never-seen");
+        r.refund(a);
+        r.refund(b);
+        assert!(
+            r.reserve("f", 2, w).is_some(),
+            "two refunds free one place (three were counted)"
+        );
+        // A reservation from an earlier window gives nothing back to the next one.
+        let old = r.reserve("g", 1, w).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(r.reserve("g", 1, w).is_some(), "new window");
+        r.refund(old);
+        assert!(
+            r.reserve("g", 1, w).is_none(),
+            "a late refund freed a place in the new window"
+        );
     }
 }

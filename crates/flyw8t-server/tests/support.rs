@@ -854,3 +854,39 @@ async fn signing_out_ends_the_sockets_that_session_opened() {
     );
     server.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn disabling_an_account_ends_its_live_sockets() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Org").await;
+    let tech = add_user(
+        &server,
+        &admin,
+        "tech@example.test",
+        "technician",
+        Some(org),
+    )
+    .await;
+    let inv = create_invite_in(&server, &tech, org).await;
+    let mut t = ws(
+        &server,
+        &format!("/api/support/{}/ws", inv.session),
+        &tech.cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    until_state(&mut t, "waiting").await;
+    // The session row stays live; only the account is disabled. The socket must notice.
+    let (id,): (Uuid,) = sqlx::query_as(
+        "UPDATE users SET disabled_at = now() WHERE email = 'tech@example.test' RETURNING id",
+    )
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    server.state.support.recheck_user(id);
+    assert_eq!(recv_kind(&mut t, "ended").await["state"], "revoked");
+    server.stop().await;
+}

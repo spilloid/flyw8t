@@ -375,21 +375,36 @@ pub(crate) fn origin_is_self(
 ) -> Option<bool> {
     let origin = headers.get(header::ORIGIN)?.to_str().ok();
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let Some(origin) = origin.and_then(canonical_origin) else {
+        return Some(false);
+    };
     let scheme = config
         .public_url
         .split_once("://")
         .map_or("https", |(s, _)| s);
     // The configured public origin always counts, so a reverse proxy that rewrites `Host`
     // (to 127.0.0.1:8080, say) does not turn every browser request into a cross-origin one.
-    let public = config
-        .public_url
-        .split_once("://")
-        .map(|(s, rest)| format!("{s}://{}", rest.split('/').next().unwrap_or("")));
-    Some(match (origin, host) {
-        (Some(o), _) if public.as_deref().is_some_and(|p| o.eq_ignore_ascii_case(p)) => true,
-        (Some(o), Some(h)) => o.eq_ignore_ascii_case(&format!("{scheme}://{h}")),
-        _ => false,
-    })
+    let public = canonical_origin(&config.public_url);
+    let by_host = host.and_then(|h| canonical_origin(&format!("{scheme}://{h}")));
+    Some(public.as_ref() == Some(&origin) || by_host.as_ref() == Some(&origin))
+}
+
+/// An origin as browsers serialize it: `scheme://host[:port]`, lowercase, without a path,
+/// and without the scheme's default port (443 for https, 80 for http).
+fn canonical_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let authority = rest.split(['/', '?', '#']).next()?.to_ascii_lowercase();
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let default = match scheme.as_str() {
+        "https" => ":443",
+        "http" => ":80",
+        _ => return None,
+    };
+    let authority = authority.strip_suffix(default).unwrap_or(&authority);
+    Some(format!("{scheme}://{authority}"))
 }
 
 #[cfg(test)]
@@ -454,5 +469,31 @@ mod tests {
             origin_is_self(&https, &proxied("https://evil.example")),
             Some(false)
         );
+        // An explicit default port in the configuration matches the browser's serialization.
+        let explicit = config::Config {
+            public_url: "https://RMM.example.com:443/".into(),
+            ..config::Config::defaults()
+        };
+        assert_eq!(
+            origin_is_self(&explicit, &proxied("https://rmm.example.com")),
+            Some(true)
+        );
+        assert_eq!(
+            origin_is_self(&explicit, &h("https://rmm.example.com")),
+            Some(true)
+        );
+        assert_eq!(
+            origin_is_self(&explicit, &proxied("https://rmm.example.com:8443")),
+            Some(false)
+        );
+        assert_eq!(
+            canonical_origin("http://host:80"),
+            Some("http://host".into())
+        );
+        assert_eq!(
+            canonical_origin("http://host:8080/x"),
+            Some("http://host:8080".into())
+        );
+        assert_eq!(canonical_origin("null"), None);
     }
 }

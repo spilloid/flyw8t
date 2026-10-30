@@ -231,8 +231,11 @@ pub async fn session_principal(
 /// connections (support sockets) call this to notice sign-out, revocation and rotation.
 pub async fn session_still_valid(state: &Shared, session_id: Uuid, token: &[u8]) -> bool {
     sqlx::query_as::<_, (bool,)>(
-        "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1 AND token_hash = $2 AND stage = 'full'
-                          AND revoked_at IS NULL AND expires_at > now())",
+        // The same conditions as `session_principal`, including an account that is still
+        // enabled: anything that would refuse the next page load refuses the socket too.
+        "SELECT EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
+                         WHERE s.id = $1 AND s.token_hash = $2 AND s.stage = 'full'
+                           AND s.revoked_at IS NULL AND s.expires_at > now() AND u.disabled_at IS NULL)",
     )
     .bind(session_id)
     .bind(token)
