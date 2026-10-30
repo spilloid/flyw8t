@@ -968,17 +968,22 @@ async fn spend(
     }
     // Every code attempt reserves a place in the global budget before any work is done, so
     // concurrent guesses cannot all slip under it; only a correct code gives its place back.
-    let reserved = matches!(via, Via::Code);
-    if reserved
-        && !state
-            .limiter
-            .allow(GLOBAL_CODE_KEY, GLOBAL_CODE_FAILURES, CODE_FAILURE_WINDOW)
-    {
-        return participant_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Code entry is paused because of many wrong codes. Ask your technician to send you the link instead.",
-        );
-    }
+    let reservation = match via {
+        Via::Link => None,
+        Via::Code => match state.limiter.reserve(
+            GLOBAL_CODE_KEY,
+            GLOBAL_CODE_FAILURES,
+            CODE_FAILURE_WINDOW,
+        ) {
+            Some(r) => Some(r),
+            None => {
+                return participant_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Code entry is paused because of many wrong codes. Ask your technician to send you the link instead.",
+                )
+            }
+        },
+    };
     let digest = match via {
         Via::Code => match code_digest(credential.to_string()).await {
             Ok(d) => d,
@@ -992,8 +997,8 @@ async fn spend(
         .unwrap_or("");
     match bind(state, via, &digest, &ip, ua).await {
         Ok(Some((_, participant))) => {
-            if reserved {
-                state.limiter.refund(GLOBAL_CODE_KEY);
+            if let Some(r) = reservation {
+                state.limiter.refund(r);
             }
             let cookie = participant_cookie(state, &participant, 4 * 3600);
             ([(header::SET_COOKIE, cookie)], Redirect::to("/s/session")).into_response()
