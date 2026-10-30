@@ -416,6 +416,9 @@ async fn connected(
     agent_version: String,
     ip: String,
 ) -> anyhow::Result<()> {
+    // Ordered before any await: if this device connects again while this connection is
+    // still setting up, the newer one must win however the registrations interleave.
+    let seq = crate::registry::Registry::next_seq();
     let agent_version: String = agent_version.chars().take(50).collect();
     let (tx, mut rx) = mpsc::channel::<ServerMsg>(OUTBOUND_BUFFER);
     let close = CancellationToken::new();
@@ -441,15 +444,24 @@ async fn connected(
         .detail(json!({ "agent_version": agent_version, "connection": conn_id }))
         .record(&state.db)
         .await?;
-    state.registry.register(
+    let registered = state.registry.register(
         device_id,
         Conn {
             conn_id,
+            seq,
             since: now,
             tx,
             close: close.clone(),
         },
     );
+    if !registered {
+        return refuse(
+            sink,
+            RefusalCode::Superseded,
+            "a newer connection for this device exists",
+        )
+        .await;
+    }
     // A revocation that committed between authentication and registration would otherwise be
     // missed: its kick found nothing registered. Re-check now that the connection is visible
     // to future kicks (adversarial review finding 3).
