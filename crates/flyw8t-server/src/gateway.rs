@@ -7,7 +7,7 @@ use crate::jobs::{self, ReportResult};
 use crate::registry::Conn;
 use crate::Shared;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::State;
 use axum::response::Response;
 use base64::Engine;
 use flyw8t_protocol::messages::{AgentMsg, DeviceFacts, RefusalCode};
@@ -17,7 +17,6 @@ use futures_util::{SinkExt, StreamExt};
 use ring::rand::SecureRandom;
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde_json::json;
-use std::net::SocketAddr;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
@@ -34,14 +33,14 @@ const MAX_MESSAGES_PER_SECOND: u32 = 100;
 pub async fn agent_ws(
     ws: WebSocketUpgrade,
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
 ) -> Response {
     ws.max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let (mut sink, mut stream) = socket.split();
-            if let Err(e) = handle(&state, &mut sink, &mut stream, peer).await {
-                tracing::info!(%peer, error = %format!("{e:#}"), "agent connection ended");
+            if let Err(e) = handle(&state, &mut sink, &mut stream, ip.clone()).await {
+                tracing::info!(peer = %ip, error = %format!("{e:#}"), "agent connection ended");
             }
             let _ = sink.close().await;
         })
@@ -88,9 +87,8 @@ async fn handle(
     state: &Shared,
     sink: &mut Sink,
     stream: &mut Stream,
-    peer: SocketAddr,
+    ip: String,
 ) -> anyhow::Result<()> {
-    let ip = peer.ip().to_string();
     if !state.limiter.allow(
         &format!("agent-handshake:{ip}"),
         60,
@@ -168,7 +166,7 @@ async fn handle(
                     .await
                 }
                 Err(reason) => {
-                    tracing::info!(%peer, %reason, "enrollment refused");
+                    tracing::info!(peer = %ip, %reason, "enrollment refused");
                     Audit::anonymous(
                         "agent",
                         facts.hostname.chars().take(100).collect::<String>(),
@@ -237,7 +235,7 @@ async fn handle(
                         .limiter
                         .allow(&format!("auth-fail:{ip}"), 10, Duration::from_secs(60))
                     {
-                        tracing::warn!(%peer, "repeated agent authentication failures");
+                        tracing::warn!(peer = %ip, "repeated agent authentication failures");
                     }
                     Audit::anonymous("agent", device_id.to_string(), "device.authenticate")
                         .denied()

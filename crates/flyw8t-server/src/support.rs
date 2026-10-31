@@ -12,7 +12,7 @@ use crate::web::{check_csrf, error_response, Form};
 use crate::Shared;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use flyw8t_domain::support::{Capability, SupportState};
@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgConnection;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
@@ -1058,10 +1057,9 @@ async fn spend(
     state: &Shared,
     via: Via,
     credential: &str,
-    peer: SocketAddr,
+    ip: String,
     headers: &HeaderMap,
 ) -> Response {
-    let ip = peer.ip().to_string();
     if !state
         .limiter
         .allow(&format!("support-code:{ip}"), 10, Duration::from_secs(600))
@@ -1135,7 +1133,7 @@ async fn spend(
 
 pub async fn enter_code(
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -1147,7 +1145,7 @@ pub async fn enter_code(
             "Enter the 9-digit code you were given.",
         );
     }
-    spend(&state, Via::Code, &code, peer, &headers).await
+    spend(&state, Via::Code, &code, ip, &headers).await
 }
 
 /// `GET /s/{invite}`: a page with a Continue button. Opening the link spends nothing, so a
@@ -1173,14 +1171,14 @@ pub async fn open_invite(
 /// `POST /s/{invite}`: the person chose to continue; spend the link.
 pub async fn spend_invite(
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
     headers: HeaderMap,
     Path(invite): Path<String>,
 ) -> Response {
     if invite.len() > 100 {
         return participant_error(StatusCode::NOT_FOUND, "That link is not valid.");
     }
-    spend(&state, Via::Link, &invite, peer, &headers).await
+    spend(&state, Via::Link, &invite, ip, &headers).await
 }
 
 async fn consent_page(state: &Shared, headers: &HeaderMap) -> Response {
@@ -1272,7 +1270,7 @@ pub async fn technician_ws(
 pub async fn participant_ws(
     ws: WebSocketUpgrade,
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
     headers: HeaderMap,
 ) -> Response {
     if !same_origin(&state, &headers) {
@@ -1280,9 +1278,7 @@ pub async fn participant_ws(
     }
     match participant_session(&state, &headers).await {
         Ok(Some((id, st))) if !st.is_terminal() => {
-            let who = Who::Participant {
-                ip: peer.ip().to_string(),
-            };
+            let who = Who::Participant { ip: ip.clone() };
             let Ok(control) = is_control(&state, id).await else {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
@@ -1751,13 +1747,13 @@ async fn spend_helper_token(state: &Shared, token: &str, ip: &str) -> anyhow::Re
 pub async fn helper_ws(
     ws: WebSocketUpgrade,
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
     headers: HeaderMap,
 ) -> Response {
     if crate::origin_is_self(&state.config, &headers) == Some(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let ip = peer.ip().to_string();
+    let ip: String = ip;
     if !state.limiter.allow(
         &format!("support-helper:{ip}"),
         10,

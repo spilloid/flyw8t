@@ -611,3 +611,59 @@ async fn the_console_is_installable_as_a_mobile_app() {
     assert!(csp.contains("manifest-src 'self'"), "{csp}");
     server.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL (FLYW8T_TEST_DATABASE_URL)"]
+async fn the_client_address_comes_through_a_trusted_proxy_only() {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use flyw8t_server::client_ip::Cidr;
+    let login_as = |email: &'static str, via: &'static str| {
+        Request::post("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header("cf-connecting-ip", via)
+            .body(Body::from(form(&[("email", email), ("password", "wrong")])))
+            .unwrap()
+    };
+    let failed_login = |via: &'static str| login_as("nobody@example.test", via);
+    let last_ip = |server: &TestServer| {
+        let db = server.state.db.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>,)>(
+                "SELECT client_ip FROM audit_events WHERE action = 'user.login' ORDER BY id DESC LIMIT 1",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap()
+            .0
+        }
+    };
+
+    // Default: no proxy is trusted, so a client cannot pick its own address with a header.
+    let server = start_fresh().await;
+    server.request(failed_login("198.51.100.7")).await;
+    assert_eq!(last_ip(&server).await.as_deref(), Some("127.0.0.1"));
+    server.stop().await;
+
+    // Behind a trusted proxy (the test client connects from 127.0.0.1), its header is used.
+    let mut cfg = test_config(&fresh_database().await);
+    cfg.trusted_proxies = vec![Cidr::parse("127.0.0.0/8").unwrap()];
+    let server = start(cfg).await;
+    server.request(failed_login("198.51.100.7")).await;
+    assert_eq!(last_ip(&server).await.as_deref(), Some("198.51.100.7"));
+    // And per-address limits count the real client, not the proxy: one address hitting the
+    // limit does not lock out another.
+    for _ in 0..25 {
+        server.request(failed_login("198.51.100.8")).await;
+    }
+    // (A different email too: logins are also limited per email.)
+    let other = server
+        .request(login_as("someone-else@example.test", "198.51.100.9"))
+        .await;
+    assert_ne!(
+        other.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "another client is not throttled"
+    );
+    server.stop().await;
+}

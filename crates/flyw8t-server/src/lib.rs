@@ -12,6 +12,7 @@
 pub mod api;
 pub mod audit;
 pub mod auth;
+pub mod client_ip;
 pub mod config;
 pub mod error;
 pub mod gateway;

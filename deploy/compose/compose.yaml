@@ -1,6 +1,7 @@
-# flyw8t: PostgreSQL + server. See docs/deployment.md.
+# flyw8t: PostgreSQL + server, optionally behind a Cloudflare Tunnel. See docs/deployment.md.
 #   cp .env.example .env    # then set real values
-#   docker compose up -d --build
+#   docker compose up -d --build                      # local only
+#   docker compose --profile tunnel up -d --build     # published through Cloudflare Tunnel
 name: flyw8t
 
 services:
@@ -18,6 +19,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    networks: [flyw8t]
     # Not published: only the server reaches the database.
 
   server:
@@ -30,19 +32,50 @@ services:
         condition: service_healthy
     environment:
       FLYW8T_DATABASE_URL: postgres://flyw8t:${FLYW8T_DB_PASSWORD}@db:5432/flyw8t
+      FLYW8T_BIND: 0.0.0.0:8080
       FLYW8T_PUBLIC_URL: ${FLYW8T_PUBLIC_URL:-http://localhost:8080}
       FLYW8T_BOOTSTRAP_ADMIN_EMAIL: ${FLYW8T_BOOTSTRAP_ADMIN_EMAIL:-}
       FLYW8T_BOOTSTRAP_ADMIN_PASSWORD: ${FLYW8T_BOOTSTRAP_ADMIN_PASSWORD:-}
       FLYW8T_REQUIRE_MFA: ${FLYW8T_REQUIRE_MFA:-true}
       FLYW8T_TLS_CERT: ${FLYW8T_TLS_CERT:-}
       FLYW8T_TLS_KEY: ${FLYW8T_TLS_KEY:-}
+      # Only the tunnel's fixed address below is believed about the client's real address.
+      FLYW8T_TRUSTED_PROXIES: ${FLYW8T_TRUSTED_PROXIES:-}
+      FLYW8T_CLIENT_IP_HEADER: ${FLYW8T_CLIENT_IP_HEADER:-cf-connecting-ip}
+      FLYW8T_HELPER_PATH: ${FLYW8T_HELPER_PATH:-}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     ports:
-      # Loopback only by default. Expose to a network only behind TLS: set
-      # FLYW8T_PUBLIC_URL=https://… and either FLYW8T_TLS_CERT/KEY or a reverse proxy.
+      # Loopback only by default. Behind the tunnel nothing needs publishing at all; to expose
+      # directly, use TLS: FLYW8T_PUBLIC_URL=https://… and FLYW8T_TLS_CERT/KEY.
       - "${FLYW8T_PUBLISH:-127.0.0.1:8080}:8080"
     volumes:
       - ./tls:/tls:ro
+    networks:
+      flyw8t:
+        ipv4_address: 172.29.0.20
+
+  # Cloudflare Tunnel: an outbound-only connection from here to Cloudflare, so no inbound port,
+  # NAT rule or certificate is needed on this machine. In the Cloudflare dashboard, point the
+  # tunnel's public hostname at http://server:8080. WebSockets (agents, support) pass through.
+  tunnel:
+    image: cloudflare/cloudflared:2026.9.3
+    profiles: [tunnel]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      # Required when the tunnel profile is used (cloudflared refuses to start without it). Not
+      # written as ${...:?} because Compose checks every service, profile or not.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on: [server]
+    networks:
+      flyw8t:
+        ipv4_address: 172.29.0.10
+
+networks:
+  flyw8t:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
 
 volumes:
   pgdata:
