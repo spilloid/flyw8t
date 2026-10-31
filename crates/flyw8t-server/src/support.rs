@@ -550,6 +550,27 @@ async fn end(state: &Shared, id: Uuid, side: Side, who: &Who, reason: &str) -> a
     Ok(())
 }
 
+/// End a session, and if the database cannot record that, end it here anyway: every local socket
+/// closes at once with an "ended" notice (fail closed; a helper stops on it), and the durable
+/// transition is retried in the background for five minutes. An End someone asked for must
+/// never depend on the database being up.
+async fn end_or_force(state: &Shared, id: Uuid, side: Side, who: &Who, reason: &str) {
+    if let Err(e) = end(state, id, side, who, reason).await {
+        tracing::error!(session = %id, error = %format!("{e:#}"), "could not record a support ending; closing it here");
+        state.support.seal(id);
+        state.support.publish(id, SupportState::Closed);
+        let (state, who, reason) = (state.clone(), who.clone(), reason.to_string());
+        tokio::spawn(async move {
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if end(&state, id, side, &who, &reason).await.is_ok() {
+                    return;
+                }
+            }
+        });
+    }
+}
+
 /// End every live session a technician created: used when their sign-in is revoked, since
 /// their signaling sockets authenticated only at the handshake.
 pub async fn end_all_created_by(
@@ -1275,12 +1296,17 @@ pub async fn participant_ws(
 }
 
 async fn current(state: &Shared, id: Uuid) -> Option<SupportState> {
+    current_checked(state, id).await.ok().flatten()
+}
+
+/// Like `current`, but a database error is an error, not "no session": callers that must
+/// fail closed need to tell the two apart.
+async fn current_checked(state: &Shared, id: Uuid) -> sqlx::Result<Option<SupportState>> {
     let row: Option<(String,)> = sqlx::query_as("SELECT state FROM support_sessions WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
-        .await
-        .ok()?;
-    row.and_then(|(s,)| SupportState::parse(&s))
+        .await?;
+    Ok(row.and_then(|(s,)| SupportState::parse(&s)))
 }
 
 /// Per-socket message budget.
@@ -1383,12 +1409,18 @@ async fn run_socket(
                     let _ = tokio::time::timeout(Duration::from_secs(2), sink.send(text(&m))).await;
                 }
                 let _ = tokio::time::timeout(Duration::from_secs(1), sink.send(Message::Close(None))).await;
+                // Drain (without acting on) what the peer already sent: dropping a socket with
+                // unread input resets it, and the reset can discard the notice just sent.
+                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                    while let Some(Ok(_)) = stream.next().await {}
+                })
+                .await;
                 break;
             }
             _ = async { tokio::select! { _ = recheck.notified() => {}, _ = every.tick() => {} } }, if signed_in.is_some() => {
                 let Some((_, (session, token))) = &signed_in else { continue };
                 if !auth::session_still_valid(&state, *session, token).await {
-                    let _ = end(&state, id, Side::Technician, &who, "technician signed out").await;
+                    end_or_force(&state, id, Side::Technician, &who, "technician signed out").await;
                     // Someone else may have ended it a moment ago (an administrator's reset
                     // also ends the technician's sessions) and be about to publish. Wait for
                     // that, so this socket closes with the "ended" notice, not a bare reset.
@@ -1439,21 +1471,27 @@ async fn run_socket(
         }
     }
     state.support.detach(id, side, conn_id);
-    // Leaving mid-session ends it: the safe default for screen sharing. A helper that
-    // goes away after attaching ends the session too; it cannot come back (its token is spent).
-    if let Some(st) = current(&state, id).await {
-        let live = matches!(st, SupportState::Connecting | SupportState::Connected)
-            || (side == Side::Helper && st == SupportState::AwaitingHelper);
-        if live {
-            let reason = match side {
-                Side::Technician => "technician left",
-                Side::Participant => "participant left",
-                Side::Helper => "helper closed",
-            };
-            let _ = end(&state, id, side, &who, reason).await;
-        } else if !st.is_terminal() {
-            state.support.publish(id, st);
+    // Leaving mid-session ends it: the safe default for screen sharing. During the helper
+    // step, the helper going away ends it (its token is spent, it cannot come back), and so
+    // does the person's browser (the page told them it stopped; the helper must not then be
+    // able to start control). If the state cannot be read, fail closed and end it.
+    let reason = match side {
+        Side::Technician => "technician left",
+        Side::Participant => "participant left",
+        Side::Helper => "helper closed",
+    };
+    match current_checked(&state, id).await {
+        Ok(Some(st)) => {
+            let live = matches!(st, SupportState::Connecting | SupportState::Connected)
+                || (side != Side::Technician && st == SupportState::AwaitingHelper);
+            if live {
+                end_or_force(&state, id, side, &who, reason).await;
+            } else if !st.is_terminal() {
+                state.support.publish(id, st);
+            }
         }
+        Ok(None) => {}
+        Err(_) => end_or_force(&state, id, side, &who, reason).await,
     }
 }
 
@@ -1569,7 +1607,7 @@ async fn on_message(
                 Side::Participant => "ended by participant",
                 Side::Helper => "ended in the helper",
             };
-            end(state, id, side, who, reason).await?;
+            end_or_force(state, id, side, who, reason).await;
         }
         (Side::Technician, In::Approve | In::Decline) => {
             nothing(state, "only the person being helped can allow or decline");
@@ -1677,6 +1715,7 @@ async fn spend_helper_token(state: &Shared, token: &str, ip: &str) -> anyhow::Re
     let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
         "SELECT id, organization_id FROM support_sessions
           WHERE helper_token_hash = $1 AND state = 'awaiting_helper' AND helper_token_expires_at > now()
+            AND helper_attached_at IS NULL
           FOR UPDATE",
     )
     .bind(auth::digest(token))
@@ -1784,7 +1823,7 @@ pub async fn helper_download(
     let minted = sqlx::query(
         "UPDATE support_sessions SET helper_token_hash = $2,
                 helper_token_expires_at = now() + make_interval(secs => $3)
-          WHERE id = $1 AND state = 'awaiting_helper'",
+          WHERE id = $1 AND state = 'awaiting_helper' AND helper_attached_at IS NULL",
     )
     .bind(session)
     .bind(auth::digest(&token))

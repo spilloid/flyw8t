@@ -10,6 +10,7 @@ All notable changes to flyw8t. Dates are UTC.
 - Remote control, server side (ADR-0012 step 1): sessions can request `control_input` (new `RunControlSessions` permission). The browser's Allow moves to `awaiting_helper`; downloading the helper (`/s/helper/download`, bound browser only) mints a single-use, 2-minute launch token carried only in the file name. The helper attaches with that token (`/api/support/helper/ws`) and must be allowed in its own window before anything is relayed. In a control session the helper, not the browser, is the technician's media peer, and `connected` needs both of them. Migration 0005. No helper binary yet.
 
 ### Fixed
+- Remote control review fixes (dev-process row 18): an End the database cannot record still closes every socket of the session at once; no helper credential can be minted or spent once a helper has attached; the browser leaving during the helper step ends the session; the helper download link survives a reload; the final "ended" notice is not lost to a connection reset.
 - When an administrator's reset and a technician socket's own sign-in recheck raced to end the same support session, the losing socket could close without the "ended" notice (seen once in Linux CI). It now waits briefly for that notice.
 
 ## 0.1.1 — 2026-10-30 (pre-release)
