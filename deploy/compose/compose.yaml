@@ -63,7 +63,9 @@ services:
     restart: unless-stopped
     command: tunnel --no-autoupdate run
     environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env to use the tunnel profile}
+      # Required when the tunnel profile is used (cloudflared refuses to start without it). Not
+      # written as ${...:?} because Compose checks every service, profile or not.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
     depends_on: [server]
     networks:
       flyw8t:
