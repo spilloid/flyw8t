@@ -34,6 +34,11 @@ pub struct Config {
     /// The signed `flyw8t-helper.exe` offered to participants of control sessions. Without it,
     /// the server says remote control is not available.
     pub helper_path: Option<PathBuf>,
+    /// Reverse proxies (Cloudflare Tunnel, nginx) whose forwarded client address is believed.
+    /// Empty by default: the socket address is used and forwarding headers are ignored.
+    pub trusted_proxies: Vec<crate::client_ip::Cidr>,
+    /// The header a trusted proxy puts the client address in.
+    pub client_ip_header: String,
 }
 
 impl Config {
@@ -66,6 +71,22 @@ impl Config {
             bootstrap_admin,
             ice_servers: var("FLYW8T_ICE_SERVERS").unwrap_or_else(|| "[]".into()),
             helper_path: var("FLYW8T_HELPER_PATH").map(PathBuf::from),
+            trusted_proxies: match var("FLYW8T_TRUSTED_PROXIES") {
+                None => Vec::new(),
+                Some(v) => v
+                    .split(',')
+                    .map(|s| {
+                        crate::client_ip::Cidr::parse(s).with_context(|| {
+                            format!(
+                                "FLYW8T_TRUSTED_PROXIES: {s:?} is not an address or address/prefix"
+                            )
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            },
+            client_ip_header: var("FLYW8T_CLIENT_IP_HEADER")
+                .unwrap_or_else(|| "cf-connecting-ip".into())
+                .to_ascii_lowercase(),
             require_mfa: match var("FLYW8T_REQUIRE_MFA").as_deref() {
                 None | Some("true") => true,
                 Some("false") => false,
@@ -95,6 +116,8 @@ impl Config {
             session_ttl: Duration::from_secs(12 * 60 * 60),
             require_mfa: true,
             helper_path: None,
+            trusted_proxies: Vec::new(),
+            client_ip_header: "cf-connecting-ip".into(),
         }
     }
 

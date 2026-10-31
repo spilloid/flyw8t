@@ -20,7 +20,8 @@ By default the server publishes on **127.0.0.1 only** and the database is not pu
 Agents refuse plaintext to any non-loopback host, and the server refuses to start with an `http://` public URL that is not loopback. Pick one:
 
 - **Native TLS:** put `fullchain.pem` and `privkey.pem` in `deploy/compose/tls/`, then set `FLYW8T_TLS_CERT=/tls/fullchain.pem`, `FLYW8T_TLS_KEY=/tls/privkey.pem`, `FLYW8T_PUBLIC_URL=https://rmm.example.com:8443` and `FLYW8T_PUBLISH=0.0.0.0:8443`. Native TLS is verified by `tests/tls.rs`.
-- **Reverse proxy** (Caddy, Traefik, nginx): terminate TLS at the proxy, forward to `127.0.0.1:8080` with WebSocket upgrade enabled for `/api/agent/ws`, and set `FLYW8T_PUBLIC_URL=https://…`. Client IPs in the audit log will be the proxy's until trusted-proxy support exists.
+- **Cloudflare Tunnel** (recommended for a home or office server): no inbound port, no NAT rule, no certificate to manage. In Cloudflare Zero Trust, create a tunnel, copy its token, and add a public hostname (for example `rmm.example.com`) pointing at `http://server:8080`. In `.env` set `CLOUDFLARE_TUNNEL_TOKEN`, `FLYW8T_PUBLIC_URL=https://rmm.example.com` and `FLYW8T_TRUSTED_PROXIES=172.29.0.10`, then `docker compose --profile tunnel up -d --build`. Agents enroll against `https://rmm.example.com`; their WebSockets and the support pages' pass through the tunnel. Rate limits and the audit log see each client's real address (`CF-Connecting-IP`), believed only from the tunnel container.
+- **Reverse proxy** (Caddy, Traefik, nginx): terminate TLS at the proxy, forward to `127.0.0.1:8080` with WebSocket upgrade enabled, and set `FLYW8T_PUBLIC_URL=https://…`. Set `FLYW8T_TRUSTED_PROXIES` to the proxy's address and `FLYW8T_CLIENT_IP_HEADER` to the header it sets (for example `x-forwarded-for`), or client addresses will all be the proxy's.
 
 For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pem`); it is stored in the agent's configuration and trusted alongside public roots.
 
@@ -35,6 +36,8 @@ For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pe
 | `FLYW8T_BOOTSTRAP_ADMIN_EMAIL`, `…_PASSWORD` | together | — | first administrator, created only while no users exist; password ≥ 12 characters |
 | `FLYW8T_REQUIRE_MFA` | no | `true` | every console user sets up two-step verification (TOTP) before reaching the console; `false` makes it optional per user |
 | `FLYW8T_HELPER_PATH` | no | — | the signed `flyw8t-helper.exe` offered to participants of remote-control sessions (ADR-0012). Without it, control sessions say the helper is not available; screen viewing is unaffected |
+| `FLYW8T_TRUSTED_PROXIES` | no | (none) | comma-separated addresses or `addr/prefix` ranges of reverse proxies whose forwarded client address is believed (the Compose tunnel is `172.29.0.10`). Empty: the socket address is used and forwarding headers are ignored, so a client cannot choose its own address |
+| `FLYW8T_CLIENT_IP_HEADER` | no | `cf-connecting-ip` | the header a trusted proxy puts the client address in (`x-forwarded-for` for most others; its last entry is used) |
 | `RUST_LOG` | no | `info,sqlx=warn` | log filter |
 
 Migrations are embedded in the binary and applied at startup.

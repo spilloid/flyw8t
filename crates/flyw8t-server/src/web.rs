@@ -8,7 +8,7 @@ use crate::jobs::{self, NewJob};
 use crate::queries::{self, JobQuery};
 use crate::Shared;
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use flyw8t_domain::job::ExecState;
@@ -18,7 +18,6 @@ use flyw8t_web::model::{DeviceFilter, Flash, PageCtx, RevealedSecret};
 use serde::Deserialize;
 use serde_json::json;
 use std::future::Future;
-use std::net::SocketAddr;
 use std::time::Duration;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -144,14 +143,14 @@ pub async fn login_form(State(state): State<Shared>, headers: HeaderMap) -> Resp
 
 pub async fn login(
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let form = Form::parse(&body);
     let email = form.get("email").unwrap_or("").trim().to_lowercase();
     let password = form.get("password").unwrap_or("");
-    let ip = peer.ip().to_string();
+    let ip: String = ip;
     let fail = |status: StatusCode, msg: &str, no_admin: bool| {
         (
             status,

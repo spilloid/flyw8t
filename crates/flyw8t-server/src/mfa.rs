@@ -13,14 +13,13 @@ use crate::totp;
 use crate::web::{self, check_csrf, constant_time_eq, ctx, page, to, Form, MsgQuery};
 use crate::Shared;
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use flyw8t_domain::Permission;
 use flyw8t_web::model::{AccountView, Flash, MfaSetupView};
 use serde_json::json;
 use sqlx::PgConnection;
-use std::net::SocketAddr;
 use std::time::Duration;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -154,7 +153,7 @@ pub async fn challenge_form(State(state): State<Shared>, headers: HeaderMap) -> 
 
 pub async fn challenge(
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -167,7 +166,7 @@ pub async fn challenge(
     if !csrf_ok(&s, &form) {
         return web::error_response(None, AppError::Forbidden);
     }
-    let ip = peer.ip().to_string();
+    let ip: String = ip;
     let retry = |status: StatusCode, msg: &str| {
         (
             status,
@@ -297,7 +296,7 @@ pub async fn setup_form(State(state): State<Shared>, headers: HeaderMap) -> Resp
 
 pub async fn setup(
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -379,14 +378,14 @@ pub async fn setup(
         auth::revoke_other_sessions(&mut tx, s.user_id, Some(s.session_id)).await?;
         if s.stage == Stage::Enroll {
             Audit::anonymous("web", s.email.clone(), "user.login")
-                .ip(peer.ip().to_string())
+                .ip(ip.clone())
                 .target("user", s.user_id)
                 .detail(json!({ "second_factor": "totp_enrolled" }))
                 .record(&mut *tx)
                 .await?;
         }
         Audit::anonymous("web", s.email.clone(), "user.mfa.enable")
-            .ip(peer.ip().to_string())
+            .ip(ip.clone())
             .target("user", s.user_id)
             .record(&mut *tx)
             .await?;
