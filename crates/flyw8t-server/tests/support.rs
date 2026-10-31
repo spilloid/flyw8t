@@ -1217,3 +1217,115 @@ async fn helper_tokens_expire_and_unstarted_helpers_time_out() {
     assert_eq!(recv_kind(&mut part, "ended").await["state"], "expired");
     server.stop().await;
 }
+
+/// A server offering a helper file, and a control session whose helper has attached and is
+/// waiting for the person's Allow in its own window.
+async fn awaiting_helper_session() -> (TestServer, tempfile::NamedTempFile, Uuid, String, Ws, Ws) {
+    let helper_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(helper_file.path(), b"MZ").unwrap();
+    let mut cfg = test_config(&fresh_database().await);
+    cfg.helper_path = Some(helper_file.path().to_path_buf());
+    let server = start(cfg).await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Org").await;
+    let inv = create_invite_with(&server, &admin, org, "control").await;
+    let cookie = spend_code(&server, &inv.code).await.unwrap();
+    let mut part = ws(
+        &server,
+        "/api/support/participant/ws",
+        &cookie,
+        origin(&server),
+    )
+    .await
+    .unwrap();
+    until_state(&mut part, "authorizing").await;
+    send(&mut part, json!({"type": "approve"})).await;
+    recv_kind(&mut part, "helper").await;
+    let download = |c: &str| {
+        Request::get("/s/helper/download")
+            .header(header::COOKIE, c)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let file = server.request(download(&cookie)).await;
+    let token = extract(
+        file.headers[header::CONTENT_DISPOSITION].to_str().unwrap(),
+        r"flyw8t-helper-([A-Za-z0-9_-]+)\.exe",
+    )
+    .unwrap();
+    let mut helper = helper_ws(&server, &token).await.unwrap();
+    until_state(&mut helper, "awaiting_helper").await;
+    // Once a helper has attached, no further download can mint another credential.
+    assert_eq!(
+        server.request(download(&cookie)).await.status,
+        StatusCode::NOT_FOUND,
+        "a second helper must not be able to replace the first"
+    );
+    (server, helper_file, inv.session, cookie, part, helper)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn losing_the_browser_during_the_helper_step_ends_the_session() {
+    let (server, _file, session, _cookie, part, mut helper) = awaiting_helper_session().await;
+    // The page has gone (closed, crashed, or lost its connection): it told the person the
+    // session stopped, so the helper must not be able to start control afterwards.
+    drop(part);
+    assert_eq!(recv_kind(&mut helper, "ended").await["state"], "rejected");
+    assert_eq!(db_state(&server, session).await, "rejected");
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn end_closes_everything_even_when_the_database_cannot_record_it() {
+    let (server, _file, session, _cookie, mut part, mut helper) = awaiting_helper_session().await;
+    // Make recording the ending fail, as a database outage or failed commit would.
+    sqlx::query("ALTER TABLE support_sessions ADD CONSTRAINT test_no_rejected CHECK (state <> 'rejected') NOT VALID")
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    send(&mut part, json!({"type": "end"})).await;
+    // Every socket is closed here at once, with an ended notice, although nothing was recorded.
+    assert_eq!(recv_kind(&mut helper, "ended").await["state"], "closed");
+    assert_eq!(db_state(&server, session).await, "awaiting_helper");
+    // Once the database accepts it again, the background retry records the ending.
+    sqlx::query("ALTER TABLE support_sessions DROP CONSTRAINT test_no_rejected")
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let db = server.state.db.clone();
+    wait_for("the ending to be recorded", Duration::from_secs(15), || {
+        let db = db.clone();
+        async move {
+            sqlx::query_as::<_, (String,)>("SELECT state FROM support_sessions WHERE id = $1")
+                .bind(session)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+                .0
+                == "rejected"
+        }
+    })
+    .await;
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn the_consent_page_always_links_the_helper() {
+    let (server, _file, _session, cookie, _part, _helper) = awaiting_helper_session().await;
+    let page = server
+        .request(
+            Request::get("/s/session")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert!(
+        page.body.contains(r#"href="/s/helper/download""#),
+        "a reloaded page can still get the helper"
+    );
+    server.stop().await;
+}

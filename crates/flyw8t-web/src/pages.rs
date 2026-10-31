@@ -1267,7 +1267,9 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
                     </div>
                     <div id="helper-box" class="card" hidden=!awaiting>
                         <p><strong>"Next: run the flyw8t helper."</strong>" It opens a window that asks you once more, shows who is asking and a security code, and has a Stop button. It installs nothing."</p>
-                        <p><a id="helper-link" class="button" href="#">"Download the helper"</a></p>
+                        // The link carries no secret (the token is minted by the download), so it is
+                        // here from the start: a reloaded page can still get the helper.
+                        <p><a id="helper-link" class="button" href="/s/helper/download">"Download the helper"</a></p>
                         <p class="muted" id="helper-note">"The download works for two minutes. If it expires, decline and ask for a new session."</p>
                         <button type="button" id="cancel-helper" class="bad">"Cancel"</button>
                     </div>

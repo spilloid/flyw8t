@@ -107,6 +107,9 @@ impl Cdp {
     }
 
     async fn screenshot(&mut self, session: &str, path: PathBuf) {
+        // Headless Chrome can stall capturing a tab that is not in front.
+        self.call(Some(session), "Page.bringToFront", json!({}))
+            .await;
         let png = self
             .call(
                 Some(session),
