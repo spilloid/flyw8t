@@ -5,6 +5,7 @@ All notable changes to flyw8t. Dates are UTC.
 ## Unreleased
 
 ### Added
+- Groundwork for running several server instances on one database (ADR-0009 step 2): job creation and cancel announce work on the `flyw8t_dispatch` channel, and each instance dispatches at once to devices connected to it. A cancel records `last_cancel_sent_at` only when it was actually sent. Attended support and rate limits are still per instance, so run one instance for now.
 - Windows release binaries are Authenticode-signed (Azure Artifact Signing) and verified before publishing; a dry-run **Signing check** workflow; `scripts/verify-signature.ps1` for anyone checking a download. Needs the one-time `scripts/setup-signing.ps1` before the next tag.
 - Remote control, server side (ADR-0012 step 1): sessions can request `control_input` (new `RunControlSessions` permission). The browser's Allow moves to `awaiting_helper`; downloading the helper (`/s/helper/download`, bound browser only) mints a single-use, 2-minute launch token carried only in the file name. The helper attaches with that token (`/api/support/helper/ws`) and must be allowed in its own window before anything is relayed. In a control session the helper, not the browser, is the technician's media peer, and `connected` needs both of them. Migration 0005. No helper binary yet.
 

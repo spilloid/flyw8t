@@ -637,3 +637,51 @@ async fn disconnected_device_is_not_shown_as_live() {
     assert!(page.body.contains("Offline · seen"));
     server.stop().await;
 }
+
+/// ADR-0009 step 2: two server instances share one database. A job and a cancel created on B
+/// reach a device connected to A at once, through the database's dispatch announcements.
+/// Both sweepers are slowed to an hour, so only the announcement can deliver in time.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn work_created_on_one_instance_reaches_a_device_on_another() {
+    let db = fresh_database().await;
+    let slow = |url: &str| {
+        let mut c = test_config(url);
+        c.sweep_interval = Duration::from_secs(3600);
+        c.redelivery_after = Duration::from_secs(3600);
+        c
+    };
+    let a = start(slow(&db)).await;
+    let b = start(slow(&db)).await;
+    let (_admin_a, _org, agent) = enrolled(&a).await;
+    let device = agent.device_id;
+    let (stop, task) = agent.connect(&a.url());
+    wait_connected(&a, device).await;
+    assert!(
+        b.state.registry.current_conn(device).is_none(),
+        "the device is on A only"
+    );
+
+    let admin_b = b.admin().await;
+    let job = admin_b.run(&b, device, &[("action", "net.ipconfig")]).await;
+    wait_state(&b, job, "completed", Duration::from_secs(10)).await;
+
+    let running = admin_b
+        .run(
+            &b,
+            device,
+            &[("action", "net.ping"), ("target", "192.0.2.1")],
+        )
+        .await;
+    wait_state(&b, running, "running", Duration::from_secs(10)).await;
+    let r = admin_b
+        .post(&b, &format!("/jobs/{running}/cancel"), &[])
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    wait_state(&b, running, "cancelled", Duration::from_secs(10)).await;
+
+    stop.cancel();
+    task.await.unwrap().unwrap();
+    b.stop().await;
+    a.stop().await;
+}

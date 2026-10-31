@@ -292,6 +292,47 @@ async fn security_headers(State(state): State<Shared>, req: Request, next: Next)
     resp
 }
 
+/// Listens for work announced by any server instance (`jobs::DISPATCH_CHANNEL`) and runs a
+/// dispatch pass for each announced device connected here. With one instance this only
+/// repeats the local pass harmlessly; with several, it is what lets a job created on one
+/// reach a device connected to another without waiting for the sweeper. If the listener
+/// drops, it reconnects; anything announced meanwhile is picked up by the sweeper.
+pub async fn run_dispatch_listener(state: Shared, shutdown: CancellationToken) {
+    loop {
+        let listen = async {
+            let mut l = sqlx::postgres::PgListener::connect_with(&state.db).await?;
+            l.listen(jobs::DISPATCH_CHANNEL).await?;
+            loop {
+                let n = l.recv().await?;
+                let Ok(device) = n.payload().parse::<uuid::Uuid>() else {
+                    continue;
+                };
+                if state.registry.current_conn(device).is_some() {
+                    if let Err(e) =
+                        jobs::dispatch_pending(&state, device, jobs::Pass::NewWork).await
+                    {
+                        tracing::warn!(%device, error = %format!("{e:#}"), "announced dispatch failed");
+                    }
+                }
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), sqlx::Error>(())
+        };
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            r = listen => {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e, "dispatch listener lost its connection; reconnecting");
+                }
+            }
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+        }
+    }
+}
+
 /// Periodic deadline resolution and retry, until `shutdown`.
 pub async fn run_sweeper(state: Shared, shutdown: CancellationToken) {
     let mut tick = tokio::time::interval(state.config.sweep_interval);
@@ -317,6 +358,7 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(run_sweeper(state.clone(), shutdown.clone()));
+    tokio::spawn(run_dispatch_listener(state.clone(), shutdown.clone()));
     let handle = axum_server::Handle::new();
     let h2 = handle.clone();
     let s2 = shutdown.clone();
