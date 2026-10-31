@@ -323,6 +323,7 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
         .detail(json!({ "device_id": req.device_id, "action": req.action.name(), "timeout_secs": timeout }))
         .record(&mut *tx)
         .await?;
+    announce(&mut tx, req.device_id).await?;
     tx.commit().await?;
 
     dispatch_pending(state, req.device_id, Pass::NewWork).await?;
@@ -331,6 +332,21 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
 
 // ---------------------------------------------------------------------------------------
 // Dispatch
+
+/// Channel on which "this device has new work or a cancel" is announced to every server
+/// instance, so the one holding the device's connection acts at once (ADR-0009). A lost
+/// announcement costs latency only: the sweeper re-offers on its next pass.
+pub const DISPATCH_CHANNEL: &str = "flyw8t_dispatch";
+
+/// Announce work for `device_id`, delivered when the surrounding transaction commits.
+async fn announce(tx: &mut PgConnection, device_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(DISPATCH_CHANNEL)
+        .bind(device_id.to_string())
+        .execute(tx)
+        .await?;
+    Ok(())
+}
 
 /// Why a dispatch pass is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -757,7 +773,7 @@ pub async fn cancel(state: &Shared, p: &Principal, job_id: Uuid) -> AppResult<()
         )));
     }
     sqlx::query(
-        "UPDATE jobs SET cancel_requested_at = now(), cancel_requested_by = $2, last_cancel_sent_at = now() WHERE id = $1",
+        "UPDATE jobs SET cancel_requested_at = now(), cancel_requested_by = $2 WHERE id = $1",
     )
     .bind(job_id)
     .bind(p.user_id)
@@ -777,10 +793,20 @@ pub async fn cancel(state: &Shared, p: &Principal, job_id: Uuid) -> AppResult<()
         .detail(json!({ "effect": "cancel requested from device" }))
         .record(&mut *tx)
         .await?;
+    announce(&mut tx, job.device_id).await?;
     tx.commit().await?;
-    state
+    // Sent at once if the device is connected to this instance; otherwise the instance that
+    // holds its connection sends it on the announcement. Either way, `last_cancel_sent_at`
+    // records an actual send, so the resend rule never waits on a send that did not happen.
+    if state
         .registry
-        .send(job.device_id, ServerMsg::JobCancel { job_id });
+        .send(job.device_id, ServerMsg::JobCancel { job_id })
+    {
+        sqlx::query("UPDATE jobs SET last_cancel_sent_at = now() WHERE id = $1")
+            .bind(job_id)
+            .execute(&state.db)
+            .await?;
+    }
     Ok(())
 }
 
