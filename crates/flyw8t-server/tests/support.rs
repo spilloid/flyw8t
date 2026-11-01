@@ -1009,14 +1009,18 @@ async fn control_needs_the_helper_and_its_own_consent() {
         .to_str()
         .unwrap()
         .to_string();
-    let token = extract(&disposition, r"flyw8t-helper-([A-Za-z0-9_-]+)\.exe").unwrap();
+    let token = extract(
+        &disposition,
+        r"flyw8t-helper-([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+\.exe",
+    )
+    .unwrap();
     assert_eq!(file.body, "MZ test helper");
     // A second download replaces the token: only the newest file can attach.
     let again = server.request(get(Some(&cookie))).await;
     let old_token = token;
     let token = extract(
         again.headers[header::CONTENT_DISPOSITION].to_str().unwrap(),
-        r"flyw8t-helper-([A-Za-z0-9_-]+)\.exe",
+        r"flyw8t-helper-([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+\.exe",
     )
     .unwrap();
     assert_ne!(token, old_token);
@@ -1194,7 +1198,7 @@ async fn helper_tokens_expire_and_unstarted_helpers_time_out() {
         .await;
     let token = extract(
         file.headers[header::CONTENT_DISPOSITION].to_str().unwrap(),
-        r"flyw8t-helper-([A-Za-z0-9_-]+).exe",
+        r"flyw8t-helper-([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+\.exe",
     )
     .unwrap();
 
@@ -1250,7 +1254,7 @@ async fn awaiting_helper_session() -> (TestServer, tempfile::NamedTempFile, Uuid
     let file = server.request(download(&cookie)).await;
     let token = extract(
         file.headers[header::CONTENT_DISPOSITION].to_str().unwrap(),
-        r"flyw8t-helper-([A-Za-z0-9_-]+)\.exe",
+        r"flyw8t-helper-([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+\.exe",
     )
     .unwrap();
     let mut helper = helper_ws(&server, &token).await.unwrap();

@@ -141,6 +141,7 @@ The commitment is what makes six digits enough. Someone in the middle must choos
 | Malicious remote participant attacks the technician | Signaling messages are size-capped (64 KiB), rate-limited (20 per second, burst 60, then the socket closes), typed, and relayed only to the paired peer; the viewer renders a `<video>` element only; no file or clipboard channel exists. |
 | Resource exhaustion | Per-technician cap on concurrent sessions (serialized, so concurrent requests cannot overshoot); per-IP creation and guess limits; per-socket message limit; every state has a timeout. Not yet: a global cap on concurrent support sockets. |
 | Session outlives intent | 4-hour hard cap; ending from either side is immediate; the server closes both sockets on any terminal state. |
+| A helper renamed to point at another server | The helper's consent window names the host it connected to, read from its own file name; the server's own claims are not shown as the host. Plaintext addresses other than this machine are refused. |
 | Unattended persistence via an attended session | Impossible in Phase B (nothing is installed). Phase C's helper deletes its credentials on exit, installs no service, and cannot enroll. |
 
 ## Phase C: temporary native helper (approved 2026-10-30, not built)
@@ -174,7 +175,7 @@ The operator decided (2026-10-30) that attended remote control is a distinct pro
 | Re-review of the fixes | **Done** (Codex gpt-6.1-sol): 11 findings, 10 fixed; open: two link posts racing in one browser can bind two sessions | row 15 |
 | A review of the re-review fixes | **Not done** | |
 | A person actually using it on two machines | **Not done** | tests use one machine and Chrome's fake screen source |
-| Native helper with keyboard and mouse (Phase C) | **Approved 2026-10-30; not built** | — |
+| Native helper with keyboard and mouse (Phase C) | **Pairing and consent built** (ADR-0012 step 2a); no media or input yet | `tests/helper.rs` |
 
 ### Trying it locally with two browsers
 

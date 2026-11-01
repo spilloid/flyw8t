@@ -6,6 +6,7 @@ members = [
     "crates/flyw8t-web",
     "crates/flyw8t-server",
     "crates/flyw8t-agent",
+    "crates/flyw8t-helper",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ flyw8t-domain = { path = "crates/flyw8t-domain" }
 flyw8t-web = { path = "crates/flyw8t-web" }
 flyw8t-server = { path = "crates/flyw8t-server" }
 flyw8t-agent = { path = "crates/flyw8t-agent" }
+flyw8t-helper = { path = "crates/flyw8t-helper" }
 
 anyhow = "1"
 thiserror = "2"

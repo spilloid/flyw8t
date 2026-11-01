@@ -61,6 +61,7 @@ Beyond the milestone:
 | AT-42 | Remote control (server): browser consent leads only to the helper step; launch tokens are single-use, expire, and are bound to the session; nothing relays before the helper's Allow; the browser page never relays; connected needs technician and helper; view sessions never issue tokens; control is permissioned | `control_needs_the_helper_and_its_own_consent`, `view_sessions_never_issue_a_helper_and_control_is_permissioned`, `helper_tokens_expire_and_unstarted_helpers_time_out`, `support_js` |
 | AT-43 | Behind a trusted proxy the client's real address drives rate limits and audit; without one, a forwarding header is ignored | `the_client_address_comes_through_a_trusted_proxy_only`, `client_ip` unit tests |
 | AT-44 | Two server instances on one database: a job and a cancel created on one reach a device connected to the other at once, not at the next sweep | `work_created_on_one_instance_reaches_a_device_on_another` |
+| AT-45 | The helper pairs from its downloaded file name alone; its consent names the technician, organization and the server host it actually connected to; Decline ends the session; an Allow after the session ended sends nothing; a wrong or reused token is refused; renamed or plaintext-to-remote names are refused | `tests/helper.rs` (4 tests), `flyw8t-helper` unit tests |
 
 ## Manual checks still owed
 

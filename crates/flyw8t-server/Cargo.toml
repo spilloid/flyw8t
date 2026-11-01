@@ -39,6 +39,7 @@ form_urlencoded = "1"
 
 [dev-dependencies]
 flyw8t-agent.workspace = true
+flyw8t-helper.workspace = true
 tokio-tungstenite.workspace = true
 rcgen.workspace = true
 tempfile = "3"

@@ -867,6 +867,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "flyw8t-helper"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "futures-util",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "flyw8t-protocol"
 version = "0.1.1"
 dependencies = [
@@ -888,6 +906,7 @@ dependencies = [
  "base64",
  "flyw8t-agent",
  "flyw8t-domain",
+ "flyw8t-helper",
  "flyw8t-protocol",
  "flyw8t-web",
  "form_urlencoded",

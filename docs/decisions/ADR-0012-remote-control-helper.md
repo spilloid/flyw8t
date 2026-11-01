@@ -24,7 +24,7 @@ When the person allows control and downloads the helper, the server mints a **la
 - bound to that participant's session and to the `control_input` capability;
 - stored as a hash.
 
-The token travels in the downloaded file's name (`flyw8t-helper-<token>.exe`), the same pattern ScreenConnect uses, so the person never types anything. If the name has been changed, the helper asks for a short code shown on the consent page instead.
+The token travels in the downloaded file's name, together with the server it belongs to: `flyw8t-helper-<token>.<base64url(public URL)>.exe`, the same pattern ScreenConnect uses, so the person never types anything and one helper build serves every flyw8t server. The helper accepts only `https`, or `http` to this machine, and refuses an address with user information in it. Its consent window names the host it actually connected to, taken from its own file name, never a name the server gives itself; so a helper renamed to point at another server says so. If the name has been changed, the helper refuses to run and asks the person to download it again. (A short-code fallback, typed from the consent page, is not built.)
 
 The token buys only a WebSocket attach as the session's **helper peer**. It grants nothing until the helper's own consent (step 4).
 
@@ -70,7 +70,9 @@ Ending the session takes **Ctrl+Alt+Shift+S**, a combination no remote input can
 ## Build order
 
  1. **Done (2026-10-30).** Server: the `control_input` capability (`RunControlSessions` permission), launch tokens, the helper peer side, audit, migration 0005, and the `awaiting_helper` state. The browser page offers the helper download (`FLYW8T_HELPER_PATH`); no helper binary exists yet.
-2. Helper: pairing, signaling, and WebRTC with a synthetic test pattern (no capture yet). An end-to-end test goes from browser technician to helper.
+2. Helper (`crates/flyw8t-helper`).
+   - a. **Done (2026-11-01).** Pairing: the launch token and server come from the file name; the server introduces the session (technician, organization, capabilities); the helper asks in a native Windows dialog (No is the default button) and answers Allow or Decline; an Allow given after the session ended sends nothing. Tested against a real server.
+   - b. Signaling and WebRTC with a synthetic test pattern (no capture yet), with the security code. An end-to-end test goes from browser technician to helper.
 3. Capture and encoding (Windows.Graphics.Capture and Media Foundation).
 4. Input: the data channel, `SendInput`, the indicator, and the hotkey.
 5. Signing and release packaging; the consent page's download flow.
