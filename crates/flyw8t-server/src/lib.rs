@@ -16,6 +16,7 @@ pub mod client_ip;
 pub mod config;
 pub mod devices;
 pub mod error;
+pub mod fields;
 pub mod gateway;
 pub mod jobs;
 pub mod metrics;
@@ -131,6 +132,13 @@ pub fn router(state: Shared) -> Router {
         .route("/devices/bulk", post(devices::bulk))
         .route("/devices/bulk/run", post(devices::bulk_run))
         .route("/devices/bulk/retire", post(devices::bulk_retire))
+        .route(
+            "/admin/fields",
+            get(fields::admin_page).post(fields::define),
+        )
+        .route("/admin/fields/{id}/archive", post(fields::archive))
+        .route("/fields/{id}/value", post(fields::set_value))
+        .route("/fields/{id}/history", get(fields::history))
         .route("/jobs", get(web::jobs_list))
         .route("/jobs/{id}", get(web::job))
         .route("/jobs/{id}/cancel", post(web::cancel_job))

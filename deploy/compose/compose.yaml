@@ -41,6 +41,7 @@ services:
       FLYW8T_TLS_KEY: ${FLYW8T_TLS_KEY:-}
       # Only the tunnel's fixed address below is believed about the client's real address.
       FLYW8T_TRUSTED_PROXIES: ${FLYW8T_TRUSTED_PROXIES:-}
+      FLYW8T_FIELD_KEY: ${FLYW8T_FIELD_KEY:-}
       FLYW8T_CLIENT_IP_HEADER: ${FLYW8T_CLIENT_IP_HEADER:-cf-connecting-ip}
       FLYW8T_HELPER_PATH: ${FLYW8T_HELPER_PATH:-}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}

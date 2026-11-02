@@ -32,6 +32,10 @@ pub enum Permission {
     ManageDevices,
     /// Retiring a device: permanent.
     RetireDevices,
+    /// Defining custom fields and setting global values.
+    ManageFields,
+    /// Setting organization and device values of custom fields that allow technicians to.
+    EditFieldValues,
 }
 
 impl Role {
@@ -70,6 +74,7 @@ impl Role {
                     | RunSupportSessions
                     | RunControlSessions
                     | ManageDevices
+                    | EditFieldValues
             ),
             Role::ReadOnly => matches!(p, ViewDevices),
         }
@@ -94,6 +99,8 @@ mod tests {
             Permission::RunControlSessions,
             Permission::ManageDevices,
             Permission::RetireDevices,
+            Permission::ManageFields,
+            Permission::EditFieldValues,
         ] {
             assert!(!Role::ReadOnly.allows(p), "{p:?}");
         }
@@ -106,6 +113,7 @@ mod tests {
         assert!(!Role::Technician.allows(Permission::ManageOrganizations));
         assert!(Role::Technician.allows(Permission::ManageDevices));
         assert!(!Role::Technician.allows(Permission::RetireDevices));
+        assert!(!Role::Technician.allows(Permission::ManageFields));
         assert!(!Role::Technician.is_global());
     }
 }

@@ -110,6 +110,8 @@ pub struct DeviceDetail {
     /// Sites of the device's organization, for choosing one.
     #[serde(skip)]
     pub sites: Vec<OrgRef>,
+    /// Custom fields as they resolve for this device (secrets masked).
+    pub fields: Vec<ResolvedField>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -277,6 +279,82 @@ pub struct DeviceFilter {
     pub tag: String,
     /// `""` active devices, `"retired"`, or `"all"`.
     pub status: String,
+}
+
+/// One custom field's definition, for the administration page.
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldDefView {
+    pub id: Uuid,
+    pub key: String,
+    pub label: String,
+    /// `text`, `number`, `boolean`, `choice` or `secret`.
+    pub kind: String,
+    pub choices: Vec<String>,
+    /// Where values may be set: `global`, `organization`, `device`.
+    pub scopes: Vec<String>,
+    /// `organization`: every organization must set one. `device`: every device must resolve to one.
+    pub required_at: Option<String>,
+    pub default_value: Option<String>,
+    pub technician_can_edit: bool,
+    pub archived: bool,
+    /// The current global value, if the field may have one.
+    pub global: Option<FieldValueView>,
+}
+
+/// A value as shown: secrets never are.
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldValueView {
+    /// The value, or `••••••` for a secret.
+    pub display: String,
+    pub secret: bool,
+    pub set_by: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub set_at: OffsetDateTime,
+}
+
+/// A field as it applies to one organization or device: the value it resolves to, and where that came from.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedField {
+    pub id: Uuid,
+    pub key: String,
+    pub label: String,
+    pub kind: String,
+    pub choices: Vec<String>,
+    /// What applies here, from `source`.
+    pub value: Option<FieldValueView>,
+    /// `device`, `organization`, `global`, `default` or `unset`.
+    pub source: &'static str,
+    /// The value set on this very organization or device, if any (it may be overridden or inherited).
+    pub own: Option<FieldValueView>,
+    /// A value may be set at this level by this field's rules.
+    pub settable_here: bool,
+    /// The viewer may set it here.
+    #[serde(skip)]
+    pub can_edit: bool,
+    /// A required value is missing at this level.
+    pub missing: bool,
+}
+
+/// A required field and the organizations or devices that lack it.
+#[derive(Debug, Clone, Serialize)]
+pub struct MissingRequired {
+    pub key: String,
+    pub label: String,
+    /// `organization` or `device`.
+    pub level: &'static str,
+    /// (id, name), at most 50.
+    pub targets: Vec<(Uuid, String)>,
+    pub total: usize,
+}
+
+/// One change of a value, newest first.
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldHistoryRow {
+    /// The value set, `••••••` for a secret, or `None` when it was cleared (the target inherits again).
+    pub display: Option<String>,
+    pub set_by: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub set_at: OffsetDateTime,
 }
 
 /// Jobs created together for several devices, summarized.

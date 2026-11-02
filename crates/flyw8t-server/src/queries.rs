@@ -166,6 +166,7 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
         .fetch_one(&state.db)
         .await?;
     let sites = sites(state, org_id).await?;
+    let fields = crate::fields::resolve(state, p, org_id, Some(id)).await?;
     let inv: Option<(OffsetDateTime, String, Value)> = sqlx::query_as(
         "SELECT received_at, source, data FROM inventory_snapshots WHERE device_id = $1 ORDER BY received_at DESC LIMIT 1",
     )
@@ -213,6 +214,7 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
         notes,
         site_id,
         sites,
+        fields,
     }))
 }
 
