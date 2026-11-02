@@ -305,6 +305,7 @@ pub fn devices_page(
     let count = rows.len();
     // Selecting devices is offered only to someone who can do something with them.
     let pick = ctx.can_manage_devices || ctx.can_run || ctx.can_retire;
+    let shown: Vec<String> = rows.iter().map(|d| d.id.to_string()).collect();
     let table = if rows.is_empty() {
         view! { <p class="empty">"No devices match. Enroll one from an organization's page."</p> }
             .into_any()
@@ -351,11 +352,8 @@ pub fn devices_page(
             view! {
                 <form method="post" action="/devices/bulk" class="bulk">
                     <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
-                    <input type="hidden" name="q" value=filter.q.clone()/>
-                    <input type="hidden" name="org" value=filter.organization.map(|o| o.to_string()).unwrap_or_default()/>
-                    <input type="hidden" name="connection" value=filter.connection.clone()/>
-                    <input type="hidden" name="tag_filter" value=filter.tag.clone()/>
-                    <input type="hidden" name="status" value=filter.status.clone()/>
+                    // "All shown" means exactly these rows, not the filter run again later.
+                    {shown.into_iter().map(|id| view! { <input type="hidden" name="shown" value=id/> }).collect_view()}
                     <div class="bulkbar" role="group" aria-label="Selected devices">
                         <label class="inline"><input type="checkbox" name="all" value="1"/>{all_label}</label>
                         <span class="muted small">"or tick devices below, then:"</span>
@@ -569,7 +567,7 @@ fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
         view! {
             <form method="post" action=format!("/devices/{id}/retire") class="danger">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
-                <label class="inline"><input type="checkbox" name="confirm" value="yes" required=true/>" Retire this device: revoke its credential, close its connection and hide it from the active list. Its history stays with this organization. To manage it again, or under another organization, enroll it again."</label>
+                <label class="inline"><input type="checkbox" name="confirm" value="yes" required=true/>" Retire this device: revoke its credential, close its connection and hide it from the active list. Its history stays with this organization. Jobs not yet delivered expire; a job already running ends with an unknown outcome. To manage it again, or under another organization, enroll it again."</label>
                 <button type="submit" class="bad">"Retire device"</button>
             </form>
         }
@@ -630,7 +628,7 @@ pub fn bulk_confirm_page(ctx: &PageCtx, c: BulkConfirm) -> String {
             .collect_view();
         (
             format!("Retire {count} devices"),
-            "Retiring revokes each device's credential, closes its connection and hides it from the active list. History stays. This cannot be undone: a retired device must be enrolled again.".to_string(),
+            "Retiring revokes each device's credential, closes its connection and hides it from the active list. History stays. Jobs not yet delivered expire; a job already running ends with an unknown outcome. This cannot be undone: a retired device must be enrolled again.".to_string(),
             view! {
                 <form method="post" action="/devices/bulk/retire" class="danger">
                     <input type="hidden" name="csrf" value=ctx.csrf.clone()/>

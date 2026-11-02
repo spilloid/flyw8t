@@ -197,17 +197,36 @@ pub struct NewJob {
 
 /// Authorize, record and queue a job, then dispatch it if the device is connected.
 pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uuid> {
+    let device = req.device_id;
+    let mut tx = state.db.begin().await?;
+    let id = create_in(state, &mut tx, p, req).await?;
+    tx.commit().await?;
+    dispatch_pending(state, device, Pass::NewWork).await?;
+    Ok(id)
+}
+
+/// Authorize, record and queue a job inside the caller's transaction; it is offered to the
+/// device once that commits (the caller dispatches, or the announcement and sweeper do).
+/// The device row is share-locked, so retiring the device cannot interleave: either the job
+/// is queued first, or the retirement is seen and the job refused.
+pub async fn create_in(
+    state: &Shared,
+    tx: &mut PgConnection,
+    p: &Principal,
+    req: NewJob,
+) -> AppResult<Uuid> {
     // Scope first: a device outside the caller's organizations does not exist for them.
     let (all, orgs) = p.scope();
     let device: Option<(Uuid, Option<OffsetDateTime>, bool)> = sqlx::query_as(
         "SELECT d.organization_id, d.retired_at,
                 EXISTS (SELECT 1 FROM device_credentials c WHERE c.device_id = d.id AND c.revoked_at IS NULL)
-           FROM devices d WHERE d.id = $1 AND ($2 OR d.organization_id = ANY($3))",
+           FROM devices d WHERE d.id = $1 AND ($2 OR d.organization_id = ANY($3))
+            FOR SHARE OF d",
     )
     .bind(req.device_id)
     .bind(all)
     .bind(&orgs)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some((org_id, retired_at, has_credential)) = device else {
         return Err(AppError::NotFound);
@@ -249,7 +268,7 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
             sqlx::query_as("SELECT id, device_id, request FROM jobs WHERE requested_by = $1 AND idempotency_key = $2")
                 .bind(p.user_id)
                 .bind(key)
-                .fetch_optional(&state.db)
+                .fetch_optional(&mut *tx)
                 .await?;
         if let Some((id, device, request)) = existing {
             return if device == req.device_id
@@ -265,7 +284,6 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
     }
 
     let actor = format!("user:{}", p.email);
-    let mut tx = state.db.begin().await?;
     let job: JobCore = sqlx::query_as(&format!(
         "INSERT INTO jobs (organization_id, device_id, action, request, timeout_secs, requested_by, request_channel,
                            idempotency_key, state, deliver_by, batch_id)
@@ -289,7 +307,7 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
         _ => e.into(),
     })?;
     event(
-        &mut tx,
+        &mut *tx,
         job.id,
         "created",
         None,
@@ -300,7 +318,7 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
     .await?;
     let mut job = job;
     transition(
-        &mut tx,
+        &mut *tx,
         &job,
         ExecState::Authorized,
         "system",
@@ -311,7 +329,7 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
     .await?;
     job.state = ExecState::Authorized.as_str().into();
     transition(
-        &mut tx,
+        &mut *tx,
         &job,
         ExecState::Queued,
         "system",
@@ -326,10 +344,7 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
         .detail(json!({ "device_id": req.device_id, "action": req.action.name(), "timeout_secs": timeout, "batch_id": req.batch_id }))
         .record(&mut *tx)
         .await?;
-    announce(&mut tx, req.device_id).await?;
-    tx.commit().await?;
-
-    dispatch_pending(state, req.device_id, Pass::NewWork).await?;
+    announce(&mut *tx, req.device_id).await?;
     Ok(job.id)
 }
 

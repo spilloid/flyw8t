@@ -21,7 +21,7 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use flyw8t_domain::Permission;
 use flyw8t_protocol::Action;
-use flyw8t_web::model::{BulkConfirm, DeviceFilter};
+use flyw8t_web::model::BulkConfirm;
 use serde_json::json;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -202,35 +202,26 @@ pub async fn retire(
     .await
 }
 
-/// The devices a bulk form names, each one checked against the caller's scope. Either the
-/// explicit `device` fields, or (`all=1`) every device the submitted filter shows.
+/// The devices a bulk form names, each one checked against the caller's scope: the ticked
+/// `device` fields, or (`all=1`) every `shown` device, exactly the rows the page displayed.
+/// (The filter is never re-run here: a device that started matching it since the page was
+/// shown must not be changed unseen.)
 async fn selected(state: &Shared, p: &Principal, form: &Form) -> AppResult<Vec<Uuid>> {
-    let ids: Vec<Uuid> = if form.get("all") == Some("1") {
-        let filter = DeviceFilter {
-            q: form.get("q").unwrap_or("").chars().take(100).collect(),
-            organization: form.get("org").and_then(|o| o.parse().ok()),
-            connection: form.get("connection").unwrap_or("").into(),
-            tag: form.get("tag_filter").unwrap_or("").into(),
-            status: form.get("status").unwrap_or("").into(),
-        };
-        queries::devices(state, p, &filter)
-            .await?
-            .into_iter()
-            .map(|d| d.id)
-            .collect()
+    let field = if form.get("all") == Some("1") {
+        "shown"
     } else {
-        let mut ids = form
-            .all("device")
-            .into_iter()
-            .map(|d| {
-                d.parse()
-                    .map_err(|_| AppError::BadRequest("Unknown device.".into()))
-            })
-            .collect::<AppResult<Vec<Uuid>>>()?;
-        ids.sort();
-        ids.dedup();
-        ids
+        "device"
     };
+    let mut ids = form
+        .all(field)
+        .into_iter()
+        .map(|d| {
+            d.parse()
+                .map_err(|_| AppError::BadRequest("Unknown device.".into()))
+        })
+        .collect::<AppResult<Vec<Uuid>>>()?;
+    ids.sort();
+    ids.dedup();
     if ids.is_empty() {
         return Err(AppError::BadRequest("Select at least one device.".into()));
     }
@@ -286,6 +277,12 @@ pub async fn bulk(State(state): State<Shared>, WebUser(p): WebUser, body: Bytes)
         if op == "tag-add" || op == "tag-remove" {
             let tag = clean_tag(form.get("tag").unwrap_or(""))?;
             let mut tx = state.db.begin().await?;
+            // Lock the devices (in one order, so two changes cannot deadlock) before counting
+            // their tags: two concurrent additions must not both see room for one more.
+            sqlx::query("SELECT id FROM devices WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+                .bind(&ids)
+                .execute(&mut *tx)
+                .await?;
             let changed = if op == "tag-add" {
                 let over: Option<(Uuid,)> = sqlx::query_as(
                     "SELECT device_id FROM device_tags WHERE device_id = ANY($1) AND tag <> $2
@@ -355,8 +352,12 @@ pub async fn bulk_run(State(state): State<Shared>, WebUser(p): WebUser, body: By
         action
             .validate()
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        // All or nothing: every job of the batch, and its audit, commit together; only then
+        // is anything offered to a device. A failure leaves no partial batch to retry over.
         let batch = Uuid::new_v4();
         let mut skipped = 0usize;
+        let mut queued = Vec::with_capacity(ids.len());
+        let mut tx = state.db.begin().await?;
         for id in &ids {
             let job = NewJob {
                 device_id: *id,
@@ -365,21 +366,30 @@ pub async fn bulk_run(State(state): State<Shared>, WebUser(p): WebUser, body: By
                 idempotency_key: None,
                 batch_id: Some(batch),
             };
-            match jobs::create(&state, &p, job).await {
-                Ok(_) => {}
+            match jobs::create_in(&state, &mut tx, &p, job).await {
+                Ok(_) => queued.push(*id),
+                // Retired or revoked: refused before anything was written.
                 Err(AppError::Conflict(_)) => skipped += 1,
                 Err(e) => return Err(e),
             }
         }
-        if skipped == ids.len() {
+        if queued.is_empty() {
             return Err(AppError::Conflict(
                 "None of the selected devices can run jobs (retired or revoked).".into(),
             ));
         }
         Audit::user(&p, "job.batch")
             .detail(json!({ "batch_id": batch, "action": action.name(), "devices": ids.len(), "skipped": skipped }))
-            .record(&state.db)
+            .record(&mut *tx)
             .await?;
+        tx.commit().await?;
+        // Committed: the batch exists whatever happens next. A device that cannot be offered
+        // its job now gets it from the announcement or the sweeper.
+        for id in queued {
+            if let Err(e) = jobs::dispatch_pending(&state, id, jobs::Pass::NewWork).await {
+                tracing::warn!(device = %id, error = %format!("{e:#}"), "batch dispatch deferred to the sweeper");
+            }
+        }
         to(format!("/jobs?batch={batch}"))
     })
     .await

@@ -178,6 +178,26 @@ async fn device_changes_respect_organization_scope_and_role() {
     let (_, b) = org_with_devices(&server, &admin, "Org B", 1).await;
     let tech = technician(&server, &admin, "tech@example.test", org_a).await;
 
+    // Tags used only in another organization are not offered to them.
+    let r = admin
+        .post(
+            &server,
+            &format!("/devices/{}/edit", b[0]),
+            &[("tags", "secret-b")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert!(!tech
+        .get(&server, "/devices")
+        .await
+        .body
+        .contains("secret-b"));
+    assert!(admin
+        .get(&server, "/devices")
+        .await
+        .body
+        .contains("secret-b"));
+
     // Their own organization's device: allowed.
     let r = tech
         .post(
@@ -211,7 +231,7 @@ async fn device_changes_respect_organization_scope_and_role() {
         )
         .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
-    assert!(tags_of(&server, b[0]).await.is_empty());
+    assert_eq!(tags_of(&server, b[0]).await, ["secret-b"]);
     assert_eq!(
         tags_of(&server, a[0]).await,
         ["mine"],
@@ -255,7 +275,15 @@ async fn many_devices_are_tagged_and_run_as_one_confirmed_batch() {
         assert_eq!(tags_of(&server, *d).await, ["pilot"]);
     }
 
-    // "All shown" takes the filter, not a list of ticks.
+    // "All shown" means the rows the page displayed, not the filter run again: a device
+    // that was not shown is untouched even though it matches.
+    let page = admin.get(&server, "/devices?tag=pilot").await.body;
+    for i in &ids {
+        assert!(
+            page.contains(&format!(r#"name="shown" value="{i}""#)),
+            "{i} shown"
+        );
+    }
     let r = admin
         .post(
             &server,
@@ -264,11 +292,19 @@ async fn many_devices_are_tagged_and_run_as_one_confirmed_batch() {
                 ("op", "tag-add"),
                 ("tag", "ring-1"),
                 ("all", "1"),
+                ("shown", &ids[0]),
+                ("shown", &ids[2]),
                 ("tag_filter", "pilot"),
             ],
         )
         .await;
     assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(tags_of(&server, devices[0]).await, ["pilot", "ring-1"]);
+    assert_eq!(
+        tags_of(&server, devices[1]).await,
+        ["pilot"],
+        "not shown, not changed"
+    );
     assert_eq!(tags_of(&server, devices[2]).await, ["pilot", "ring-1"]);
 
     // Running asks first, naming every device.
@@ -401,5 +437,165 @@ async fn retired_devices_leave_the_active_list_and_never_move() {
         "{}",
         r.status
     );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn a_batch_is_all_or_nothing_and_its_totals_are_scoped() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let (org_a, a) = org_with_devices(&server, &admin, "Org A", 2).await;
+    let (_, b) = org_with_devices(&server, &admin, "Org B", 1).await;
+    let mut ids: Vec<String> = a.iter().chain(&b).map(Uuid::to_string).collect();
+    ids.sort();
+    let run = |ids: &[String], count: &str| {
+        let mut f: Vec<(String, String)> =
+            ids.iter().map(|i| ("device".into(), i.clone())).collect();
+        f.extend([
+            ("action".into(), "system.info".into()),
+            ("confirm".into(), "yes".into()),
+            ("count".into(), count.into()),
+        ]);
+        f
+    };
+    let post = |f: Vec<(String, String)>| {
+        let (admin, server) = (&admin, &server);
+        async move {
+            let f: Vec<(&str, &str)> = f.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            admin.post(server, "/devices/bulk/run", &f).await
+        }
+    };
+
+    // The database refuses the last device's job: nothing of the batch survives.
+    sqlx::query(&format!(
+        "CREATE FUNCTION refuse_job() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF NEW.device_id = '{}' THEN RAISE EXCEPTION 'injected'; END IF; RETURN NEW; END $$",
+        ids[2]
+    ))
+    .execute(&server.state.db)
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER refuse_job BEFORE INSERT ON jobs FOR EACH ROW EXECUTE FUNCTION refuse_job()")
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let r = post(run(&ids, "3")).await;
+    assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (jobs,): (i64,) = sqlx::query_as("SELECT count(*) FROM jobs")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0, "no partial batch");
+    sqlx::query("DROP TRIGGER refuse_job ON jobs")
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+
+    // Across two organizations, someone who sees one sees only its part of the batch.
+    let r = post(run(&ids, "3")).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let batch = extract(&r.location(), r"batch=([0-9a-f-]{36})").unwrap();
+    assert_eq!(batch_jobs(&server, &batch).await, 3);
+    let tech = technician(&server, &admin, "tech@example.test", org_a).await;
+    let page = tech.get(&server, &r.location()).await.body;
+    assert!(
+        page.contains(r#"<span class="num">2</span> jobs"#),
+        "{page}"
+    );
+    assert!(page.contains(&a[0].to_string()) && page.contains(&a[1].to_string()));
+    assert!(
+        !page.contains(&b[0].to_string()),
+        "another organization's job leaked"
+    );
+
+    // A retirement confirmed with the wrong count retires nothing.
+    let b0 = b[0].to_string();
+    let r = admin
+        .post(
+            &server,
+            "/devices/bulk/retire",
+            &[("device", &b0), ("count", "2"), ("confirm", "yes")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (retired,): (bool,) =
+        sqlx::query_as("SELECT retired_at IS NOT NULL FROM devices WHERE id = $1")
+            .bind(b[0])
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert!(!retired);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn retiring_disconnects_and_cannot_interleave_with_a_new_job() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Contoso").await;
+    let token = admin.enrollment_token(&server, org, "60", "2").await;
+    let live = TestAgent::enroll(&server.url(), &token).await.unwrap();
+    let racing = TestAgent::enroll(&server.url(), &token).await.unwrap();
+
+    // A connected device is disconnected by retiring it.
+    let (_stop, session) = live.connect(&server.url());
+    for _ in 0..100 {
+        if server
+            .state
+            .registry
+            .connected_since(live.device_id)
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        server
+            .state
+            .registry
+            .connected_since(live.device_id)
+            .is_some(),
+        "connected"
+    );
+    let r = admin
+        .post(
+            &server,
+            &format!("/devices/{}/retire", live.device_id),
+            &[("confirm", "yes")],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), session).await;
+    assert!(ended.is_ok(), "the retired device's session was closed");
+    assert!(server
+        .state
+        .registry
+        .connected_since(live.device_id)
+        .is_none());
+
+    // A job requested while a retirement holds the device waits for it, then is refused.
+    let mut tx = server.state.db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM devices WHERE id = $1 FOR UPDATE")
+        .bind(racing.device_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let path = format!("/devices/{}/jobs", racing.device_id);
+    let (r, _) = tokio::join!(
+        admin.post(&server, &path, &[("action", "system.info")]),
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            sqlx::query("UPDATE devices SET retired_at = now() WHERE id = $1")
+                .bind(racing.device_id)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    );
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
     server.stop().await;
 }
