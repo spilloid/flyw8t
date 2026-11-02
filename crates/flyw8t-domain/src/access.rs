@@ -28,6 +28,10 @@ pub enum Permission {
     /// Attended sessions that include remote keyboard and mouse (ADR-0012). Separate from
     /// viewing so it can be withheld on its own.
     RunControlSessions,
+    /// Name, notes, tags and site of devices in the user's organizations.
+    ManageDevices,
+    /// Retiring a device: permanent.
+    RetireDevices,
 }
 
 impl Role {
@@ -65,6 +69,7 @@ impl Role {
                     | ManageEnrollment
                     | RunSupportSessions
                     | RunControlSessions
+                    | ManageDevices
             ),
             Role::ReadOnly => matches!(p, ViewDevices),
         }
@@ -87,6 +92,8 @@ mod tests {
             Permission::ViewAudit,
             Permission::RunSupportSessions,
             Permission::RunControlSessions,
+            Permission::ManageDevices,
+            Permission::RetireDevices,
         ] {
             assert!(!Role::ReadOnly.allows(p), "{p:?}");
         }
@@ -97,6 +104,8 @@ mod tests {
         assert!(Role::Technician.allows(Permission::RunDiagnostics));
         assert!(!Role::Technician.allows(Permission::ManageUsers));
         assert!(!Role::Technician.allows(Permission::ManageOrganizations));
+        assert!(Role::Technician.allows(Permission::ManageDevices));
+        assert!(!Role::Technician.allows(Permission::RetireDevices));
         assert!(!Role::Technician.is_global());
     }
 }

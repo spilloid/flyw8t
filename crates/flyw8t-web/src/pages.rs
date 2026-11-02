@@ -249,11 +249,21 @@ pub fn overview_page(ctx: &PageCtx, o: Overview) -> String {
     shell("Overview", ctx, Nav::Overview, Some(30), body)
 }
 
+fn tag_chips(tags: &[String]) -> impl IntoView {
+    tags.iter()
+        .map(|t| {
+            let href = format!("/devices?tag={t}");
+            view! { " " <a class="tag" href=href>{t.clone()}</a> }
+        })
+        .collect_view()
+}
+
 pub fn devices_page(
     ctx: &PageCtx,
     rows: Vec<DeviceRow>,
     filter: DeviceFilter,
     orgs: Vec<OrgRef>,
+    tags: Vec<String>,
 ) -> String {
     let now = ctx.now;
     let org_options = orgs
@@ -274,7 +284,27 @@ pub fn devices_page(
         view! { <option value=v selected=selected>{l}</option> }
     })
     .collect_view();
+    let tag_options = tags
+        .into_iter()
+        .map(|t| {
+            let selected = filter.tag == t;
+            view! { <option value=t.clone() selected=selected>{t.clone()}</option> }
+        })
+        .collect_view();
+    let status_options = [
+        ("", "Active"),
+        ("retired", "Retired"),
+        ("all", "Active and retired"),
+    ]
+    .into_iter()
+    .map(|(v, l)| {
+        let selected = filter.status == v;
+        view! { <option value=v selected=selected>{l}</option> }
+    })
+    .collect_view();
     let count = rows.len();
+    // Selecting devices is offered only to someone who can do something with them.
+    let pick = ctx.can_manage_devices || ctx.can_run || ctx.can_retire;
     let table = if rows.is_empty() {
         view! { <p class="empty">"No devices match. Enroll one from an organization's page."</p> }
             .into_any()
@@ -284,9 +314,15 @@ pub fn devices_page(
             .map(|d| {
                 let href = format!("/devices/{}", d.id);
                 let retired = d.retired.then(|| view! { " " <span class="badge neutral">"retired"</span> });
+                let host = d.display_name.is_some().then(|| view! { <div class="muted small mono">{d.hostname.clone()}</div> });
+                let label = format!("Select {}", d.name());
+                let check = pick.then(|| view! {
+                    <td class="pick"><input type="checkbox" name="device" value=d.id.to_string() aria-label=label/></td>
+                });
                 view! {
                     <tr>
-                        <td data-label="Device"><a href=href><strong>{d.hostname.clone()}</strong></a>{retired}</td>
+                        {check}
+                        <td data-label="Device"><a href=href><strong>{d.name().to_string()}</strong></a>{retired}{host}{tag_chips(&d.tags)}</td>
                         <td data-label="Organization">{d.organization.name.clone()}{d.site.clone().map(|s| format!(" / {s}"))}</td>
                         <td data-label="Connection">{connection_badge(&d.connection, now)}</td>
                         <td data-label="OS">{d.os.clone().unwrap_or_else(|| "—".into())}</td>
@@ -295,20 +331,54 @@ pub fn devices_page(
                 }
             })
             .collect_view();
-        view! {
+        let pick_head = pick
+            .then(|| view! { <th scope="col" class="pick"><span class="sr">"Select"</span></th> });
+        let table = view! {
             <table class="list">
-                <thead><tr><th scope="col">"Device"</th><th scope="col">"Organization"</th><th scope="col">"Connection"</th><th scope="col">"OS"</th><th scope="col">"Agent"</th></tr></thead>
+                <thead><tr>{pick_head}<th scope="col">"Device"</th><th scope="col">"Organization"</th><th scope="col">"Connection"</th><th scope="col">"OS"</th><th scope="col">"Agent"</th></tr></thead>
                 <tbody>{body}</tbody>
             </table>
+        };
+        if pick {
+            let tag_ops = ctx.can_manage_devices.then(|| view! {
+                <label>"Tag"<input type="text" name="tag" maxlength="40" placeholder="kiosk" pattern="[A-Za-z0-9][A-Za-z0-9._:\\-]*"/></label>
+                <button type="submit" name="op" value="tag-add">"Add tag"</button>
+                <button type="submit" name="op" value="tag-remove" class="link">"Remove tag"</button>
+            });
+            let run = ctx.can_run.then(|| view! { <button type="submit" name="op" value="run">"Run a diagnostic…"</button> });
+            let retire = ctx.can_retire.then(|| view! { <button type="submit" name="op" value="retire" class="bad">"Retire…"</button> });
+            let all_label = format!("All {count} shown");
+            view! {
+                <form method="post" action="/devices/bulk" class="bulk">
+                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                    <input type="hidden" name="q" value=filter.q.clone()/>
+                    <input type="hidden" name="org" value=filter.organization.map(|o| o.to_string()).unwrap_or_default()/>
+                    <input type="hidden" name="connection" value=filter.connection.clone()/>
+                    <input type="hidden" name="tag_filter" value=filter.tag.clone()/>
+                    <input type="hidden" name="status" value=filter.status.clone()/>
+                    <div class="bulkbar" role="group" aria-label="Selected devices">
+                        <label class="inline"><input type="checkbox" name="all" value="1"/>{all_label}</label>
+                        <span class="muted small">"or tick devices below, then:"</span>
+                        {tag_ops}
+                        {run}
+                        {retire}
+                    </div>
+                    {table}
+                </form>
+            }
+            .into_any()
+        } else {
+            table.into_any()
         }
-        .into_any()
     };
     let body = view! {
         <h1>"Devices"</h1>
         <form method="get" action="/devices" class="filters" role="search">
-            <input type="search" name="q" value=filter.q.clone() placeholder="Search hostname" aria-label="Search hostname" accesskey="s" autofocus=true/>
+            <input type="search" name="q" value=filter.q.clone() placeholder="Search name, hostname or tag" aria-label="Search name, hostname or tag" accesskey="s" autofocus=true/>
             <select name="org" aria-label="Organization"><option value="">"All organizations"</option>{org_options}</select>
+            <select name="tag" aria-label="Tag"><option value="">"Any tag"</option>{tag_options}</select>
             <select name="connection" aria-label="Connection">{conn_options}</select>
+            <select name="status" aria-label="Status">{status_options}</select>
             <button type="submit">"Filter"</button>
         </form>
         <p class="muted">{format!("{count} device(s). Connection state is live; everything else is the last report the device sent.")}</p>
@@ -404,6 +474,46 @@ fn inventory_section(inv: Option<InventoryView>, now: OffsetDateTime) -> impl In
     .into_any()
 }
 
+/// One form per catalog action, posting to `url` with `hidden` fields added.
+fn action_forms(
+    ctx: &PageCtx,
+    url: String,
+    hidden: Vec<(&'static str, String)>,
+    button: &'static str,
+) -> impl IntoView {
+    CATALOG
+        .iter()
+        .map(|a| {
+            let params = a
+                .params
+                .iter()
+                .map(|p| match *p {
+                    "target" => view! { <label>"Host or IP"<input type="text" name="target" required=true maxlength="253" placeholder="8.8.8.8" pattern="[A-Za-z0-9.:\\-]+"/></label> }.into_any(),
+                    "limit" => view! { <label>"How many"<input type="number" name="limit" value="15" min="1" max="50"/></label> }.into_any(),
+                    _ => ().into_any(),
+                })
+                .collect_view();
+            let hidden = hidden
+                .iter()
+                .map(|(k, v)| view! { <input type="hidden" name=*k value=v.clone()/> })
+                .collect_view();
+            view! {
+                <form method="post" action=url.clone() class="action">
+                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                    <input type="hidden" name="action" value=a.name/>
+                    {hidden}
+                    <div>
+                        <strong>{a.title}</strong>" "<span class="mono muted">{a.name}</span>
+                        <p class="muted">{a.description}</p>
+                    </div>
+                    {params}
+                    <button type="submit">{button}</button>
+                </form>
+            }
+        })
+        .collect_view()
+}
+
 fn run_forms(
     ctx: &PageCtx,
     device_id: uuid::Uuid,
@@ -417,43 +527,134 @@ fn run_forms(
         return view! { <p class="muted">"This device is retired; it cannot run jobs."</p> }
             .into_any();
     }
-    let action_url = format!("/devices/{device_id}/jobs");
     let note = if connected {
         "The device is connected; jobs are sent immediately."
     } else {
         "The device is not connected. Jobs queue until it connects or their 15-minute delivery window passes."
     };
-    let forms = CATALOG
+    view! {
+        <p class="muted">{note}" Read-only diagnostics only."</p>
+        <div class="actions">{action_forms(ctx, format!("/devices/{device_id}/jobs"), vec![], "Run")}</div>
+    }
+    .into_any()
+}
+
+/// Name, tags, site and notes; and, for those allowed, moving and retiring.
+fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
+    if !ctx.can_manage_devices && !ctx.can_retire {
+        return ().into_any();
+    }
+    let id = d.row.id;
+    let edit = ctx.can_manage_devices.then(|| {
+        let site_options = d
+            .sites
+            .iter()
+            .map(|s| {
+                let selected = d.site_id == Some(s.id);
+                view! { <option value=s.id.to_string() selected=selected>{s.name.clone()}</option> }
+            })
+            .collect_view();
+        view! {
+            <form method="post" action=format!("/devices/{id}/edit") class="stack">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>"Name (blank shows the hostname)"<input type="text" name="display_name" maxlength="200" value=d.row.display_name.clone().unwrap_or_default() placeholder=d.row.hostname.clone()/></label>
+                <label>"Tags, separated by commas"<input type="text" name="tags" maxlength="900" value=d.row.tags.join(", ") placeholder="finance, kiosk"/></label>
+                <label>"Site"<select name="site"><option value="">"No site"</option>{site_options}</select></label>
+                <label>"Notes"<textarea name="notes" rows="4" maxlength="4000">{d.notes.clone()}</textarea></label>
+                <button type="submit">"Save"</button>
+            </form>
+        }
+    });
+    let retire = (ctx.can_retire && !d.row.retired).then(|| {
+        view! {
+            <form method="post" action=format!("/devices/{id}/retire") class="danger">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label class="inline"><input type="checkbox" name="confirm" value="yes" required=true/>" Retire this device: revoke its credential, close its connection and hide it from the active list. Its history stays with this organization. To manage it again, or under another organization, enroll it again."</label>
+                <button type="submit" class="bad">"Retire device"</button>
+            </form>
+        }
+    });
+    view! {
+        <section class="card">
+            <h2>"Manage"</h2>
+            {edit}
+            {retire}
+        </section>
+    }
+    .into_any()
+}
+
+pub fn bulk_confirm_page(ctx: &PageCtx, c: BulkConfirm) -> String {
+    let now = ctx.now;
+    let count = c.devices.len();
+    let mut hidden: Vec<(&'static str, String)> = c
+        .devices
         .iter()
-        .map(|a| {
-            let params = a
-                .params
-                .iter()
-                .map(|p| match *p {
-                    "target" => view! { <label>"Host or IP"<input type="text" name="target" required=true maxlength="253" placeholder="8.8.8.8" pattern="[A-Za-z0-9.:\\-]+"/></label> }.into_any(),
-                    "limit" => view! { <label>"How many"<input type="number" name="limit" value="15" min="1" max="50"/></label> }.into_any(),
-                    _ => ().into_any(),
-                })
-                .collect_view();
+        .map(|d| ("device", d.id.to_string()))
+        .collect();
+    hidden.push(("count", count.to_string()));
+    hidden.push(("confirm", "yes".into()));
+    let rows = c
+        .devices
+        .iter()
+        .map(|d| {
+            let href = format!("/devices/{}", d.id);
+            let retired = d
+                .retired
+                .then(|| view! { " " <span class="badge neutral">"retired"</span> });
             view! {
-                <form method="post" action=action_url.clone() class="action">
-                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
-                    <input type="hidden" name="action" value=a.name/>
-                    <div>
-                        <strong>{a.title}</strong>" "<span class="mono muted">{a.name}</span>
-                        <p class="muted">{a.description}</p>
-                    </div>
-                    {params}
-                    <button type="submit">"Run"</button>
-                </form>
+                <tr>
+                    <td data-label="Device"><a href=href>{d.name().to_string()}</a>{retired}</td>
+                    <td data-label="Organization">{d.organization.name.clone()}</td>
+                    <td data-label="Connection">{connection_badge(&d.connection, now)}</td>
+                </tr>
             }
         })
         .collect_view();
-    view! {
-        <p class="muted">{note}" Read-only diagnostics only."</p>
-        <div class="actions">{forms}</div>
-    }
-    .into_any()
+    let (title, lead, action) = if c.op == "run" {
+        let skipped = c.devices.iter().filter(|d| d.retired).count();
+        let lead = if skipped > 0 {
+            format!("Choose a diagnostic to run on these {count} devices. {skipped} retired device(s) will be skipped.")
+        } else {
+            format!("Choose a diagnostic to run on these {count} devices. Each gets its own job; the results are grouped as one batch.")
+        };
+        (
+            format!("Run on {count} devices"),
+            lead,
+            view! { <div class="actions">{action_forms(ctx, "/devices/bulk/run".into(), hidden, "Run on all")}</div> }.into_any(),
+        )
+    } else {
+        let fields = hidden
+            .iter()
+            .map(|(k, v)| view! { <input type="hidden" name=*k value=v.clone()/> })
+            .collect_view();
+        (
+            format!("Retire {count} devices"),
+            "Retiring revokes each device's credential, closes its connection and hides it from the active list. History stays. This cannot be undone: a retired device must be enrolled again.".to_string(),
+            view! {
+                <form method="post" action="/devices/bulk/retire" class="danger">
+                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                    {fields}
+                    <button type="submit" class="bad">{format!("Retire all {count}")}</button>
+                </form>
+            }
+            .into_any(),
+        )
+    };
+    let body = view! {
+        <p class="crumbs"><a href="/devices">"Devices"</a>" / "</p>
+        <h1>{title.clone()}</h1>
+        <p class="lead">{lead}</p>
+        {action}
+        <section>
+            <h2>"Devices"</h2>
+            <table class="list">
+                <thead><tr><th scope="col">"Device"</th><th scope="col">"Organization"</th><th scope="col">"Connection"</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </section>
+    };
+    shell(&title, ctx, Nav::Devices, None, body)
 }
 
 pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
@@ -485,7 +686,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         ),
         None => "No credential on record.".into(),
     };
-    let revoke = (ctx.is_admin && d.credential.as_ref().is_some_and(|c| c.revoked_at.is_none())).then(|| {
+    let revoke = (ctx.can_retire && !d.row.retired && d.credential.as_ref().is_some_and(|c| c.revoked_at.is_none())).then(|| {
         let url = format!("/devices/{}/revoke", d.row.id);
         view! {
             <form method="post" action=url class="danger">
@@ -495,7 +696,12 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
             </form>
         }
     });
-    let title = d.row.hostname.clone();
+    let title = d.row.name().to_string();
+    let manage = manage_section(ctx, &d);
+    let tags = tag_chips(&d.row.tags);
+    let notes = (!d.notes.is_empty())
+        .then(|| view! { <dt>"Notes"</dt><dd class="notes">{d.notes.clone()}</dd> });
+    let retired_note = d.row.retired.then(|| view! { <p class="flash bad">"This device is retired. Its credential is revoked; it cannot connect or run jobs."</p> });
     let org_line = format!(
         "{}{}",
         d.row.organization.name,
@@ -507,11 +713,14 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     );
     let body = view! {
         <p class="crumbs"><a href="/devices">"Devices"</a>" / "</p>
-        <h1>{d.row.hostname.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
+        <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
+        {retired_note}
+        <p>{tags}</p>
         <div class="grid">
             <section class="card">
                 <h2>"Identity"</h2>
                 <dl class="facts">
+                    <dt>"Hostname"</dt><dd class="mono">{d.row.hostname.clone()}</dd>
                     <dt>"Organization"</dt><dd>{org_line}</dd>
                     <dt>"Connection"</dt><dd>{conn_detail}</dd>
                     <dt>"Enrolled"</dt><dd>{fmt::timestamp(d.enrolled_at)}</dd>
@@ -519,11 +728,13 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
                     <dt>"Credential"</dt><dd>{credential}</dd>
                     <dt>"Remote access"</dt><dd>{d.remote_access.clone()}</dd>
                     <dt>"Device ID"</dt><dd class="mono">{d.row.id.to_string()}</dd>
+                    {notes}
                 </dl>
                 {revoke}
             </section>
             {inventory_section(d.inventory.clone(), now)}
         </div>
+        {manage}
         <section class="card">
             <h2>"Run a diagnostic"</h2>
             {run_forms(ctx, d.row.id, connected, d.row.retired)}
@@ -536,7 +747,12 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     shell(&title, ctx, Nav::Devices, None, body)
 }
 
-pub fn jobs_page(ctx: &PageCtx, rows: Vec<JobRow>, state: Option<ExecState>) -> String {
+pub fn jobs_page(
+    ctx: &PageCtx,
+    rows: Vec<JobRow>,
+    state: Option<ExecState>,
+    batch: Option<BatchSummary>,
+) -> String {
     let now = ctx.now;
     let options = ALL_STATES
         .into_iter()
@@ -545,15 +761,37 @@ pub fn jobs_page(ctx: &PageCtx, rows: Vec<JobRow>, state: Option<ExecState>) -> 
             view! { <option value=s.as_str() selected=selected>{s.as_str().replace('_', " ")}</option> }
         })
         .collect_view();
+    let refresh = batch.as_ref().filter(|b| b.in_progress > 0).map(|_| 5);
+    let title = match &batch {
+        Some(b) => format!("Batch {}", fmt::short_id(b.id)),
+        None => "Jobs".into(),
+    };
+    let summary = batch.as_ref().map(|b| {
+        view! {
+            <p class="crumbs"><a href="/jobs">"Jobs"</a>" / "</p>
+            <div class="tiles">
+                <div class="tile"><span class="num">{b.total}</span>" jobs"</div>
+                <div class="tile"><span class="num">{b.succeeded}</span>" succeeded"</div>
+                <div class="tile bad"><span class="num">{b.failed}</span>" failed"</div>
+                <div class="tile unknown"><span class="num">{b.unknown}</span>" outcome unknown"</div>
+                <div class="tile"><span class="num">{b.in_progress}</span>" in progress"</div>
+            </div>
+        }
+    });
+    let batch_field = batch
+        .as_ref()
+        .map(|b| view! { <input type="hidden" name="batch" value=b.id.to_string()/> });
     let body = view! {
-        <h1>"Jobs"</h1>
+        <h1>{title.clone()}</h1>
+        {summary}
         <form method="get" action="/jobs" class="filters">
+            {batch_field}
             <select name="state" aria-label="Execution state"><option value="">"Any state"</option>{options}</select>
             <button type="submit">"Filter"</button>
         </form>
         {job_table(rows, now, true)}
     };
-    shell("Jobs", ctx, Nav::Jobs, None, body)
+    shell(&title, ctx, Nav::Jobs, refresh, body)
 }
 
 fn stream_block(label: &'static str, s: Option<StreamView>) -> impl IntoView {
@@ -1487,6 +1725,8 @@ mod tests {
             can_enroll: true,
             can_support: true,
             can_control: true,
+            can_manage_devices: true,
+            can_retire: true,
             flash: None,
         }
     }
@@ -1516,6 +1756,7 @@ mod tests {
             &ctx(),
             vec![job(ExecState::Queued, Verification::Pending)],
             None,
+            None,
         );
         assert!(
             !html.contains("<img src=x>"),
@@ -1532,12 +1773,14 @@ mod tests {
             &ctx(),
             vec![job(ExecState::Completed, Verification::Failed)],
             None,
+            None,
         );
         assert!(html.contains("Verification failed"));
         assert!(!html.contains(">Succeeded<"));
         let html = jobs_page(
             &ctx(),
             vec![job(ExecState::Dispatched, Verification::Pending)],
+            None,
             None,
         );
         assert!(html.contains(">Sent<"));
@@ -1547,7 +1790,7 @@ mod tests {
     fn readonly_users_get_no_admin_navigation() {
         let mut c = ctx();
         c.is_admin = false;
-        let html = jobs_page(&c, vec![], None);
+        let html = jobs_page(&c, vec![], None, None);
         assert!(!html.contains("href=\"/admin\""));
         assert!(!html.contains("href=\"/audit\""));
     }

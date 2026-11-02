@@ -69,6 +69,8 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
         can_enroll: p.can(Permission::ManageEnrollment),
         can_support: p.can(Permission::RunSupportSessions),
         can_control: p.can(Permission::RunControlSessions),
+        can_manage_devices: p.can(Permission::ManageDevices),
+        can_retire: p.can(Permission::RetireDevices),
         flash,
     }
 }
@@ -82,6 +84,11 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "token-revoked" => (true, "Token revoked."),
         "user-created" => (true, "User created."),
         "device-revoked" => (true, "Device credential revoked and its connection closed."),
+        "device-updated" => (true, "Device updated."),
+        "device-retired" => (true, "Device retired: its credential is revoked and its connection closed."),
+        "devices-tagged" => (true, "Tag added to the selected devices."),
+        "devices-untagged" => (true, "Tag removed from the selected devices."),
+        "devices-retired" => (true, "Selected devices retired."),
         "mfa-reset" => (true, "Two-step verification reset. That user was signed out everywhere and sets it up again at next sign-in."),
         "mfa-disabled" => (true, "Two-step verification turned off."),
         "codes-regenerated" => (true, "New recovery codes issued; the old ones no longer work."),
@@ -284,6 +291,9 @@ pub struct DeviceQs {
     q: Option<String>,
     org: Option<String>,
     connection: Option<String>,
+    tag: Option<String>,
+    status: Option<String>,
+    m: Option<String>,
 }
 
 pub async fn devices(
@@ -297,10 +307,19 @@ pub async fn devices(
             q: qs.q.unwrap_or_default().chars().take(100).collect(),
             organization: qs.org.and_then(|o| o.parse().ok()),
             connection: qs.connection.unwrap_or_default(),
+            tag: qs.tag.unwrap_or_default().chars().take(40).collect(),
+            status: qs.status.unwrap_or_default(),
         };
         let rows = queries::devices(&state, &p, &filter).await?;
         let orgs = queries::org_refs(&state, &p).await?;
-        html(flyw8t_web::devices_page(&ctx(&p, None), rows, filter, orgs))
+        let tags = queries::tags(&state, &p).await?;
+        html(flyw8t_web::devices_page(
+            &ctx(&p, flash(qs.m.as_deref())),
+            rows,
+            filter,
+            orgs,
+            tags,
+        ))
     })
     .await
 }
@@ -341,6 +360,7 @@ pub async fn run_job(
                 action,
                 timeout_secs: None,
                 idempotency_key: None,
+                batch_id: None,
             },
         )
         .await?;
@@ -358,7 +378,7 @@ pub async fn revoke_device(
     page(&p, async {
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
-        p.require(Permission::ManageUsers)?;
+        p.require(Permission::RetireDevices)?;
         if form.get("confirm") != Some("yes") {
             return Err(AppError::BadRequest("Confirm the revocation first.".into()));
         }
@@ -382,6 +402,7 @@ pub async fn revoke_device(
 #[derive(Deserialize, Default)]
 pub struct JobsQs {
     state: Option<String>,
+    batch: Option<Uuid>,
 }
 
 pub async fn jobs_list(
@@ -396,12 +417,21 @@ pub async fn jobs_list(
             &p,
             &JobQuery {
                 state: st,
-                limit: 200,
+                batch: qs.batch,
+                limit: 500,
                 ..Default::default()
             },
         )
         .await?;
-        html(flyw8t_web::jobs_page(&ctx(&p, None), rows, st))
+        let batch = match qs.batch {
+            Some(b) => Some(
+                queries::batch(&state, &p, b)
+                    .await?
+                    .ok_or(AppError::NotFound)?,
+            ),
+            None => None,
+        };
+        html(flyw8t_web::jobs_page(&ctx(&p, None), rows, st, batch))
     })
     .await
 }

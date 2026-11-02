@@ -191,6 +191,8 @@ pub struct NewJob {
     pub action: Action,
     pub timeout_secs: Option<u32>,
     pub idempotency_key: Option<String>,
+    /// Jobs created together for several devices share a batch.
+    pub batch_id: Option<Uuid>,
 }
 
 /// Authorize, record and queue a job, then dispatch it if the device is connected.
@@ -266,8 +268,8 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
     let mut tx = state.db.begin().await?;
     let job: JobCore = sqlx::query_as(&format!(
         "INSERT INTO jobs (organization_id, device_id, action, request, timeout_secs, requested_by, request_channel,
-                           idempotency_key, state, deliver_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created', now() + make_interval(secs => $9))
+                           idempotency_key, state, deliver_by, batch_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'created', now() + make_interval(secs => $9), $10)
          RETURNING {CORE}"
     ))
     .bind(org_id)
@@ -279,6 +281,7 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
     .bind(p.channel.as_str())
     .bind(&req.idempotency_key)
     .bind(state.config.delivery_window.as_secs_f64())
+    .bind(req.batch_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match &e {
@@ -320,7 +323,7 @@ pub async fn create(state: &Shared, p: &Principal, req: NewJob) -> AppResult<Uui
     Audit::user(p, "job.create")
         .org(org_id)
         .target("job", job.id)
-        .detail(json!({ "device_id": req.device_id, "action": req.action.name(), "timeout_secs": timeout }))
+        .detail(json!({ "device_id": req.device_id, "action": req.action.name(), "timeout_secs": timeout, "batch_id": req.batch_id }))
         .record(&mut *tx)
         .await?;
     announce(&mut tx, req.device_id).await?;
