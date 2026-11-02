@@ -1083,6 +1083,7 @@ pub fn fields_page(
     missing: Vec<MissingRequired>,
     secrets_enabled: bool,
 ) -> String {
+    let none = defs.is_empty();
     let rows = defs
         .iter()
         .map(|d| {
@@ -1167,7 +1168,8 @@ pub fn fields_page(
         <p class="lead">"Values scripts will read: set globally, per organization or per device. The most specific value wins. Every change is kept."</p>
         {no_key}
         {missing_view}
-        <section>
+        {none.then(|| view! { <p class="empty">"No fields yet. Define one below."</p> })}
+        <section hidden=none>
             <table class="list">
                 <thead><tr><th scope="col">"Field"</th><th scope="col">"Kind"</th><th scope="col">"Global value"</th><th scope="col"><span class="sr">"Archive"</span></th></tr></thead>
                 <tbody>{rows}</tbody>
