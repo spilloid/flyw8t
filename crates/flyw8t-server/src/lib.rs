@@ -14,6 +14,7 @@ pub mod audit;
 pub mod auth;
 pub mod client_ip;
 pub mod config;
+pub mod devices;
 pub mod error;
 pub mod gateway;
 pub mod jobs;
@@ -125,6 +126,11 @@ pub fn router(state: Shared) -> Router {
         .route("/devices/{id}", get(web::device))
         .route("/devices/{id}/jobs", post(web::run_job))
         .route("/devices/{id}/revoke", post(web::revoke_device))
+        .route("/devices/{id}/edit", post(devices::edit))
+        .route("/devices/{id}/retire", post(devices::retire))
+        .route("/devices/bulk", post(devices::bulk))
+        .route("/devices/bulk/run", post(devices::bulk_run))
+        .route("/devices/bulk/retire", post(devices::bulk_retire))
         .route("/jobs", get(web::jobs_list))
         .route("/jobs/{id}", get(web::job))
         .route("/jobs/{id}/cancel", post(web::cancel_job))

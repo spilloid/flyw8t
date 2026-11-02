@@ -20,6 +20,10 @@ pub struct PageCtx {
     pub can_support: bool,
     /// May start sessions that include remote control (ADR-0012).
     pub can_control: bool,
+    /// May rename, tag, annotate and re-site devices.
+    pub can_manage_devices: bool,
+    /// May retire devices.
+    pub can_retire: bool,
     pub flash: Option<Flash>,
 }
 
@@ -53,13 +57,24 @@ pub enum Connection {
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceRow {
     pub id: Uuid,
+    /// What the device reports. Never used for authorization.
     pub hostname: String,
+    /// What people call it, if someone named it.
+    pub display_name: Option<String>,
+    pub tags: Vec<String>,
     pub organization: OrgRef,
     pub site: Option<String>,
     pub os: Option<String>,
     pub agent_version: Option<String>,
     pub connection: Connection,
     pub retired: bool,
+}
+
+impl DeviceRow {
+    /// The name to show: the chosen one, else the hostname.
+    pub fn name(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.hostname)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +105,11 @@ pub struct DeviceDetail {
     pub recent_jobs: Vec<JobRow>,
     /// Remote-access provider status for this device (see docs/decisions/ADR-0006).
     pub remote_access: String,
+    pub notes: String,
+    pub site_id: Option<Uuid>,
+    /// Sites of the device's organization, for choosing one.
+    #[serde(skip)]
+    pub sites: Vec<OrgRef>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -254,6 +274,28 @@ pub struct DeviceFilter {
     pub q: String,
     pub organization: Option<Uuid>,
     pub connection: String,
+    pub tag: String,
+    /// `""` active devices, `"retired"`, or `"all"`.
+    pub status: String,
+}
+
+/// Jobs created together for several devices, summarized.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchSummary {
+    pub id: Uuid,
+    pub total: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub unknown: i64,
+    pub in_progress: i64,
+}
+
+/// What a change to many devices will touch, shown before it happens.
+#[derive(Debug, Clone)]
+pub struct BulkConfirm {
+    /// `run` or `retire`.
+    pub op: &'static str,
+    pub devices: Vec<DeviceRow>,
 }
 
 /// One attended support session, for the technician.

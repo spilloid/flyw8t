@@ -36,6 +36,8 @@ fn like_pattern(q: &str) -> String {
 type DeviceTuple = (
     Uuid,
     String,
+    Option<String>,
+    Vec<String>,
     Uuid,
     String,
     Option<String>,
@@ -47,7 +49,9 @@ type DeviceTuple = (
 );
 
 const DEVICE_SELECT: &str = "
-    SELECT d.id, d.hostname, o.id, o.name, s.name, inv.os, d.agent_version, d.last_seen_at, d.last_connected_at, d.retired_at
+    SELECT d.id, d.hostname, d.display_name,
+           coalesce((SELECT array_agg(t.tag ORDER BY t.tag) FROM device_tags t WHERE t.device_id = d.id), '{}'),
+           o.id, o.name, s.name, inv.os, d.agent_version, d.last_seen_at, d.last_connected_at, d.retired_at
       FROM devices d
       JOIN organizations o ON o.id = d.organization_id
       LEFT JOIN sites s ON s.id = d.site_id
@@ -60,6 +64,8 @@ fn device_row(state: &Shared, t: DeviceTuple) -> DeviceRow {
     let (
         id,
         hostname,
+        display_name,
+        tags,
         org_id,
         org_name,
         site,
@@ -72,6 +78,8 @@ fn device_row(state: &Shared, t: DeviceTuple) -> DeviceRow {
     DeviceRow {
         id,
         hostname,
+        display_name,
+        tags,
         organization: OrgRef {
             id: org_id,
             name: org_name,
@@ -94,14 +102,19 @@ pub async fn devices(
     let rows: Vec<DeviceTuple> = sqlx::query_as(&format!(
         "{DEVICE_SELECT}
           WHERE ($1 OR d.organization_id = ANY($2))
-            AND ($3::text IS NULL OR lower(d.hostname) LIKE $3)
+            AND ($3::text IS NULL OR lower(d.hostname) LIKE $3 OR lower(d.display_name) LIKE $3
+                 OR EXISTS (SELECT 1 FROM device_tags t WHERE t.device_id = d.id AND t.tag LIKE $3))
             AND ($4::uuid IS NULL OR d.organization_id = $4)
-          ORDER BY lower(d.hostname), d.id LIMIT 1000"
+            AND ($5::text IS NULL OR EXISTS (SELECT 1 FROM device_tags t WHERE t.device_id = d.id AND t.tag = $5))
+            AND CASE $6 WHEN 'all' THEN true WHEN 'retired' THEN d.retired_at IS NOT NULL ELSE d.retired_at IS NULL END
+          ORDER BY lower(coalesce(d.display_name, d.hostname)), d.id LIMIT 2000"
     ))
     .bind(all)
     .bind(&orgs)
     .bind(q)
     .bind(f.organization)
+    .bind((!f.tag.is_empty()).then_some(f.tag.as_str()))
+    .bind(f.status.as_str())
     .fetch_all(&state.db)
     .await?;
     Ok(rows
@@ -113,6 +126,24 @@ pub async fn devices(
             _ => true,
         })
         .collect())
+}
+
+/// One device's list row, if the caller can see it.
+pub async fn device_summary(
+    state: &Shared,
+    p: &Principal,
+    id: Uuid,
+) -> sqlx::Result<Option<DeviceRow>> {
+    let (all, orgs) = p.scope();
+    let row: Option<DeviceTuple> = sqlx::query_as(&format!(
+        "{DEVICE_SELECT} WHERE d.id = $1 AND ($2 OR d.organization_id = ANY($3))"
+    ))
+    .bind(id)
+    .bind(all)
+    .bind(&orgs)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(row.map(|t| device_row(state, t)))
 }
 
 pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Option<DeviceDetail>> {
@@ -127,11 +158,14 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
     .await?;
     let Some(row) = row else { return Ok(None) };
     let row = device_row(state, row);
-    let (enrolled_at,): (OffsetDateTime,) =
-        sqlx::query_as("SELECT enrolled_at FROM devices WHERE id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?;
+    let (enrolled_at, notes, site_id, org_id): (OffsetDateTime, String, Option<Uuid>, Uuid) =
+        sqlx::query_as(
+            "SELECT enrolled_at, notes, site_id, organization_id FROM devices WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    let sites = sites(state, org_id).await?;
     let inv: Option<(OffsetDateTime, String, Value)> = sqlx::query_as(
         "SELECT received_at, source, data FROM inventory_snapshots WHERE device_id = $1 ORDER BY received_at DESC LIMIT 1",
     )
@@ -176,6 +210,9 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
         credential,
         recent_jobs,
         remote_access: state.remote_access.describe(id),
+        notes,
+        site_id,
+        sites,
     }))
 }
 
@@ -184,6 +221,7 @@ pub struct JobQuery {
     pub device: Option<Uuid>,
     pub state: Option<ExecState>,
     pub attention_since: Option<OffsetDateTime>,
+    pub batch: Option<Uuid>,
     pub limit: i64,
 }
 
@@ -270,6 +308,7 @@ pub async fn jobs(state: &Shared, p: &Principal, q: &JobQuery) -> sqlx::Result<V
             AND ($4::text IS NULL OR j.state = $4)
             AND ($5::timestamptz IS NULL OR (j.created_at >= $5 AND
                  (j.state IN ('outcome_unknown', 'failed', 'timed_out') OR j.verification = 'failed')))
+            AND ($7::uuid IS NULL OR j.batch_id = $7)
           ORDER BY j.created_at DESC LIMIT $6"
     ))
     .bind(all)
@@ -278,6 +317,7 @@ pub async fn jobs(state: &Shared, p: &Principal, q: &JobQuery) -> sqlx::Result<V
     .bind(q.state.map(ExecState::as_str))
     .bind(q.attention_since)
     .bind(q.limit.clamp(1, 500))
+    .bind(q.batch)
     .fetch_all(&state.db)
     .await?;
     Ok(rows.into_iter().map(job_row).collect())
@@ -425,6 +465,63 @@ pub async fn overview(state: &Shared, p: &Principal) -> sqlx::Result<Overview> {
         )
         .await?,
     })
+}
+
+/// The sites of one organization (callers check the organization is in scope).
+pub async fn sites(state: &Shared, org: Uuid) -> sqlx::Result<Vec<OrgRef>> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, name FROM sites WHERE organization_id = $1 ORDER BY lower(name)",
+    )
+    .bind(org)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name)| OrgRef { id, name })
+        .collect())
+}
+
+/// Every tag in use on devices the caller can see, for the filter.
+pub async fn tags(state: &Shared, p: &Principal) -> sqlx::Result<Vec<String>> {
+    let (all, orgs) = p.scope();
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT t.tag FROM device_tags t JOIN devices d ON d.id = t.device_id
+          WHERE ($1 OR d.organization_id = ANY($2)) ORDER BY t.tag",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows.into_iter().map(|(t,)| t).collect())
+}
+
+/// Totals for one batch of jobs, within the caller's scope.
+pub async fn batch(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Option<BatchSummary>> {
+    let (all, orgs) = p.scope();
+    let (total, succeeded, failed, unknown): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*),
+                count(*) FILTER (WHERE state = 'completed' AND verification IN ('verified', 'not_applicable')),
+                count(*) FILTER (WHERE state IN ('failed', 'timed_out', 'expired', 'cancelled')
+                                    OR (state = 'completed' AND verification = 'failed')),
+                count(*) FILTER (WHERE state = 'outcome_unknown')
+           FROM jobs WHERE batch_id = $1 AND ($2 OR organization_id = ANY($3))",
+    )
+    .bind(id)
+    .bind(all)
+    .bind(&orgs)
+    .fetch_one(&state.db)
+    .await?;
+    if total == 0 {
+        return Ok(None);
+    }
+    Ok(Some(BatchSummary {
+        id,
+        total,
+        succeeded,
+        failed,
+        unknown,
+        in_progress: total - succeeded - failed - unknown,
+    }))
 }
 
 pub async fn org_refs(state: &Shared, p: &Principal) -> sqlx::Result<Vec<OrgRef>> {

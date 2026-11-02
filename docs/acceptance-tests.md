@@ -62,6 +62,7 @@ Beyond the milestone:
 | AT-43 | Behind a trusted proxy the client's real address drives rate limits and audit; without one, a forwarding header is ignored | `the_client_address_comes_through_a_trusted_proxy_only`, `client_ip` unit tests |
 | AT-44 | Two server instances on one database: a job and a cancel created on one reach a device connected to the other at once, not at the next sweep | `work_created_on_one_instance_reaches_a_device_on_another` |
 | AT-45 | The helper pairs from its downloaded file name alone; its consent names the technician, organization and the server host it actually connected to; Decline ends the session; an Allow after the session ended sends nothing; a wrong or reused token is refused; renamed or plaintext-to-remote names are refused | `tests/helper.rs` (4 tests), `flyw8t-helper` unit tests |
+| AT-46 | Devices can be named, tagged, annotated and given a site; a site of another organization and malformed tags are refused; changes to many devices are all-or-nothing and scoped; running on many devices needs the exact count and creates one batch, skipping retired devices; retiring revokes and hides; devices never move between organizations; technicians cannot retire | `tests/devices.rs` (4 tests), `devices::tests`, `access` unit tests |
 
 ## Manual checks still owed
 

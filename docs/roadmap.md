@@ -63,7 +63,7 @@ The first state-changing capability, and the biggest risk change in the product:
 
 - Scheduled jobs and policy inheritance (organization → site → device).
 - Software inventory, patch state, software install with verification.
-- Fleet-wide operations with count confirmation, scope limits and staged rollout.
+- Fleet-wide operations: ~~count confirmation and scope limits~~ (built 2026-11-02: tags, selection, batches of up to 500); staged rollout still to come.
 - Signed agent auto-update ([ADR-0008](decisions/ADR-0008-agent-updates.md)).
 - Linux (systemd) and macOS (launchd) agents.
 - Horizontal scale-out and HA ([ADR-0009](decisions/ADR-0009-availability-and-scale-out.md)).

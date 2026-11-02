@@ -37,7 +37,9 @@ pub async fn devices(
     let filter = DeviceFilter {
         q: qs.q.unwrap_or_default(),
         organization: qs.organization,
-        connection: String::new(),
+        // The API lists retired devices too, as it always has.
+        status: "all".into(),
+        ..Default::default()
     };
     Ok(Json(queries::devices(&state, &p, &filter).await?))
 }
@@ -95,6 +97,7 @@ pub async fn create_job(
             action,
             timeout_secs: body.timeout_secs,
             idempotency_key: Some(key),
+            batch_id: None,
         },
     )
     .await?;
