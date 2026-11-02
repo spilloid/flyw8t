@@ -88,7 +88,12 @@ impl FieldDef {
 
     /// The value as it would be stored, or why it cannot be. Empty means "clear".
     fn check_value(&self, raw: &str) -> AppResult<Option<String>> {
-        let v = raw.trim();
+        // A secret is a credential: kept exactly as typed (spaces included); only an empty submission clears it.
+        let v = if self.kind == "secret" {
+            raw
+        } else {
+            raw.trim()
+        };
         if v.is_empty() {
             return Ok(None);
         }
@@ -241,7 +246,7 @@ pub async fn resolve(
             let own = if device.is_some() { dev } else { org_v };
             let missing = match d.required_at.as_deref() {
                 Some("organization") if level == "organization" => own.is_none(),
-                Some("device") => value.is_none(),
+                Some("device") => level == "device" && value.is_none(),
                 _ => false,
             };
             ResolvedField {
@@ -502,15 +507,18 @@ pub async fn archive(
     page(&p, async {
         check_csrf(&p, &Form::parse(&body))?;
         p.require(Permission::ManageFields)?;
+        let mut tx = state.db.begin().await?;
         let n = sqlx::query("UPDATE field_definitions SET archived_at = now() WHERE id = $1 AND archived_at IS NULL")
             .bind(id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?
             .rows_affected();
         if n == 0 {
             return Err(AppError::NotFound);
         }
-        Audit::user(&p, "field.archive").target("field", id).record(&state.db).await?;
+        // Together or not at all: an archive without its audit event must not happen.
+        Audit::user(&p, "field.archive").target("field", id).record(&mut *tx).await?;
+        tx.commit().await?;
         to("/admin/fields?m=field-archived")
     })
     .await
@@ -584,8 +592,17 @@ pub async fn set_value(
     page(&p, async {
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
-        let def = definition(&state, id).await?;
         let (scope, org, device, belongs, back) = target(&state, &p, &form).await?;
+        let mut tx = state.db.begin().await?;
+        // Read and share-lock the definition in the same transaction as the write: archiving (which updates the row)
+        // either happens first and is seen here, or waits until this value is committed.
+        let def: FieldDef = sqlx::query_as(&format!(
+            "SELECT {DEF_COLUMNS} FROM field_definitions WHERE id = $1 FOR SHARE"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::NotFound)?;
         if !can_edit(&p, &def, scope) {
             return Err(AppError::Forbidden);
         }
@@ -600,7 +617,6 @@ pub async fn set_value(
             (_, v) => (v, None),
         };
         let cleared = plain.is_none() && secret.is_none();
-        let mut tx = state.db.begin().await?;
         sqlx::query(
             "INSERT INTO field_values (field_id, scope, organization_id, device_id, value, secret, set_by)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",

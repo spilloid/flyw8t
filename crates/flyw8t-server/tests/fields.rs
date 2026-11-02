@@ -512,3 +512,273 @@ async fn missing_required_values_are_reported_until_set() {
     );
     server.stop().await;
 }
+
+async fn readonly(server: &TestServer, admin: &Browser, email: &str, org: Uuid) -> Browser {
+    let r = admin
+        .post(
+            server,
+            "/admin/users",
+            &[
+                ("email", email),
+                ("display_name", "Viewer"),
+                ("password", "viewer-password-123"),
+                ("role", "readonly"),
+                ("org", &org.to_string()),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    server.login(email, "viewer-password-123").await
+}
+
+async fn value_rows(server: &TestServer, field: Uuid) -> i64 {
+    sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM field_values WHERE field_id = $1")
+        .bind(field)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap()
+        .0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn foreign_devices_readonly_users_and_forged_forms_change_nothing() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let (org_a, dev_a) = org_with_device(&server, &admin, "Org A").await;
+    let (_, dev_b) = org_with_device(&server, &admin, "Org B").await;
+    let tech = technician(&server, &admin, "tech@example.test", org_a).await;
+    let viewer = readonly(&server, &admin, "viewer@example.test", org_a).await;
+    let f = define(
+        &server,
+        &admin,
+        &[
+            ("key", "asset_tag"),
+            ("label", "Asset tag"),
+            ("kind", "text"),
+            ("scope", "device"),
+            ("technician_can_edit", "yes"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        set(&server, &admin, f, "device", Some(dev_b), "B-SENTINEL").await,
+        StatusCode::SEE_OTHER
+    );
+    let before = value_rows(&server, f).await;
+
+    // Another organization's device does not exist for the technician: not for writing, not for its history.
+    assert_eq!(
+        set(&server, &tech, f, "device", Some(dev_b), "overwrite").await,
+        StatusCode::NOT_FOUND
+    );
+    let h = tech
+        .get(
+            &server,
+            &format!("/fields/{f}/history?scope=device&target={dev_b}"),
+        )
+        .await;
+    assert_eq!(h.status, StatusCode::NOT_FOUND);
+    assert!(!h.body.contains("B-SENTINEL"));
+    // A readonly user sets nothing, even in their own organization.
+    assert_eq!(
+        set(&server, &viewer, f, "device", Some(dev_a), "x").await,
+        StatusCode::FORBIDDEN
+    );
+    // A form without this session's CSRF token is refused.
+    let dev = dev_a.to_string();
+    let forged = server
+        .request(
+            axum::http::Request::post(format!("/fields/{f}/value"))
+                .header(axum::http::header::COOKIE, &admin.cookie)
+                .header(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(axum::body::Body::from(form(&[
+                    ("scope", "device"),
+                    ("target", &dev),
+                    ("value", "forged"),
+                ])))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(forged.status, StatusCode::FORBIDDEN);
+    let r = tech
+        .post(&server, &format!("/admin/fields/{f}/archive"), &[])
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert_eq!(value_rows(&server, f).await, before, "nothing was written");
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn archiving_cannot_interleave_with_a_save_and_is_audited_or_not_done() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let (org, _) = org_with_device(&server, &admin, "Org").await;
+    let f = define(
+        &server,
+        &admin,
+        &[
+            ("key", "note"),
+            ("label", "Note"),
+            ("kind", "text"),
+            ("scope", "organization"),
+        ],
+    )
+    .await;
+
+    // An archive holding the field's row: a save waits for it, then sees the field archived and writes nothing.
+    let mut tx = server.state.db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM field_definitions WHERE id = $1 FOR UPDATE")
+        .bind(f)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let (status, _) = tokio::join!(
+        set(&server, &admin, f, "organization", Some(org), "late"),
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            sqlx::query("UPDATE field_definitions SET archived_at = now() WHERE id = $1")
+                .bind(f)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    );
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(value_rows(&server, f).await, 0);
+
+    // If the audit event cannot be written, the archive does not happen either.
+    let g = define(
+        &server,
+        &admin,
+        &[
+            ("key", "note2"),
+            ("label", "Note 2"),
+            ("kind", "text"),
+            ("scope", "organization"),
+        ],
+    )
+    .await;
+    sqlx::query(
+        "CREATE FUNCTION refuse_archive_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF NEW.action = 'field.archive' THEN RAISE EXCEPTION 'injected'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&server.state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse_archive_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION refuse_archive_audit()",
+    )
+    .execute(&server.state.db)
+    .await
+    .unwrap();
+    let r = admin
+        .post(&server, &format!("/admin/fields/{g}/archive"), &[])
+        .await;
+    assert_eq!(r.status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (archived,): (bool,) =
+        sqlx::query_as("SELECT archived_at IS NOT NULL FROM field_definitions WHERE id = $1")
+            .bind(g)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert!(!archived);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn defaults_device_requirements_secrets_and_markup_are_handled_exactly() {
+    let mut cfg = test_config(&fresh_database().await);
+    cfg.field_key = Some([5u8; 32]);
+    let server = start(cfg).await;
+    let admin = server.admin().await;
+    let (org, dev) = org_with_device(&server, &admin, "Org").await;
+
+    // A default applies where nothing is set, and says so.
+    define(
+        &server,
+        &admin,
+        &[
+            ("key", "timezone"),
+            ("label", "Time zone"),
+            ("kind", "text"),
+            ("scope", "device"),
+            ("default_value", "UTC"),
+        ],
+    )
+    .await;
+    let page = admin.get(&server, &format!("/devices/{dev}")).await.body;
+    assert!(page.contains("UTC") && page.contains(">default "), "{page}");
+
+    // A requirement on devices is not flagged on the organization page once every device has a value.
+    let owner = define(
+        &server,
+        &admin,
+        &[
+            ("key", "owner"),
+            ("label", "Owner"),
+            ("kind", "text"),
+            ("scope", "device"),
+            ("required_at", "device"),
+        ],
+    )
+    .await;
+    set(&server, &admin, owner, "device", Some(dev), "Pat").await;
+    let page = admin
+        .get(&server, &format!("/organizations/{org}"))
+        .await
+        .body;
+    assert!(!page.contains("badge bad\">required"), "{page}");
+
+    // A secret is kept exactly as typed, surrounding spaces included.
+    let psk = define(
+        &server,
+        &admin,
+        &[
+            ("key", "psk"),
+            ("label", "PSK"),
+            ("kind", "secret"),
+            ("scope", "device"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        set(&server, &admin, psk, "device", Some(dev), "  pass word  ").await,
+        StatusCode::SEE_OTHER
+    );
+    let (sealed,): (Vec<u8>,) =
+        sqlx::query_as("SELECT secret FROM field_values WHERE field_id = $1")
+            .bind(psk)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        flyw8t_server::fields::open(&[5u8; 32], &sealed).as_deref(),
+        Some("  pass word  ")
+    );
+
+    // Markup in a label is shown as text.
+    define(
+        &server,
+        &admin,
+        &[
+            ("key", "evil"),
+            ("label", "<img src=x onerror=alert(1)>"),
+            ("kind", "text"),
+            ("scope", "device"),
+        ],
+    )
+    .await;
+    let page = admin.get(&server, "/admin/fields").await.body;
+    assert!(
+        !page.contains("<img src=x") && page.contains("&lt;img src=x"),
+        "{page}"
+    );
+    server.stop().await;
+}
