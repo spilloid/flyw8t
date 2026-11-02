@@ -193,6 +193,7 @@ async fn console_renders_cleanly_everywhere() {
         (format!("/organizations/{org}"), "organization"),
         ("/audit".into(), "audit"),
         ("/admin".into(), "admin"),
+        ("/admin/fields".into(), "admin-fields"),
         ("/support".into(), "support"),
         ("/account".into(), "account"),
         ("/account/mfa".into(), "mfa-setup"),

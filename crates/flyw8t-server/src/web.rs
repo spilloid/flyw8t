@@ -89,6 +89,9 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "devices-tagged" => (true, "Tag added to the selected devices."),
         "devices-untagged" => (true, "Tag removed from the selected devices."),
         "devices-retired" => (true, "Selected devices retired."),
+        "field-defined" => (true, "Field defined."),
+        "field-archived" => (true, "Field archived: it is hidden and its values can no longer change."),
+        "field-saved" => (true, "Value saved."),
         "mfa-reset" => (true, "Two-step verification reset. That user was signed out everywhere and sets it up again at next sign-in."),
         "mfa-disabled" => (true, "Two-step verification turned off."),
         "codes-regenerated" => (true, "New recovery codes issued; the old ones no longer work."),
@@ -551,11 +554,13 @@ pub async fn organization(
     page(&p, async {
         let org = visible_org(&state, &p, id).await?;
         let tokens = queries::enrollment_tokens(&state, id).await?;
+        let fields = crate::fields::resolve(&state, &p, id, None).await?;
         html(flyw8t_web::organization_page(
             &ctx(&p, flash(m.m.as_deref())),
             org,
             tokens,
             None,
+            fields,
         ))
     })
     .await
@@ -649,7 +654,9 @@ pub async fn create_enrollment_token(
             secret,
         };
         let tokens = queries::enrollment_tokens(&state, id).await?;
-        let mut resp = Html(flyw8t_web::organization_page(&ctx(&p, None), org, tokens, Some(revealed))).into_response();
+        let fields = crate::fields::resolve(&state, &p, id, None).await?;
+        let mut resp =
+            Html(flyw8t_web::organization_page(&ctx(&p, None), org, tokens, Some(revealed), fields)).into_response();
         resp.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
         Ok(resp)
     })

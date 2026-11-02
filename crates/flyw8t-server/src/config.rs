@@ -39,6 +39,9 @@ pub struct Config {
     pub trusted_proxies: Vec<crate::client_ip::Cidr>,
     /// The header a trusted proxy puts the client address in.
     pub client_ip_header: String,
+    /// Encrypts secret custom-field values at rest (AES-256-GCM). 32 bytes, base64. Without it, secret fields can be
+    /// defined but no secret value can be stored.
+    pub field_key: Option<[u8; 32]>,
 }
 
 impl Config {
@@ -71,6 +74,23 @@ impl Config {
             bootstrap_admin,
             ice_servers: var("FLYW8T_ICE_SERVERS").unwrap_or_else(|| "[]".into()),
             helper_path: var("FLYW8T_HELPER_PATH").map(PathBuf::from),
+            field_key: match var("FLYW8T_FIELD_KEY") {
+                None => None,
+                Some(k) => {
+                    use base64::Engine;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(k.trim())
+                        .or_else(|_| {
+                            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(k.trim())
+                        })
+                        .context("FLYW8T_FIELD_KEY must be base64")?;
+                    Some(
+                        bytes
+                            .try_into()
+                            .map_err(|_| anyhow::anyhow!("FLYW8T_FIELD_KEY must be 32 bytes"))?,
+                    )
+                }
+            },
             trusted_proxies: match var("FLYW8T_TRUSTED_PROXIES") {
                 None => Vec::new(),
                 Some(v) => v
@@ -118,6 +138,7 @@ impl Config {
             helper_path: None,
             trusted_proxies: Vec::new(),
             client_ip_header: "cf-connecting-ip".into(),
+            field_key: None,
         }
     }
 

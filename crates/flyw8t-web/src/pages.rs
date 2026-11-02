@@ -733,6 +733,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
             {inventory_section(d.inventory.clone(), now)}
         </div>
         {manage}
+        {fields_card(ctx, &d.fields, "device", d.row.id)}
         <section class="card">
             <h2>"Run a diagnostic"</h2>
             {run_forms(ctx, d.row.id, connected, d.row.retired)}
@@ -969,11 +970,283 @@ fn revealed_box(r: RevealedSecret) -> impl IntoView {
     }
 }
 
+/// The input for one field's value: a list for choices and yes/no, a password box for secrets, text otherwise.
+fn field_input(kind: &str, choices: &[String], current: Option<&str>) -> AnyView {
+    match kind {
+        "boolean" => {
+            let sel = |v: &str| current == Some(v);
+            view! {
+                <select name="value" aria-label="Value">
+                    <option value="">"(clear)"</option>
+                    <option value="true" selected=sel("true")>"Yes"</option>
+                    <option value="false" selected=sel("false")>"No"</option>
+                </select>
+            }
+            .into_any()
+        }
+        "choice" => {
+            let opts = choices
+                .iter()
+                .map(|c| {
+                    let selected = current == Some(c.as_str());
+                    view! { <option value=c.clone() selected=selected>{c.clone()}</option> }
+                })
+                .collect_view();
+            view! { <select name="value" aria-label="Value"><option value="">"(clear)"</option>{opts}</select> }.into_any()
+        }
+        "secret" => view! {
+            <input type="password" name="value" maxlength="1000" autocomplete="off" placeholder="New secret (blank clears)" aria-label="Value"/>
+        }
+        .into_any(),
+        "number" => view! {
+            <input type="text" inputmode="decimal" name="value" maxlength="40" value=current.unwrap_or("").to_string() aria-label="Value"/>
+        }
+        .into_any(),
+        _ => view! {
+            <input type="text" name="value" maxlength="1000" value=current.unwrap_or("").to_string() aria-label="Value"/>
+        }
+        .into_any(),
+    }
+}
+
+fn source_label(source: &str) -> &'static str {
+    match source {
+        "device" => "set on this device",
+        "organization" => "from the organization",
+        "global" => "global",
+        "default" => "default",
+        _ => "not set",
+    }
+}
+
+/// Custom fields as they apply to an organization (`scope = "organization"`) or a device (`"device"`).
+pub fn fields_card(
+    ctx: &PageCtx,
+    fields: &[ResolvedField],
+    scope: &'static str,
+    target: uuid::Uuid,
+) -> AnyView {
+    if fields.is_empty() {
+        return ().into_any();
+    }
+    let rows = fields
+        .iter()
+        .map(|f| {
+            let value = match &f.value {
+                Some(v) => view! { <span class=if v.secret { "mono" } else { "" }>{v.display.clone()}</span> }.into_any(),
+                None => view! { <span class="muted">"—"</span> }.into_any(),
+            };
+            let missing = f.missing.then(|| view! { " " <span class="badge bad">"required"</span> });
+            let source = format!("{} ", source_label(f.source));
+            let history = f.settable_here.then(|| {
+                let href = format!("/fields/{}/history?scope={scope}&target={target}", f.id);
+                view! { <a href=href class="small">"history"</a> }
+            });
+            let edit = (f.settable_here && f.can_edit).then(|| {
+                let url = format!("/fields/{}/value", f.id);
+                let own = if f.kind == "secret" { None } else { f.own.as_ref().map(|v| v.display.clone()) };
+                view! {
+                    <form method="post" action=url class="inline-form">
+                        <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                        <input type="hidden" name="scope" value=scope/>
+                        <input type="hidden" name="target" value=target.to_string()/>
+                        {field_input(&f.kind, &f.choices, own.as_deref())}
+                        <button type="submit">"Set"</button>
+                    </form>
+                }
+            });
+            view! {
+                <tr>
+                    <td data-label="Field"><strong>{f.label.clone()}</strong>{missing}<div class="muted small mono">{f.key.clone()}</div></td>
+                    <td data-label="Value">{value}<div class="muted small">{source}{history}</div></td>
+                    <td data-label="Set here">{edit}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    view! {
+        <section>
+            <h2>"Custom fields"</h2>
+            <p class="muted">"Device values override the organization's, which override global values and defaults. Secret values are never shown again once set."</p>
+            <table class="list">
+                <thead><tr><th scope="col">"Field"</th><th scope="col">"Value"</th><th scope="col">"Set here"</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </section>
+    }
+    .into_any()
+}
+
+pub fn fields_page(
+    ctx: &PageCtx,
+    defs: Vec<FieldDefView>,
+    missing: Vec<MissingRequired>,
+    secrets_enabled: bool,
+) -> String {
+    let none = defs.is_empty();
+    let rows = defs
+        .iter()
+        .map(|d| {
+            let archived = d.archived.then(|| view! { " " <span class="badge neutral">"archived"</span> });
+            let req = d.required_at.as_deref().map(|r| format!("required for every {r}")).unwrap_or_default();
+            let tech = if d.technician_can_edit { "technicians may edit" } else { "admins only" };
+            let global = d.scopes.iter().any(|s| s == "global").then(|| {
+                let current = d.global.as_ref().map(|v| v.display.clone());
+                let shown = current.clone().unwrap_or_else(|| "—".into());
+                let edit = (!d.archived).then(|| {
+                    let url = format!("/fields/{}/value", d.id);
+                    let own = if d.kind == "secret" { None } else { current.clone() };
+                    view! {
+                        <form method="post" action=url class="inline-form">
+                            <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                            <input type="hidden" name="scope" value="global"/>
+                            {field_input(&d.kind, &d.choices, own.as_deref())}
+                            <button type="submit">"Set"</button>
+                        </form>
+                    }
+                });
+                let history = format!("/fields/{}/history?scope=global", d.id);
+                view! { <div>{shown}" "<a href=history class="small">"history"</a></div>{edit} }
+            });
+            let archive = (!d.archived).then(|| {
+                let url = format!("/admin/fields/{}/archive", d.id);
+                view! {
+                    <form method="post" action=url>
+                        <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                        <button type="submit" class="link">"Archive"</button>
+                    </form>
+                }
+            });
+            let choices = (!d.choices.is_empty()).then(|| format!(" · {}", d.choices.join(", ")));
+            let default = d.default_value.clone().map(|v| format!(" · default {v}"));
+            view! {
+                <tr>
+                    <td data-label="Field"><strong>{d.label.clone()}</strong>{archived}<div class="mono small">{d.key.clone()}</div></td>
+                    <td data-label="Kind">{d.kind.clone()}{choices}{default}<div class="muted small">{d.scopes.join(", ")}" · "{tech}" "{req}</div></td>
+                    <td data-label="Global value">{global}</td>
+                    <td data-label="">{archive}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let missing_view = (!missing.is_empty()).then(|| {
+        let items = missing
+            .into_iter()
+            .map(|m| {
+                let base = if m.level == "organization" { "/organizations" } else { "/devices" };
+                let links = m
+                    .targets
+                    .iter()
+                    .map(|(id, name)| {
+                        let href = format!("{base}/{id}");
+                        view! { <a href=href>{name.clone()}</a>" " }
+                    })
+                    .collect_view();
+                let more = (m.total > m.targets.len()).then(|| format!(" and {} more", m.total - m.targets.len()));
+                view! {
+                    <li><strong>{m.label.clone()}</strong>{format!(" — {} {}(s) missing: ", m.total, m.level)}{links}{more}</li>
+                }
+            })
+            .collect_view();
+        view! {
+            <section class="card">
+                <h2>"Required values missing"</h2>
+                <ul class="plain">{items}</ul>
+            </section>
+        }
+    });
+    let no_key = (!secrets_enabled).then(|| {
+        view! { <p class="flash bad">"Secret fields can be defined, but no secret value can be stored until FLYW8T_FIELD_KEY is set on the server."</p> }
+    });
+    let scope_boxes = [("global", "Global"), ("organization", "Organization"), ("device", "Device")]
+        .into_iter()
+        .map(|(v, l)| view! { <label class="inline"><input type="checkbox" name="scope" value=v/>{l}</label> })
+        .collect_view();
+    let body = view! {
+        <p class="crumbs"><a href="/admin">"Administration"</a>" / "</p>
+        <h1>"Custom fields"</h1>
+        <p class="lead">"Values scripts will read: set globally, per organization or per device. The most specific value wins. Every change is kept."</p>
+        {no_key}
+        {missing_view}
+        {none.then(|| view! { <p class="empty">"No fields yet. Define one below."</p> })}
+        <section hidden=none>
+            <table class="list">
+                <thead><tr><th scope="col">"Field"</th><th scope="col">"Kind"</th><th scope="col">"Global value"</th><th scope="col"><span class="sr">"Archive"</span></th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </section>
+        <section class="card">
+            <h2>"Define a field"</h2>
+            <form method="post" action="/admin/fields" class="stack">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>"Key (scripts use it)"<input type="text" name="key" required=true maxlength="40" pattern="[a-z][a-z0-9_]*" placeholder="backup_share"/></label>
+                <label>"Label"<input type="text" name="label" required=true maxlength="100" placeholder="Backup share"/></label>
+                <label>"Kind"<select name="kind">
+                    <option value="text">"Text"</option>
+                    <option value="number">"Number"</option>
+                    <option value="boolean">"Yes / no"</option>
+                    <option value="choice">"Choice"</option>
+                    <option value="secret">"Secret"</option>
+                </select></label>
+                <label>"Choices (for a choice field, separated by commas)"<input type="text" name="choices" maxlength="2000"/></label>
+                <fieldset><legend>"May be set"</legend>{scope_boxes}</fieldset>
+                <label>"Required"<select name="required_at">
+                    <option value="">"No"</option>
+                    <option value="organization">"Every organization must set its own"</option>
+                    <option value="device">"Every device must have a value (inherited counts)"</option>
+                </select></label>
+                <label>"Default (not for secrets)"<input type="text" name="default_value" maxlength="1000"/></label>
+                <label class="inline"><input type="checkbox" name="technician_can_edit" value="yes"/>" Technicians may set organization and device values"</label>
+                <button type="submit">"Define"</button>
+            </form>
+        </section>
+    };
+    shell("Custom fields", ctx, Nav::Admin, None, body)
+}
+
+pub fn field_history_page(
+    ctx: &PageCtx,
+    label: &str,
+    key: &str,
+    scope: &str,
+    back: &str,
+    rows: Vec<FieldHistoryRow>,
+) -> String {
+    let body_rows = rows
+        .into_iter()
+        .map(|r| {
+            let value = match r.display {
+                Some(v) => view! { <span>{v}</span> }.into_any(),
+                None => view! { <span class="muted">"cleared"</span> }.into_any(),
+            };
+            view! {
+                <tr>
+                    <td data-label="When"><time datetime=fmt::iso(r.set_at)>{fmt::timestamp(r.set_at)}</time></td>
+                    <td data-label="Value">{value}</td>
+                    <td data-label="By">{r.set_by}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let title = format!("{label}: history");
+    let body = view! {
+        <p class="crumbs"><a href=back.to_string()>"Back"</a>" / "</p>
+        <h1>{title.clone()}</h1>
+        <p class="muted">{format!("{key}, {scope} value. Newest first. Secret values are never shown.")}</p>
+        <table class="list">
+            <thead><tr><th scope="col">"When"</th><th scope="col">"Value"</th><th scope="col">"By"</th></tr></thead>
+            <tbody>{body_rows}</tbody>
+        </table>
+    };
+    shell(&title, ctx, Nav::Admin, None, body)
+}
+
 pub fn organization_page(
     ctx: &PageCtx,
     org: OrgSummary,
     tokens: Vec<EnrollmentTokenView>,
     revealed: Option<RevealedSecret>,
+    fields: Vec<ResolvedField>,
 ) -> String {
     let now = ctx.now;
     let id = org.id;
@@ -1063,6 +1336,7 @@ pub fn organization_page(
                 {enroll_form}
             </section>
         </div>
+        {fields_card(ctx, &fields, "organization", id)}
         <section>
             <h2>"Enrollment tokens"</h2>
             <table class="list">
@@ -1163,6 +1437,7 @@ pub fn admin_page(
         .collect_view();
     let body = view! {
         <h1>"Administration"</h1>
+        <p><a href="/admin/fields">"Custom fields →"</a></p>
         {revealed.map(revealed_box)}
         <section>
             <h2>"Users"</h2>

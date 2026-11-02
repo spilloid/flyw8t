@@ -36,6 +36,7 @@ For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pe
 | `FLYW8T_BOOTSTRAP_ADMIN_EMAIL`, `…_PASSWORD` | together | — | first administrator, created only while no users exist; password ≥ 12 characters |
 | `FLYW8T_REQUIRE_MFA` | no | `true` | every console user sets up two-step verification (TOTP) before reaching the console; `false` makes it optional per user |
 | `FLYW8T_HELPER_PATH` | no | — | the signed `flyw8t-helper.exe` offered to participants of remote-control sessions (ADR-0012). Without it, control sessions say the helper is not available; screen viewing is unaffected |
+| `FLYW8T_FIELD_KEY` | no | (none) | 32 random bytes, base64 (`openssl rand -base64 32`), encrypting secret custom-field values at rest (AES-256-GCM). Without it, secret fields can be defined but no secret value can be stored. **Back it up with the database**: a lost key makes stored secrets unreadable. There is no rotation yet |
 | `FLYW8T_TRUSTED_PROXIES` | no | (none) | comma-separated addresses or `addr/prefix` ranges of reverse proxies whose forwarded client address is believed (the Compose tunnel is `172.29.0.10`). Empty: the socket address is used and forwarding headers are ignored, so a client cannot choose its own address |
 | `FLYW8T_CLIENT_IP_HEADER` | no | `cf-connecting-ip` | the header a trusted proxy puts the client address in (`x-forwarded-for` for most others; its last entry is used) |
 | `RUST_LOG` | no | `info,sqlx=warn` | log filter |
