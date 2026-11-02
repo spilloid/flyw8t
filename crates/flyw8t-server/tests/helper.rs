@@ -10,6 +10,7 @@ use common::*;
 use flyw8t_helper::{launch_from_file_name, Consent, ConsentRequest, Launch, Outcome};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -25,6 +26,7 @@ struct Person {
     allow: bool,
     shown: Mutex<Option<ConsentRequest>>,
     gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    cancelled: AtomicBool,
 }
 
 impl Consent for Person {
@@ -35,6 +37,10 @@ impl Consent for Person {
             let _ = gate.recv();
         }
         self.allow
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
     }
 }
 
@@ -49,6 +55,7 @@ fn person(allow: bool) -> Arc<Person> {
         allow,
         shown: Mutex::new(None),
         gate: Mutex::new(None),
+        cancelled: AtomicBool::new(false),
     })
 }
 
@@ -258,6 +265,7 @@ async fn an_allow_given_after_the_session_ended_does_nothing() {
         allow: true,
         shown: Mutex::new(None),
         gate: Mutex::new(Some(gate)),
+        cancelled: AtomicBool::new(false),
     });
     let launch = r.launch.clone();
     let consent = p.clone();
@@ -280,6 +288,10 @@ async fn an_allow_given_after_the_session_ended_does_nothing() {
         .unwrap()
         .unwrap();
     assert!(matches!(outcome, Outcome::Ended { .. }), "{outcome:?}");
+    assert!(
+        p.cancelled.load(Ordering::SeqCst),
+        "the open question is taken away"
+    );
     // The person clicks Allow afterwards: nothing changes.
     let _ = release.send(());
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -302,5 +314,33 @@ async fn a_used_or_wrong_launch_token_is_refused() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(flyw8t_helper::run(&r.launch, person(true)).await.is_err());
     first.abort();
+    r.server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn a_helper_the_server_cannot_introduce_ends_the_session_at_once() {
+    let mut r = downloaded_helper().await;
+    // Break only the introduction: the token check does not read organizations.
+    sqlx::query("ALTER TABLE organizations RENAME TO organizations_hidden")
+        .execute(&r.server.state.db)
+        .await
+        .unwrap();
+    let p = person(true);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        flyw8t_helper::run(&r.launch, p.clone()),
+    )
+    .await
+    .expect("the helper is told at once")
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Ended { .. }), "{outcome:?}");
+    assert!(p.shown().is_none(), "nothing was asked");
+    recv_kind(&mut r.technician, "ended").await;
+    sqlx::query("ALTER TABLE organizations_hidden RENAME TO organizations")
+        .execute(&r.server.state.db)
+        .await
+        .unwrap();
+    assert_ne!(db_state(&r.server, r.session).await, "awaiting_helper");
     r.server.stop().await;
 }

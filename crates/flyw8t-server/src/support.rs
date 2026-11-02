@@ -1393,16 +1393,19 @@ async fn run_socket(
         .detail(json!({ "side": side.as_str(), "replaced": replaced }))
         .record(&state.db)
         .await;
-    // The helper learns who is asking before anything else: its consent window shows it.
+    // The helper learns who is asking before anything else: its consent window shows it. If
+    // that fails, its token is spent and it cannot come back, so the session ends; this socket
+    // then closes through the usual path below, with its notice.
     if side == Side::Helper {
-        match helper_hello(&state, id).await {
-            Ok(hello) => {
-                state.support.send(id, side, hello);
-            }
+        let introduced = match helper_hello(&state, id).await {
+            Ok(hello) => state.support.send(id, side, hello),
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not describe the session to its helper");
-                return;
+                false
             }
+        };
+        if !introduced {
+            end_or_force(&state, id, side, &who, "helper could not be introduced").await;
         }
     }
     if let Some(st) = current(&state, id).await {

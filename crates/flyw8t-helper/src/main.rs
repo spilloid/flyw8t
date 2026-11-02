@@ -22,7 +22,7 @@ fn main() {
         Ok(rt) => rt,
         Err(e) => return notify(&format!("The flyw8t helper could not start: {e}")),
     };
-    let message = match rt.block_on(flyw8t_helper::run(&launch, Arc::new(Dialog))) {
+    let message = match rt.block_on(flyw8t_helper::run(&launch, Arc::new(Dialog::default()))) {
         Ok(Outcome::Declined) => "You declined. Nothing was shared.".to_string(),
         Ok(Outcome::Ended { label, .. }) => format!("The support session has ended: {label}."),
         Ok(Outcome::Lost) => {
@@ -34,44 +34,99 @@ fn main() {
 }
 
 /// The consent question, in the system's own dialog.
-struct Dialog;
+#[derive(Default)]
+struct Dialog {
+    #[cfg(windows)]
+    open: windows::Open,
+}
 
 impl Consent for Dialog {
     fn ask(&self, r: &ConsentRequest) -> bool {
-        let what = if r.control {
-            "see your screen and use your mouse and keyboard"
-        } else {
-            "see your screen"
-        };
-        let org = if r.organization.is_empty() {
-            String::new()
-        } else {
-            format!(" for {}", r.organization)
-        };
-        let text = format!(
-            "{name} ({email}){org} wants to {what}.\n\n\
-             This request comes from the server: {host}\n\
-             Only allow it if you were expecting help from that server.\n\n\
-             You can stop at any time. Nothing is installed.\n\n\
-             Allow?",
-            name = r.technician_name,
-            email = r.technician_email,
-            host = r.server_host,
-        );
-        ask_yes_no("flyw8t: allow remote help?", &text)
+        let (title, text) = r.dialog();
+        #[cfg(windows)]
+        return self.open.ask_yes_no(&title, &text);
+        #[cfg(not(windows))]
+        return ask_yes_no(&title, &text);
+    }
+
+    fn cancel(&self) {
+        #[cfg(windows)]
+        self.open.cancel();
     }
 }
 
 #[cfg(windows)]
-fn ask_yes_no(title: &str, text: &str) -> bool {
+mod windows {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
+        EnumThreadWindows, MessageBoxW, PostMessageW, IDNO, IDYES, MB_DEFBUTTON2, MB_ICONQUESTION,
+        MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE, WM_COMMAND,
     };
-    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let (t, b) = (wide(title), wide(text));
-    // No is the default button: pressing Enter by accident must not grant anything.
-    let flags = MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND;
-    unsafe { MessageBoxW(std::ptr::null_mut(), b.as_ptr(), t.as_ptr(), flags) == IDYES }
+
+    /// No is the default button: pressing Enter by accident must not grant anything.
+    pub(crate) const QUESTION: MESSAGEBOX_STYLE =
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND;
+
+    /// Only an explicit Yes allows. No, a closed dialog, or a failure to show it does not.
+    pub(crate) fn allowed(result: MESSAGEBOX_RESULT) -> bool {
+        result == IDYES
+    }
+
+    pub(crate) fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    /// The open question, so it can be taken away when the session ends first.
+    #[derive(Default)]
+    pub(crate) struct Open {
+        /// The thread showing the dialog, or 0.
+        thread: Arc<AtomicU32>,
+        cancelled: AtomicBool,
+    }
+
+    impl Open {
+        pub(crate) fn ask_yes_no(&self, title: &str, text: &str) -> bool {
+            self.thread
+                .store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+            // Cancelled before the dialog appeared: never show it.
+            if self.cancelled.load(Ordering::SeqCst) {
+                self.thread.store(0, Ordering::SeqCst);
+                return false;
+            }
+            let (t, b) = (wide(title), wide(text));
+            let result =
+                unsafe { MessageBoxW(std::ptr::null_mut(), b.as_ptr(), t.as_ptr(), QUESTION) };
+            self.thread.store(0, Ordering::SeqCst);
+            allowed(result) && !self.cancelled.load(Ordering::SeqCst)
+        }
+
+        /// Answer the open dialog with No, as if the person had. Retries briefly, in case the
+        /// dialog is still being created.
+        pub(crate) fn cancel(&self) {
+            self.cancelled.store(true, Ordering::SeqCst);
+            let thread = self.thread.clone();
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    let id = thread.load(Ordering::SeqCst);
+                    if id == 0 {
+                        return;
+                    }
+                    unsafe { EnumThreadWindows(id, Some(answer_no), 0) };
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+        }
+    }
+
+    unsafe extern "system" fn answer_no(window: HWND, _: LPARAM) -> BOOL {
+        unsafe { PostMessageW(window, WM_COMMAND, IDNO as usize, 0) };
+        1
+    }
 }
 
 #[cfg(not(windows))]
@@ -87,8 +142,7 @@ fn ask_yes_no(title: &str, text: &str) -> bool {
 #[cfg(windows)]
 fn notify(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
-    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let (t, b) = (wide("flyw8t helper"), wide(text));
+    let (t, b) = (windows::wide("flyw8t helper"), windows::wide(text));
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),
@@ -102,4 +156,41 @@ fn notify(text: &str) {
 #[cfg(not(windows))]
 fn notify(text: &str) {
     println!("{text}");
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::windows::*;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IDCANCEL, IDNO, IDYES, MB_DEFBUTTON2, MB_DEFMASK, MB_TYPEMASK, MB_YESNO,
+    };
+
+    #[test]
+    fn only_an_explicit_yes_allows_and_no_is_the_default() {
+        assert!(allowed(IDYES));
+        for other in [IDNO, IDCANCEL, 0] {
+            assert!(!allowed(other), "{other}");
+        }
+        assert_eq!(QUESTION & MB_DEFMASK, MB_DEFBUTTON2, "Enter must mean No");
+        assert_eq!(QUESTION & MB_TYPEMASK, MB_YESNO);
+    }
+
+    /// Shows a real dialog on this desktop for a moment, so it is not run by default.
+    #[test]
+    #[ignore = "shows a dialog on the desktop"]
+    fn cancelling_takes_the_question_away() {
+        let open = std::sync::Arc::new(Open::default());
+        let asking = {
+            let open = open.clone();
+            std::thread::spawn(move || open.ask_yes_no("flyw8t test", "Closing by itself..."))
+        };
+        std::thread::sleep(Duration::from_millis(700));
+        let started = Instant::now();
+        open.cancel();
+        assert!(!asking.join().unwrap(), "a cancelled question is No");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // Cancelled before it appears: it never appears.
+        assert!(!open.ask_yes_no("flyw8t test", "should not be shown"));
+    }
 }

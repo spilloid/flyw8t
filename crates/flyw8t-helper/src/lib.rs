@@ -34,6 +34,11 @@ impl Launch {
         rest.split('/').next().unwrap_or(rest)
     }
 
+    /// Check the address before use: the host shown must be the host connected to.
+    pub fn check(&self) -> Result<()> {
+        check_server_url(&self.server_url)
+    }
+
     fn socket_url(&self) -> String {
         let base = self.server_url.trim_end_matches('/');
         let ws = if let Some(rest) = base.strip_prefix("https://") {
@@ -86,20 +91,64 @@ pub fn launch_from_file_name(file_name: &str) -> Result<Launch> {
     })
 }
 
-/// HTTPS, or plaintext only to this machine (the same rule as the server and the agent).
+/// HTTPS, or plaintext only to this machine (the same rule as the server and the agent). The
+/// address must be plain enough that what the consent window shows is exactly where the helper
+/// connects: a DNS name or an IP address, an optional valid port, an optional path, nothing else.
 fn check_server_url(url: &str) -> Result<()> {
     let (scheme, rest) = url
         .split_once("://")
         .context("no scheme in the server address")?;
-    let authority = rest.split('/').next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') {
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let plain_path = path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b));
+    if !plain_path {
         bail!("the server address is not valid");
     }
-    let host = if let Some(h) = authority.strip_prefix('[') {
-        h.split(']').next().unwrap_or("")
+    let (host, port) = if let Some(h) = authority.strip_prefix('[') {
+        let (h, after) = h
+            .split_once(']')
+            .context("the server address is not valid")?;
+        if h.parse::<std::net::Ipv6Addr>().is_err() {
+            bail!("the server address is not valid");
+        }
+        let port = match after {
+            "" => None,
+            p => Some(
+                p.strip_prefix(':')
+                    .context("the server address is not valid")?,
+            ),
+        };
+        (h, port)
     } else {
-        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
+        match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        }
     };
+    let dns_name = !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+    if !dns_name && host.parse::<std::net::Ipv6Addr>().is_err() {
+        bail!("the server address is not valid");
+    }
+    // A port the connection library cannot read would silently become the default one.
+    if let Some(p) = port {
+        let valid = !p.is_empty()
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u16>().is_ok_and(|n| n != 0);
+        if !valid {
+            bail!("the server address has an invalid port");
+        }
+    }
     let loopback = host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
@@ -108,6 +157,30 @@ fn check_server_url(url: &str) -> Result<()> {
         "https" => Ok(()),
         "http" if loopback => Ok(()),
         _ => bail!("the server address must use https"),
+    }
+}
+
+/// Text from the server, made safe to show: no control or invisible formatting characters
+/// (a NUL would end the dialog's text early; a line break or a direction override could fake
+/// the lines that follow), and no longer than `max` characters.
+fn shown(text: &str, max: usize) -> String {
+    let invisible = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+    };
+    let clean = text
+        .chars()
+        .map(|c| if invisible(c) { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if clean.chars().count() > max {
+        let mut cut: String = clean.chars().take(max).collect();
+        cut.push('…');
+        cut
+    } else {
+        clean
     }
 }
 
@@ -122,10 +195,42 @@ pub struct ConsentRequest {
     pub control: bool,
 }
 
+impl ConsentRequest {
+    /// The dialog's title and text. What the helper knows for itself (the server it connected
+    /// to, what is being asked) comes first; what the server says about its technician follows.
+    pub fn dialog(&self) -> (String, String) {
+        let what = if self.control {
+            "see your screen and use your mouse and keyboard"
+        } else {
+            "see your screen"
+        };
+        let org = if self.organization.is_empty() {
+            String::new()
+        } else {
+            format!("\nOrganization: {}", self.organization)
+        };
+        let text = format!(
+            "The server {host} asks to {what}.\n\n\
+             Only allow it if you were expecting help from {host}.\n\n\
+             The server says the technician is:\n\
+             {name} ({email}){org}\n\n\
+             You can stop at any time. Nothing is installed.\n\n\
+             Allow?",
+            host = self.server_host,
+            name = self.technician_name,
+            email = self.technician_email,
+        );
+        (format!("flyw8t: allow {}?", self.server_host), text)
+    }
+}
+
 /// The person's decision. The Windows build shows a dialog; tests answer directly.
 pub trait Consent: Send + Sync + 'static {
     /// Blocks until the person decides. `true` is Allow.
     fn ask(&self, request: &ConsentRequest) -> bool;
+    /// The session ended while the question was open: take it away. `ask` may then return
+    /// anything; its answer is ignored.
+    fn cancel(&self) {}
 }
 
 /// How a helper session finished.
@@ -173,6 +278,7 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>> {
 
 /// Pair with the server, ask the person, and follow the session until it ends.
 pub async fn run(launch: &Launch, consent: Arc<dyn Consent>) -> Result<Outcome> {
+    launch.check()?;
     let mut request = launch
         .socket_url()
         .into_client_request()
@@ -184,7 +290,7 @@ pub async fn run(launch: &Launch, consent: Arc<dyn Consent>) -> Result<Outcome> 
             .context("launch token")?,
     );
     let connector = tokio_tungstenite::Connector::Rustls(tls_config()?);
-    let (mut ws, _) = tokio::time::timeout(
+    let (ws, _) = tokio::time::timeout(
         Duration::from_secs(20),
         tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector)),
     )
@@ -193,10 +299,12 @@ pub async fn run(launch: &Launch, consent: Arc<dyn Consent>) -> Result<Outcome> 
     .context(
         "the server refused this helper (the download may have expired or been used already)",
     )?;
+    let (mut tx, rx) = ws.split();
+    let mut incoming = messages(rx);
 
     // The server introduces the session first.
     let hello = loop {
-        match next(&mut ws).await? {
+        match incoming.next().await {
             Some(ServerMsg::Hello {
                 technician_name,
                 technician_email,
@@ -205,9 +313,9 @@ pub async fn run(launch: &Launch, consent: Arc<dyn Consent>) -> Result<Outcome> 
                 ..
             }) => {
                 break ConsentRequest {
-                    technician_name,
-                    technician_email,
-                    organization,
+                    technician_name: shown(&technician_name, 80),
+                    technician_email: shown(&technician_email, 120),
+                    organization: shown(&organization, 80),
                     server_host: launch.server_host().to_string(),
                     control: capabilities.iter().any(|c| c == "control_input"),
                 }
@@ -218,36 +326,32 @@ pub async fn run(launch: &Launch, consent: Arc<dyn Consent>) -> Result<Outcome> 
         }
     };
 
-    // Ask, while still listening: if the session ends while the question is open, the answer
-    // no longer matters and nothing is sent.
+    // Ask, while still listening: if the session ends while the question is open, the
+    // question is taken away and nothing is sent.
     let asking = {
         let consent = consent.clone();
         let hello = hello.clone();
         tokio::task::spawn_blocking(move || consent.ask(&hello))
     };
-    tokio::pin!(asking);
-    let allowed = loop {
-        tokio::select! {
-            answer = &mut asking => break answer.unwrap_or(false),
-            msg = next(&mut ws) => match msg? {
-                Some(ServerMsg::Ended { state, label }) => return Ok(Outcome::Ended { state, label }),
-                Some(_) => {}
-                None => return Ok(Outcome::Lost),
-            },
+    let allowed = match decide(&mut incoming, async { asking.await.unwrap_or(false) }).await {
+        Decision::Answer(allowed) => allowed,
+        Decision::Finished(outcome) => {
+            consent.cancel();
+            return Ok(outcome);
         }
     };
     let answer = if allowed { "approve" } else { "decline" };
-    ws.send(Message::text(json!({ "type": answer }).to_string()))
+    tx.send(Message::text(json!({ "type": answer }).to_string()))
         .await
         .context("sending the answer")?;
     if !allowed {
-        let _ = ws.close(None).await;
+        let _ = tx.close().await;
         return Ok(Outcome::Declined);
     }
 
     // Allowed. Media and input arrive in later steps; until then, follow the session.
     loop {
-        match next(&mut ws).await? {
+        match incoming.next().await {
             Some(ServerMsg::Ended { state, label }) => return Ok(Outcome::Ended { state, label }),
             Some(_) => {}
             None => return Ok(Outcome::Lost),
@@ -255,20 +359,46 @@ pub async fn run(launch: &Launch, consent: Arc<dyn Consent>) -> Result<Outcome> 
     }
 }
 
-type Socket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+/// The server's messages, ending when the connection does.
+fn messages<S>(rx: S) -> impl futures_util::Stream<Item = ServerMsg> + Unpin
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    rx.take_while(|m| std::future::ready(matches!(m, Ok(m) if !m.is_close())))
+        .filter_map(|m| {
+            std::future::ready(match m {
+                Ok(Message::Text(t)) => {
+                    Some(serde_json::from_str(t.as_str()).unwrap_or(ServerMsg::Other))
+                }
+                _ => None,
+            })
+        })
+}
 
-/// The next message from the server; `None` once the connection is gone.
-async fn next(ws: &mut Socket) -> Result<Option<ServerMsg>> {
+enum Decision {
+    Answer(bool),
+    Finished(Outcome),
+}
+
+/// Wait for the person's answer unless the session finishes first. When both are ready at
+/// once, the session's end wins: an answer to a question that no longer stands is not sent.
+async fn decide<S, F>(incoming: &mut S, answer: F) -> Decision
+where
+    S: futures_util::Stream<Item = ServerMsg> + Unpin,
+    F: std::future::Future<Output = bool>,
+{
+    tokio::pin!(answer);
     loop {
-        match ws.next().await {
-            Some(Ok(Message::Text(t))) => {
-                return Ok(Some(
-                    serde_json::from_str(t.as_str()).unwrap_or(ServerMsg::Other),
-                ))
-            }
-            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return Ok(None),
-            Some(Ok(_)) => continue,
+        tokio::select! {
+            biased;
+            msg = incoming.next() => match msg {
+                Some(ServerMsg::Ended { state, label }) => {
+                    return Decision::Finished(Outcome::Ended { state, label })
+                }
+                Some(_) => {}
+                None => return Decision::Finished(Outcome::Lost),
+            },
+            allowed = &mut answer => return Decision::Answer(allowed),
         }
     }
 }
@@ -319,5 +449,88 @@ mod tests {
         );
         let userinfo = file_name_for("abc", "https://evil@rmm.example.com");
         assert!(launch_from_file_name(&userinfo).is_err());
+        // What is shown must be where it connects: no port the connector would read as the
+        // default, no characters a parser could split differently.
+        for bad in [
+            "https://rmm.example.com:65536",
+            "https://rmm.example.com:0",
+            "https://rmm.example.com:44x",
+            "https://rmm.example.com:",
+            r"https://evil.example\.rmm.example.com",
+            "https://evil.example%2frmm.example.com",
+            "https://rmm.example.com?x=1",
+            "https://rmm.example.com/#x",
+            "https://-rmm.example.com",
+            "https://[::1",
+            "https://[nope]",
+        ] {
+            assert!(
+                launch_from_file_name(&file_name_for("abc", bad)).is_err(),
+                "{bad}"
+            );
+        }
+        for good in [
+            "https://rmm.example.com:8443",
+            "https://rmm.example.com/flyw8t",
+            "https://[2001:db8::1]:443",
+            "http://[::1]:8080",
+            "http://localhost:3000",
+        ] {
+            assert!(
+                launch_from_file_name(&file_name_for("abc", good)).is_ok(),
+                "{good}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_text_cannot_hide_or_fake_the_server_line() {
+        let r = ConsentRequest {
+            technician_name: shown(
+                "Contoso IT\nServer: support.contoso.com\nAllow?\u{0}\u{202E}moc.live",
+                80,
+            ),
+            technician_email: shown(&"a".repeat(500), 120),
+            organization: shown("Contoso\r\n\u{200B}Dental", 80),
+            server_host: "evil.example".into(),
+            control: true,
+        };
+        assert_eq!(
+            r.technician_name,
+            "Contoso IT Server: support.contoso.com Allow? moc.live"
+        );
+        assert_eq!(r.technician_email.chars().count(), 121);
+        assert_eq!(r.organization, "Contoso Dental");
+        let (title, text) = r.dialog();
+        assert!(title.contains("evil.example"));
+        assert!(!text.contains('\0'));
+        assert!(
+            text.starts_with("The server evil.example asks to see your screen and use your mouse"),
+            "{text}"
+        );
+        // The server's words come after the server line, on lines of their own.
+        assert!(text.lines().any(|l| l.starts_with("Contoso IT Server:")));
+    }
+
+    #[tokio::test]
+    async fn an_ending_already_received_beats_an_answer_given_at_the_same_moment() {
+        // Both ready at once, many times over: the ending must win every time.
+        for _ in 0..64 {
+            let mut incoming = futures_util::stream::iter(vec![
+                ServerMsg::Other,
+                ServerMsg::Ended {
+                    state: "revoked".into(),
+                    label: "ended".into(),
+                },
+            ]);
+            let d = decide(&mut incoming, std::future::ready(true)).await;
+            assert!(matches!(d, Decision::Finished(Outcome::Ended { .. })));
+        }
+        // With nothing from the server, the answer stands.
+        let mut quiet = futures_util::stream::pending();
+        assert!(matches!(
+            decide(&mut quiet, std::future::ready(true)).await,
+            Decision::Answer(true)
+        ));
     }
 }
