@@ -52,6 +52,8 @@ Design: [ADR-0012](decisions/ADR-0012-remote-control-helper.md) (proposed).
 
 ## 0.6: Scripts, with consent and evidence
 
+Design: [ADR-0014](decisions/ADR-0014-scripts-and-custom-fields.md) (proposed). Custom fields (global, organization, device) come first; they run nothing.
+
 The first state-changing capability, and the biggest risk change in the product:
 
 - Script library with versions; scripts **signed by a key the server does not hold**, verified by the agent.
