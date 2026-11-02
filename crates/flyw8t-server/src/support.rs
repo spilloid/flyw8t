@@ -15,6 +15,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use base64::Engine;
 use flyw8t_domain::support::{Capability, SupportState};
 use flyw8t_domain::Permission;
 use flyw8t_web::model::{SupportConsentView, SupportSessionView};
@@ -131,6 +132,14 @@ enum Out {
     Helper {
         download: String,
         expires_in_secs: u64,
+    },
+    /// To a helper that has just attached: everything its consent window must show.
+    Hello {
+        technician_name: String,
+        technician_email: String,
+        organization: String,
+        server_host: String,
+        capabilities: Vec<String>,
     },
     Ended {
         state: &'static str,
@@ -1384,6 +1393,21 @@ async fn run_socket(
         .detail(json!({ "side": side.as_str(), "replaced": replaced }))
         .record(&state.db)
         .await;
+    // The helper learns who is asking before anything else: its consent window shows it. If
+    // that fails, its token is spent and it cannot come back, so the session ends; this socket
+    // then closes through the usual path below, with its notice.
+    if side == Side::Helper {
+        let introduced = match helper_hello(&state, id).await {
+            Ok(hello) => state.support.send(id, side, hello),
+            Err(e) => {
+                tracing::warn!(session = %id, error = %format!("{e:#}"), "could not describe the session to its helper");
+                false
+            }
+        };
+        if !introduced {
+            end_or_force(&state, id, side, &who, "helper could not be introduced").await;
+        }
+    }
     if let Some(st) = current(&state, id).await {
         state.support.publish(id, st);
     }
@@ -1705,6 +1729,38 @@ async fn browser_allow(state: &Shared, id: Uuid, who: &Who) -> anyhow::Result<bo
     Ok(true)
 }
 
+/// What a newly attached helper must show before asking: who, from which organization and
+/// server, asking for what. The same facts the consent page shows.
+async fn helper_hello(state: &Shared, id: Uuid) -> anyhow::Result<Out> {
+    let (technician_name, technician_email, organization, capabilities): (
+        String,
+        String,
+        Option<String>,
+        Vec<String>,
+    ) = sqlx::query_as(
+        "SELECT u.display_name, u.email, o.name, s.capabilities
+               FROM support_sessions s JOIN users u ON u.id = s.created_by
+               LEFT JOIN organizations o ON o.id = s.organization_id
+              WHERE s.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    let server_host = state
+        .config
+        .public_url
+        .split_once("://")
+        .map_or(state.config.public_url.as_str(), |(_, h)| h)
+        .to_string();
+    Ok(Out::Hello {
+        technician_name,
+        technician_email,
+        organization: organization.unwrap_or_default(),
+        server_host,
+        capabilities,
+    })
+}
+
 /// Spend a launch token: once, before it expires, only while the session awaits its helper.
 async fn spend_helper_token(state: &Shared, token: &str, ip: &str) -> anyhow::Result<Option<Uuid>> {
     let mut tx = state.db.begin().await?;
@@ -1831,7 +1887,12 @@ pub async fn helper_download(
         Ok(_) => return not_here("The session is no longer waiting for the helper."),
         Err(e) => return error_response(None, AppError::Internal(e.into())),
     }
-    let name = format!("flyw8t-helper-{token}.exe");
+    // The signed helper cannot be modified per download, so its file name carries both the
+    // launch token and the server it belongs to: `flyw8t-helper-<token>.<base64url(url)>.exe`.
+    // The helper names that server in its consent window, so a renamed copy pointing
+    // somewhere else says so (docs/threat-model.md).
+    let server = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&state.config.public_url);
+    let name = format!("flyw8t-helper-{token}.{server}.exe");
     (
         [
             (
