@@ -105,20 +105,20 @@ mod windows {
             allowed(result) && !self.cancelled.load(Ordering::SeqCst)
         }
 
-        /// Answer the open dialog with No, as if the person had. Retries briefly, in case the
-        /// dialog is still being created.
+        /// Answer the open dialog with No, as if the person had. Keeps trying until the asking
+        /// thread is done, however long the dialog takes to appear. (`ask_yes_no` records its
+        /// thread before checking `cancelled`, and this sets `cancelled` before reading the
+        /// thread, so either the question is never shown or this sees it and waits it out.)
         pub(crate) fn cancel(&self) {
             self.cancelled.store(true, Ordering::SeqCst);
             let thread = self.thread.clone();
-            std::thread::spawn(move || {
-                for _ in 0..40 {
-                    let id = thread.load(Ordering::SeqCst);
-                    if id == 0 {
-                        return;
-                    }
-                    unsafe { EnumThreadWindows(id, Some(answer_no), 0) };
-                    std::thread::sleep(Duration::from_millis(50));
+            std::thread::spawn(move || loop {
+                let id = thread.load(Ordering::SeqCst);
+                if id == 0 {
+                    return;
                 }
+                unsafe { EnumThreadWindows(id, Some(answer_no), 0) };
+                std::thread::sleep(Duration::from_millis(50));
             });
         }
     }

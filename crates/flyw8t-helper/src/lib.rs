@@ -99,9 +99,10 @@ fn check_server_url(url: &str) -> Result<()> {
         .split_once("://")
         .context("no scheme in the server address")?;
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    // Path characters a URI allows; never `?`, `#` or `\`, which parsers split differently.
     let plain_path = path
         .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b));
+        .all(|b| b.is_ascii_alphanumeric() || b"-._~/!$&'()*+,;=:@%".contains(&b));
     if !plain_path {
         bail!("the server address is not valid");
     }
@@ -126,9 +127,11 @@ fn check_server_url(url: &str) -> Result<()> {
             None => (authority, None),
         }
     };
-    let dns_name = !host.is_empty()
-        && host.len() <= 253
-        && host.split('.').all(|label| {
+    // One final dot (an absolute DNS name) is allowed; empty labels elsewhere are not.
+    let name = host.strip_suffix('.').unwrap_or(host);
+    let dns_name = !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
                 && !label.starts_with('-')
@@ -375,6 +378,9 @@ where
         })
 }
 
+/// Messages that are not an ending a question may see before the helper gives up.
+const MAX_CHATTER: usize = 256;
+
 enum Decision {
     Answer(bool),
     Finished(Outcome),
@@ -388,6 +394,7 @@ where
     F: std::future::Future<Output = bool>,
 {
     tokio::pin!(answer);
+    let mut chatter = 0;
     loop {
         tokio::select! {
             biased;
@@ -395,7 +402,14 @@ where
                 Some(ServerMsg::Ended { state, label }) => {
                     return Decision::Finished(Outcome::Ended { state, label })
                 }
-                Some(_) => {}
+                // A server that never stops talking must not keep a finished answer from
+                // being acted on: past a bound, stop, sending nothing (fail closed).
+                Some(_) => {
+                    chatter += 1;
+                    if chatter > MAX_CHATTER {
+                        return Decision::Finished(Outcome::Lost);
+                    }
+                }
                 None => return Decision::Finished(Outcome::Lost),
             },
             allowed = &mut answer => return Decision::Answer(allowed),
@@ -461,6 +475,9 @@ mod tests {
             "https://rmm.example.com?x=1",
             "https://rmm.example.com/#x",
             "https://-rmm.example.com",
+            "https://rmm..example.com",
+            "https://rmm.example.com..",
+            r"https://rmm.example.com/a\b",
             "https://[::1",
             "https://[nope]",
         ] {
@@ -472,6 +489,8 @@ mod tests {
         for good in [
             "https://rmm.example.com:8443",
             "https://rmm.example.com/flyw8t",
+            "https://rmm.example.com.",
+            "https://rmm.example.com/help+desk/@team",
             "https://[2001:db8::1]:443",
             "http://[::1]:8080",
             "http://localhost:3000",
@@ -526,6 +545,23 @@ mod tests {
             let d = decide(&mut incoming, std::future::ready(true)).await;
             assert!(matches!(d, Decision::Finished(Outcome::Ended { .. })));
         }
+        // A server that never stops sending other messages cannot hold a No back forever:
+        // the helper stops instead, sending nothing.
+        // (On its own thread: without the bound this never yields, so it must fail, not hang.)
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let mut endless = futures_util::stream::repeat_with(|| ServerMsg::Other);
+            let d = rt.block_on(decide(&mut endless, std::future::ready(false)));
+            let _ = done.send(matches!(d, Decision::Finished(Outcome::Lost)));
+        });
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "an endless stream of other messages must end the wait"
+        );
         // With nothing from the server, the answer stands.
         let mut quiet = futures_util::stream::pending();
         assert!(matches!(
