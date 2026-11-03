@@ -52,7 +52,7 @@ Design: [ADR-0012](decisions/ADR-0012-remote-control-helper.md) (proposed).
 
 ## 0.6: Scripts, with consent and evidence
 
-Design: [ADR-0014](decisions/ADR-0014-scripts-and-custom-fields.md) (proposed). Custom fields (global, organization, device) come first; they run nothing.
+Design: [ADR-0014](decisions/ADR-0014-scripts-and-custom-fields.md) (accepted). Custom fields (global, organization, device) come first; they run nothing. Sites as a field level follow.
 
 The first state-changing capability, and the biggest risk change in the product:
 

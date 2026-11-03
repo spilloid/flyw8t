@@ -1,6 +1,6 @@
 # ADR-0014: Scripts and custom fields: editable, revisioned, role-controlled, signed to run
 
-**Status:** proposed (2026-11-02) · builds on the 0.6 roadmap entry, [threat model T10](../threat-model.md) and [ADR-0005](ADR-0005-job-lifecycle.md) · sets the direction for [ADR-0007](ADR-0007-extension-runtime.md)
+**Status:** accepted (2026-11-02; operator answered the open questions the same day) · builds on the 0.6 roadmap entry, [threat model T10](../threat-model.md) and [ADR-0005](ADR-0005-job-lifecycle.md) · sets the direction for [ADR-0007](ADR-0007-extension-runtime.md)
 
 ## Context
 
@@ -54,19 +54,21 @@ So a compromised server can only replay revisions that real people approved, to 
 
 The approval screen shows the exact source, the parameters and the hash being signed. For C2 scripts, a second approver signs each run, not only the revision.
 
+**Sudo mode.** Approving is a fresh passkey or security-key ceremony at the moment of approval: a signed-in session, a password or a TOTP code is never enough on its own, however recent. The same step-up (a fresh WebAuthn assertion, valid for a few minutes) also guards the other changes that widen what can run: editing the trust list, defining or archiving custom fields, and changing users' roles. People without a usable passkey approve with the offline signing tool instead.
+
 ### 4. Custom fields: definitions, scoped values, revisioned
 
 A **field definition** has:
 
 - a key, label and type: text, number, yes/no, choice, or **secret**;
-- where it **may be set**: global, organization, device (site later);
+- where it **may be set**: global, organization, site, device;
 - where it **must be set**, for example "required for every organization";
 - an optional default and validation (a pattern, or a list of choices);
 - who may **edit** values and who may **see** them. Secret values are never shown after entry; they are only sent to the agent at run time.
 
 Each value belongs to one scope. Every change is a new row recording who, when and the previous value (masked for secrets), so a value's history is visible and can be restored.
 
-**Resolution** for a device: device value, else organization value, else global value, else the default. The device page shows the resolved value and where it came from.
+**Resolution** for a device: device value, else its site's value, else organization value, else global value, else the default. The device page shows the resolved value and where it came from.
 
 **Required fields:** organizations and devices missing a required value are listed on their pages and on an admin page. A script that uses such a field **does not run** on the affected devices. The run's confirmation page names them first.
 
@@ -93,7 +95,7 @@ New permissions, granted per organization like the existing ones:
 | Permission | Default roles |
 |---|---|
 | `ViewScripts` | admin, technician |
-| `EditScripts` (drafts only) | admin, technician; global scripts: admin only |
+| `EditScripts` (drafts only; global scripts too) | admin, technician |
 | `PublishScripts` (approve a revision; needs a registered security key) | admin |
 | `RunScripts` (by risk class: technicians C0–C1, C2 with a second approval) | admin, technician |
 | `ManageFields` (definitions) | admin |
@@ -126,14 +128,14 @@ API tokens get `scripts:run` only, scoped like `jobs:run`. Editing and approving
 
 ## Build order
 
-1. **Done (2026-11-02).** **Custom fields:** definitions, scoped values with history, required-field reporting, and resolved values on device and organization pages. This executes nothing and is useful on its own. Sites as a level are not built (open question 3).
+1. **Done (2026-11-02).** **Custom fields:** definitions, scoped values with history, required-field reporting, and resolved values on device and organization pages. This executes nothing and is useful on its own. **Then:** sites as a level between organization and device.
 2. **Script library:** drafts, revisions, diffs, server-side checks, upload and download. This executes nothing.
-3. **Trust list and approval:** WebAuthn registration for approvers, the signed trust list, pinning at enrollment, and approving revisions.
+3. **Trust list and approval:** WebAuthn registration for approvers, sudo mode, the signed trust list, pinning at enrollment, and approving revisions.
 4. **Running scripts:** agent verification, parameters as data, Job Objects, single runs, then batches. PowerShell first.
 5. **Schedules:** recurring runs per organization, site or tag, then policies that pass down from organization to device.
 
-## Open questions for the operator
+## Operator decisions (2026-11-02)
 
-1. **Approvers and keys:** are you OK with approvers needing a passkey or security key, with an offline signing tool as the fallback?
-2. **Global scripts:** should technicians edit drafts of global scripts, with only admins approving? Or should global scripts be admin-only end to end?
-3. **Sites as a scope:** should field values also be settable per **site**, between organization and device?
+1. **Approvers and keys:** yes: approvers use a passkey or security key, with the offline signing tool as the fallback, and approval is a sudo-mode step (section 3).
+2. **Global scripts:** technicians may draft and edit global scripts; only those who can publish approve them.
+3. **Sites as a scope:** yes: field values can be set per site, between organization and device.
