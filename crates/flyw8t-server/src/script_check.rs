@@ -187,18 +187,31 @@ fn clip(s: &str) -> String {
     }
 }
 
-/// Whether PowerShell might resolve something while parsing this: `using module`, `using assembly` or a DSC resource.
+/// Whether PowerShell might resolve something while parsing this: `using module`, `using assembly`, a DSC resource, or
+/// an assembly-qualified type (`[Some.Type, SomeAssembly]`, which the parser's checks look up and may load).
 /// Deliberately crude, since comments, continuations and escapes can sit between the words: the words anywhere at all,
-/// after dropping backticks and folding case as .NET does (`ſ` is `S`, `ı` is `I`). A false alarm only means "not
+/// after dropping backticks and folding case as .NET does (`ſ` is `S`, `ı` is `I`), and any comma inside square
+/// brackets (so `$a[0,1]` and `[Dictionary[string,int]]` are not checked either). A false alarm only means "not
 /// checked".
 pub fn resolves_while_parsing(source: &str) -> bool {
+    let mut depth = 0u32;
+    let comma_in_brackets = source.chars().any(|c| {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth > 0 => return true,
+            _ => {}
+        }
+        false
+    });
     let folded: String = source
         .chars()
         .filter(|&c| c != '`')
         .flat_map(char::to_uppercase)
         .collect();
     let has = |w: &str| folded.contains(w);
-    (has("USING") && (has("MODULE") || has("ASSEMBLY")))
+    comma_in_brackets
+        || (has("USING") && (has("MODULE") || has("ASSEMBLY")))
         || has("DSCRESOURCE")
         || has("CONFIGURATION")
 }
@@ -214,7 +227,7 @@ pub async fn check(enabled: bool, language: &str, source: &str) -> Result<Syntax
     };
     if c.dotnet && resolves_while_parsing(source) {
         return Ok(SyntaxCheck::unchecked(
-            "Not checked: the script may have `using module`, `using assembly` or a DSC resource, which PowerShell resolves while parsing.",
+            "Not checked: the script may have `using module`, `using assembly`, a DSC resource or an assembly-qualified type, which PowerShell resolves while parsing.",
         ));
     }
     let Some(program) = c.programs.iter().find_map(|p| find(p)) else {
@@ -343,7 +356,7 @@ async fn run(
         Some(j) => j,
         None => {
             let _ = child.start_kill();
-            return Err("the checker's memory could not be limited".into());
+            return Err("the checker could not be started within its limits".into());
         }
     };
     let mut stdin = child.stdin.take().ok_or("no input")?;
@@ -572,6 +585,9 @@ mod tests {
             "uſing module Foo",
             "u`sing ass`embly x.dll",
             "configuration C { Import-DscResource -ModuleName X }",
+            "[Example.Type, ProbeLib]::Go()",
+            "[System.Collections.Generic.List[[Example.Type, ProbeLib]]]::new()",
+            "$a[0,1]",
         ] {
             assert!(resolves_while_parsing(s), "{s:?}");
             let r = check(true, "powershell", s).await.unwrap();
@@ -583,6 +599,7 @@ mod tests {
         for fine in [
             "using namespace System.IO\nWrite-Output x",
             "Import-Module Foo\nGet-Thing",
+            "[int[]]$x = 1, 2\n$x[0]",
         ] {
             assert!(!resolves_while_parsing(fine), "{fine:?}");
         }
