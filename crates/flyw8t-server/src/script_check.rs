@@ -2,15 +2,16 @@
 //! problems by line. Parsing never runs the script: PowerShell's `Parser.ParseInput`, `bash -n`, Python's `compile()`.
 //!
 //! Each checker is its own process with an empty environment, the source on standard input and nothing else, a time
-//! limit, a memory limit (`setrlimit` on Unix, a Job Object on Windows; .NET's own heap limit for PowerShell on Unix,
-//! whose runtime reserves more address space than any useful limit) and capped output. At most two run at once, and a
-//! save waits only briefly for a turn: when the server is busy it says so rather than queueing without bound. When no
+//! limit, a memory limit (`setrlimit` on Unix; on Windows a Job Object, which the process joins before it runs, so
+//! whatever it starts is in the job too; .NET's own heap limit for PowerShell on Unix, whose runtime reserves more
+//! address space than any useful limit) and capped output. At most two run at once and a few saves may wait, briefly,
+//! for a turn: when the server is busy it says so rather than queueing without bound. When no
 //! checker is installed, or one does not finish, the result says the source was not checked; it never claims the source
 //! is fine. A clean check says nothing about what a script does.
 //!
 //! Not yet: running without network access, or as an identity without the server's credentials. PowerShell resolves
-//! `using module` and `using assembly` while parsing (it may look for, and load, what they name), so a script with
-//! either is not given to it.
+//! `using module`, `using assembly` and DSC resources while parsing (it may look for, and load, what they name), so a
+//! script that might contain one is not given to it.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,8 @@ const OUTPUT_CAP: u64 = 64 * 1024;
 const MAX_PROBLEMS: usize = 100;
 const MAX_MESSAGE: usize = 300;
 static RUNNING: Semaphore = Semaphore::const_new(2);
+/// Saves that may wait for a checker at once; more are told the server is busy straight away.
+static WAITING: Semaphore = Semaphore::const_new(8);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Problem {
@@ -184,17 +187,20 @@ fn clip(s: &str) -> String {
     }
 }
 
-/// `using module` or `using assembly` anywhere (case and spacing as PowerShell allows): PowerShell resolves these while
-/// parsing, so such a script is not parsed here. A false alarm only means "not checked".
+/// Whether PowerShell might resolve something while parsing this: `using module`, `using assembly` or a DSC resource.
+/// Deliberately crude, since comments, continuations and escapes can sit between the words: the words anywhere at all,
+/// after dropping backticks and folding case as .NET does (`ſ` is `S`, `ı` is `I`). A false alarm only means "not
+/// checked".
 pub fn resolves_while_parsing(source: &str) -> bool {
-    let lower = source.to_lowercase();
-    let words: Vec<&str> = lower
-        .split(|c: char| c.is_whitespace() || c == ';' || c == '`')
-        .filter(|w| !w.is_empty())
+    let folded: String = source
+        .chars()
+        .filter(|&c| c != '`')
+        .flat_map(char::to_uppercase)
         .collect();
-    words
-        .windows(2)
-        .any(|w| w[0] == "using" && (w[1] == "module" || w[1] == "assembly"))
+    let has = |w: &str| folded.contains(w);
+    (has("USING") && (has("MODULE") || has("ASSEMBLY")))
+        || has("DSCRESOURCE")
+        || has("CONFIGURATION")
 }
 
 pub async fn check(enabled: bool, language: &str, source: &str) -> Result<SyntaxCheck, Busy> {
@@ -208,7 +214,7 @@ pub async fn check(enabled: bool, language: &str, source: &str) -> Result<Syntax
     };
     if c.dotnet && resolves_while_parsing(source) {
         return Ok(SyntaxCheck::unchecked(
-            "Not checked: the script has `using module` or `using assembly`, which PowerShell resolves while parsing.",
+            "Not checked: the script may have `using module`, `using assembly` or a DSC resource, which PowerShell resolves while parsing.",
         ));
     }
     let Some(program) = c.programs.iter().find_map(|p| find(p)) else {
@@ -217,15 +223,18 @@ pub async fn check(enabled: bool, language: &str, source: &str) -> Result<Syntax
             c.label
         )));
     };
-    let _slot = admit(&RUNNING, ADMISSION_WAIT).await?;
+    let _slot = admit(&WAITING, &RUNNING, ADMISSION_WAIT).await?;
     Ok(outcome(&c, run(&program, &c, MEMORY_LIMIT, source).await))
 }
 
-/// A turn on a checker, or `Busy` if none frees up in time: waiting saves never pile up without bound.
-async fn admit(
-    running: &Semaphore,
+/// A turn on a checker, or `Busy` if too many are already waiting or none frees up in time: waiting saves are few and
+/// brief.
+async fn admit<'a>(
+    waiting: &Semaphore,
+    running: &'a Semaphore,
     wait: Duration,
-) -> Result<tokio::sync::SemaphorePermit<'_>, Busy> {
+) -> Result<tokio::sync::SemaphorePermit<'a>, Busy> {
+    let _queued = waiting.try_acquire().map_err(|_| Busy)?;
     match tokio::time::timeout(wait, running.acquire()).await {
         Ok(Ok(permit)) => Ok(permit),
         _ => Err(Busy),
@@ -321,11 +330,14 @@ async fn run(
             });
         }
     }
+    // Started suspended on Windows, so it joins its job before it runs anything (or starts anything outside it).
+    #[cfg(windows)]
+    cmd.creation_flags(job::CREATE_SUSPENDED);
     let mut child = cmd
         .spawn()
         .map_err(|_| "the checker could not start".to_string())?;
     // Held until the child is done; dropping it ends the process if it still runs. If the limit cannot be put in place,
-    // the checker is stopped before it is given any input.
+    // the checker is stopped before it has run at all.
     #[cfg(windows)]
     let _job = match job::contain(&child, memory) {
         Some(j) => j,
@@ -368,12 +380,17 @@ async fn run(
 
 #[cfg(windows)]
 mod job {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     };
+    pub use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
     pub struct Job(HANDLE);
 
@@ -387,9 +404,11 @@ mod job {
         }
     }
 
-    /// Put the process in a new job that caps each process's committed memory and kills them when the job is dropped.
+    /// Put the process (started suspended) in a new job that caps each process's committed memory and kills them when
+    /// the job is dropped, then let it run.
     pub fn contain(child: &tokio::process::Child, memory: u64) -> Option<Job> {
         let process = child.raw_handle()? as HANDLE;
+        let pid = child.id()?;
         // SAFETY: plain Win32 calls on a handle we own (the job) and the child's live process handle; the limit
         // structure is zeroed, then filled, and passed with its own size.
         unsafe {
@@ -408,10 +427,37 @@ mod job {
                 &info as *const _ as *const core::ffi::c_void,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             );
-            if set == 0 || AssignProcessToJobObject(job.0, process) == 0 {
+            if set == 0 || AssignProcessToJobObject(job.0, process) == 0 || !resume(pid) {
                 return None;
             }
             Some(job)
+        }
+    }
+
+    /// Resume every thread of a process started suspended (there is one: nothing else has run in it).
+    fn resume(pid: u32) -> bool {
+        // SAFETY: a thread snapshot walked with a correctly sized entry; each thread handle is opened and closed here.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = false;
+            let mut more = Thread32First(snapshot, &mut entry) != 0;
+            while more {
+                if entry.th32OwnerProcessID == pid {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        resumed |= ResumeThread(thread) != u32::MAX;
+                        CloseHandle(thread);
+                    }
+                }
+                more = Thread32Next(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+            resumed
         }
     }
 }
@@ -470,18 +516,35 @@ mod tests {
 
     #[tokio::test]
     async fn a_save_waits_briefly_for_a_checker_then_is_told_the_server_is_busy() {
-        let running = Semaphore::new(2);
+        let (waiting, running) = (Semaphore::new(8), Semaphore::new(2));
         let wait = Duration::from_millis(200);
         let (a, b) = (
-            admit(&running, wait).await.unwrap(),
-            admit(&running, wait).await.unwrap(),
+            admit(&waiting, &running, wait).await.unwrap(),
+            admit(&waiting, &running, wait).await.unwrap(),
         );
         let started = std::time::Instant::now();
-        assert_eq!(admit(&running, wait).await.err(), Some(Busy));
+        assert_eq!(admit(&waiting, &running, wait).await.err(), Some(Busy));
         assert!(started.elapsed() < Duration::from_secs(2));
         drop(a);
-        assert!(admit(&running, wait).await.is_ok());
+        assert!(admit(&waiting, &running, wait).await.is_ok());
         drop(b);
+    }
+
+    #[tokio::test]
+    async fn only_a_few_saves_may_wait_the_rest_are_turned_away_at_once() {
+        let (waiting, running) = (Semaphore::new(1), Semaphore::new(1));
+        let wait = Duration::from_secs(2);
+        let _busy = running.try_acquire().unwrap();
+        let (queued, turned_away) = tokio::join!(admit(&waiting, &running, wait), async {
+            tokio::task::yield_now().await;
+            let started = std::time::Instant::now();
+            let r = admit(&waiting, &running, wait).await;
+            (r.err(), started.elapsed())
+        });
+        assert_eq!(turned_away.0, Some(Busy));
+        assert!(turned_away.1 < Duration::from_secs(1));
+        // The first waited its whole turn: nothing freed up.
+        assert_eq!(queued.err(), Some(Busy));
     }
 
     #[test]
@@ -505,6 +568,10 @@ mod tests {
             "USING   Assembly C:\\x.dll",
             "using namespace System;using module Foo",
             "using `\n module Foo",
+            "using <#gap#> module '\\\\host\\share\\M.psd1'",
+            "uſing module Foo",
+            "u`sing ass`embly x.dll",
+            "configuration C { Import-DscResource -ModuleName X }",
         ] {
             assert!(resolves_while_parsing(s), "{s:?}");
             let r = check(true, "powershell", s).await.unwrap();
@@ -513,9 +580,12 @@ mod tests {
                 "{s:?}"
             );
         }
-        assert!(!resolves_while_parsing(
-            "using namespace System.IO\n# a module, using it"
-        ));
+        for fine in [
+            "using namespace System.IO\nWrite-Output x",
+            "Import-Module Foo\nGet-Thing",
+        ] {
+            assert!(!resolves_while_parsing(fine), "{fine:?}");
+        }
     }
 
     /// A checker that needs more memory than its limit is stopped and reported as not checked; the same checker under
