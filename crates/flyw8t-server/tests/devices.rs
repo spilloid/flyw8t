@@ -106,7 +106,10 @@ async fn a_device_can_be_named_tagged_annotated_and_sited() {
                 ("display_name", "Front desk PC"),
                 ("tags", "Kiosk, finance kiosk"),
                 ("site", &main),
-                ("notes", "Under the counter.\nAsk Pat first."),
+                (
+                    "notes",
+                    "Under the counter.\nAsk Pat first. </textarea><b>x</b>",
+                ),
             ],
         )
         .await;
@@ -116,6 +119,12 @@ async fn a_device_can_be_named_tagged_annotated_and_sited() {
     assert!(page.contains("Front desk PC"));
     assert!(page.contains("Main office"));
     assert!(page.contains("Ask Pat first."));
+    // Notes are shown in a textarea (which Leptos does not escape) and as text: neither becomes markup.
+    assert!(!page.contains("<b>x</b>"), "{page}");
+    assert!(
+        page.contains("Ask Pat first. &lt;/textarea>&lt;b>x&lt;/b></textarea>"),
+        "{page}"
+    );
 
     // Found by name, by tag, and by the tag filter; not by a tag it lacks.
     for q in [

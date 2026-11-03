@@ -12,11 +12,19 @@ pub enum Nav {
     Devices,
     Organizations,
     Jobs,
+    Scripts,
     Support,
     Audit,
     Admin,
     /// The signed-in user's own settings; reached from the name in the header.
     Account,
+}
+
+/// Text for inside a `<textarea>`. Leptos writes a textarea's children without escaping them, so this escapes `&` and
+/// `<` itself (enough inside a textarea; the browser decodes them back), so the text can never close the element and
+/// become markup. HTML also drops one newline right after the opening tag, so one is added for it to drop.
+fn textarea_text(s: &str) -> String {
+    format!("\n{}", s.replace('&', "&amp;").replace('<', "&lt;"))
 }
 
 fn render(view: impl IntoView + 'static) -> String {
@@ -25,7 +33,7 @@ fn render(view: impl IntoView + 'static) -> String {
     format!("<!doctype html>{html}")
 }
 
-fn head(title: String, refresh: Option<u32>, script: bool) -> impl IntoView {
+fn head(title: String, refresh: Option<u32>, script: Option<&'static str>) -> impl IntoView {
     view! {
         <head>
             <meta charset="utf-8"/>
@@ -40,7 +48,7 @@ fn head(title: String, refresh: Option<u32>, script: bool) -> impl IntoView {
             <meta name="mobile-web-app-capable" content="yes"/>
             <meta name="apple-mobile-web-app-title" content="flyw8t"/>
             <link rel="stylesheet" href="/static/app.css"/>
-            {script.then(|| view! { <script src="/static/support.js" defer=true></script> })}
+            {script.map(|src| view! { <script src=src defer=true></script> })}
         </head>
     }
 }
@@ -52,17 +60,17 @@ fn shell(
     refresh: Option<u32>,
     body: impl IntoView + 'static,
 ) -> String {
-    shell_with(title, ctx, active, refresh, false, body)
+    shell_with(title, ctx, active, refresh, None, body)
 }
 
-/// The authenticated page frame: header, navigation, flash, content. `script` loads the
-/// attended-support script (the only page script in the console; ADR-0010).
+/// The authenticated page frame: header, navigation, flash, content. `script` loads a page script: the attended-support
+/// one (ADR-0010) or the script editor's (ADR-0014), the only two in the console.
 fn shell_with(
     title: &str,
     ctx: &PageCtx,
     active: Nav,
     refresh: Option<u32>,
-    script: bool,
+    script: Option<&'static str>,
     body: impl IntoView + 'static,
 ) -> String {
     let mut items = vec![
@@ -71,6 +79,9 @@ fn shell_with(
         (Nav::Organizations, "/organizations", "Organizations"),
         (Nav::Jobs, "/jobs", "Jobs"),
     ];
+    if ctx.can_view_scripts {
+        items.push((Nav::Scripts, "/scripts", "Scripts"));
+    }
     if ctx.can_support {
         items.push((Nav::Support, "/support", "Support"));
     }
@@ -200,7 +211,7 @@ pub fn login_page(error: Option<String>, no_admin: bool, csrf_ok_hint: Option<St
     let hint = csrf_ok_hint.map(|h| view! { <p class="muted">{h}</p> });
     render(view! {
         <html lang="en">
-            {head("Sign in · flyw8t".into(), None, false)}
+            {head("Sign in · flyw8t".into(), None, None)}
             <body class="login">
                 <main class="card narrow">
                     <h1>"flyw8t"</h1>
@@ -558,7 +569,7 @@ fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
                 <label>"Name (blank shows the hostname)"<input type="text" name="display_name" maxlength="200" value=d.row.display_name.clone().unwrap_or_default() placeholder=d.row.hostname.clone()/></label>
                 <label>"Tags, separated by commas"<input type="text" name="tags" maxlength="900" value=d.row.tags.join(", ") placeholder="finance, kiosk"/></label>
                 <label>"Site"<select name="site"><option value="">"No site"</option>{site_options}</select></label>
-                <label>"Notes"<textarea name="notes" rows="4" maxlength="4000">{d.notes.clone()}</textarea></label>
+                <label>"Notes"<textarea name="notes" rows="4" maxlength="4000">{textarea_text(&d.notes)}</textarea></label>
                 <button type="submit">"Save"</button>
             </form>
         }
@@ -1504,7 +1515,7 @@ pub fn error_page(ctx: Option<&PageCtx>, status: u16, message: &str) -> String {
         ),
         None => render(view! {
             <html lang="en">
-                {head(format!("{title} · flyw8t"), None, false)}
+                {head(format!("{title} · flyw8t"), None, None)}
                 <body class="login"><main class="card narrow"><h1>{title}</h1><p>{msg}</p><p><a href="/login">"Sign in"</a></p></main></body>
             </html>
         }),
@@ -1663,14 +1674,21 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
             <noscript><p class="flash bad">"Viewing a shared screen needs JavaScript."</p></noscript>
         </div>
     };
-    shell_with(&title, ctx, Nav::Support, None, script, body)
+    shell_with(
+        &title,
+        ctx,
+        Nav::Support,
+        None,
+        script.then_some("/static/support.js"),
+        body,
+    )
 }
 
 /// The participant's pages: no account, no navigation.
 fn participant_shell(title: &str, script: bool, body: impl IntoView + 'static) -> String {
     render(view! {
         <html lang="en">
-            {head(format!("{title} · flyw8t"), None, script)}
+            {head(format!("{title} · flyw8t"), None, script.then_some("/static/support.js"))}
             <body class="login">
                 <main class="card narrow">{body}</main>
             </body>
@@ -1836,7 +1854,7 @@ fn qr_svg(data: &str) -> impl IntoView {
 fn card_page(title: &str, body: impl IntoView + 'static) -> String {
     render(view! {
         <html lang="en">
-            {head(format!("{title} · flyw8t"), None, false)}
+            {head(format!("{title} · flyw8t"), None, None)}
             <body class="login">
                 <main class="card narrow">{body}</main>
             </body>
@@ -1981,6 +1999,385 @@ fn mfa_cell(u: &UserRow, csrf: &str) -> impl IntoView {
     .into_any()
 }
 
+// ---------------------------------------------------------------------------------------
+// Script library (ADR-0014)
+
+/// Largest file the editor loads (the server's limit on a script).
+const MAX_SCRIPT_BYTES: usize = 256 * 1024;
+
+fn script_scope(s: &ScriptView) -> impl IntoView {
+    match &s.organization {
+        Some(o) => {
+            let href = format!("/organizations/{}", o.id);
+            view! { <a href=href>{o.name.clone()}</a> }.into_any()
+        }
+        None => {
+            view! { <span class="badge neutral">"global"</span>" every organization" }.into_any()
+        }
+    }
+}
+
+fn diff_table(rows: Vec<DiffRow>) -> impl IntoView {
+    let body = rows
+        .into_iter()
+        .map(|r| match r {
+            DiffRow::Same { old, new, text } => view! {
+                <tr><td class="n">{old}</td><td class="n">{new}</td><td class="t">{format!("  {text}")}</td></tr>
+            }
+            .into_any(),
+            DiffRow::Removed { old, text } => view! {
+                <tr class="del"><td class="n">{old}</td><td class="n"></td><td class="t">{format!("- {text}")}</td></tr>
+            }
+            .into_any(),
+            DiffRow::Added { new, text } => view! {
+                <tr class="add"><td class="n"></td><td class="n">{new}</td><td class="t">{format!("+ {text}")}</td></tr>
+            }
+            .into_any(),
+            DiffRow::Folded(n) => view! {
+                <tr class="fold"><td colspan="3">{format!("⋯ {n} unchanged line{}", if n == 1 { "" } else { "s" })}</td></tr>
+            }
+            .into_any(),
+        })
+        .collect_view();
+    view! { <table class="diff"><tbody>{body}</tbody></table> }
+}
+
+/// What the server's checks found, for a saved revision.
+fn script_checks(
+    r: &RevisionView,
+    problems: &[ScriptProblem],
+    missing: &[MissingRequired],
+) -> impl IntoView {
+    let source_problems = problems.iter().any(|p| p.section == "source");
+    let syntax = match (&r.checker, &r.unchecked) {
+        (Some(c), _) if !source_problems => format!("Syntax checked by {c}: no problems found."),
+        (Some(c), _) => format!("Syntax checked by {c} when saved: see below."),
+        (None, Some(why)) => why.clone(),
+        (None, None) => "Not checked.".into(),
+    };
+    let tone = if r.checker.is_some() { "" } else { "flash bad" };
+    let list = (!problems.is_empty()).then(|| {
+        let items = problems
+            .iter()
+            .map(|p| {
+                let place = match p.line {
+                    Some(n) => format!(
+                        "{}, line {n}: ",
+                        if p.section == "source" {
+                            "Script"
+                        } else {
+                            "Parameters"
+                        }
+                    ),
+                    None => format!(
+                        "{}: ",
+                        if p.section == "source" {
+                            "Script"
+                        } else {
+                            "Parameters"
+                        }
+                    ),
+                };
+                view! { <li><strong>{place}</strong>{p.message.clone()}</li> }
+            })
+            .collect_view();
+        view! { <ul class="problems">{items}</ul> }
+    });
+    let missing_view = (!missing.is_empty()).then(|| {
+        let items = missing
+            .iter()
+            .map(|m| view! { <li>{format!("{} ({}): {} {}(s) without a value", m.label, m.key, m.total, m.level)}</li> })
+            .collect_view();
+        view! {
+            <p>"Required values this script reads are missing; it would not run there:"</p>
+            <ul class="problems">{items}</ul>
+        }
+    });
+    view! {
+        <section class="card">
+            <h2>"Checks"</h2>
+            <p class=tone>{syntax}</p>
+            {list}
+            {missing_view}
+            <p class="hint">"A clean check says nothing about what a script does."</p>
+        </section>
+    }
+}
+
+pub fn scripts_page(
+    ctx: &PageCtx,
+    rows: Vec<ScriptListRow>,
+    orgs: Vec<OrgRef>,
+    can_edit: bool,
+) -> String {
+    let now = ctx.now;
+    let none = rows.is_empty();
+    let body_rows = rows
+        .into_iter()
+        .map(|r| {
+            let href = format!("/scripts/{}", r.id);
+            let scope = match r.organization {
+                Some(o) => view! { <span>{o}</span> }.into_any(),
+                None => view! { <span class="badge neutral">"global"</span> }.into_any(),
+            };
+            let latest = match (r.latest, r.risk_class) {
+                (Some(n), Some(risk)) => format!("revision {n} · {risk}"),
+                _ => "no revision yet".into(),
+            };
+            let saved = match (r.updated_by, r.updated_at) {
+                (Some(by), Some(at)) => {
+                    view! { <span>{by}" · "<time datetime=fmt::iso(at)>{fmt::ago(now, at)}</time></span> }.into_any()
+                }
+                _ => view! { <span class="muted">"—"</span> }.into_any(),
+            };
+            view! {
+                <tr>
+                    <td data-label="Script"><a href=href><strong>{r.name}</strong></a></td>
+                    <td data-label="Belongs to">{scope}</td>
+                    <td data-label="Language">{r.language_label}</td>
+                    <td data-label="Latest">{latest}</td>
+                    <td data-label="Saved">{saved}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let create = can_edit.then(|| {
+        let options = orgs
+            .into_iter()
+            .map(|o| view! { <option value=o.id.to_string()>{o.name}</option> })
+            .collect_view();
+        view! {
+            <section class="card">
+                <h2>"New script"</h2>
+                <form method="post" action="/scripts" class="stack">
+                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                    <label>"Name"<input type="text" name="name" required=true maxlength="100"/></label>
+                    <label>"Belongs to"<select name="scope">
+                        <option value="global">"Global: every organization"</option>
+                        {options}
+                    </select></label>
+                    <label>"Language"<select name="language">
+                        <option value="powershell">"PowerShell"</option>
+                        <option value="bash">"Bash"</option>
+                        <option value="python">"Python"</option>
+                    </select></label>
+                    <label>"Description (optional)"<textarea name="description" rows="2" maxlength="2000"></textarea></label>
+                    <button type="submit">"Create"</button>
+                </form>
+            </section>
+        }
+    });
+    let body = view! {
+        <h1>"Scripts"</h1>
+        <p class="lead">"Every save is a new revision; none is ever changed or removed. All are drafts for now: nothing runs scripts yet, and approval comes next."</p>
+        {none.then(|| view! { <p class="empty">"No scripts yet."</p> })}
+        <section hidden=none>
+            <table class="list">
+                <thead><tr><th scope="col">"Script"</th><th scope="col">"Belongs to"</th><th scope="col">"Language"</th><th scope="col">"Latest"</th><th scope="col">"Saved"</th></tr></thead>
+                <tbody>{body_rows}</tbody>
+            </table>
+        </section>
+        {create}
+    };
+    shell("Scripts", ctx, Nav::Scripts, None, body)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn script_page(
+    ctx: &PageCtx,
+    s: ScriptView,
+    latest: Option<RevisionView>,
+    problems: Vec<ScriptProblem>,
+    missing: Vec<MissingRequired>,
+    history: Vec<RevisionSummary>,
+    draft: ScriptDraft,
+    can_edit: bool,
+) -> String {
+    let now = ctx.now;
+    let id = s.id;
+    let facts = latest.as_ref().map(|r| {
+        let download = format!("/scripts/{id}/revisions/{}/download", r.number);
+        let view_href = format!("/scripts/{id}/revisions/{}", r.number);
+        view! {
+            <dl class="facts card">
+                <dt>"Latest"</dt><dd><a href=view_href>{format!("Revision {}", r.number)}</a>" · draft · "<a href=download>"download"</a></dd>
+                <dt>"Risk class"</dt><dd>{r.risk_class.clone()}</dd>
+                <dt>"Saved"</dt><dd>{r.author.clone()}" · "<time datetime=fmt::iso(r.created_at)>{fmt::timestamp(r.created_at)}</time></dd>
+                <dt>"SHA-256"</dt><dd class="mono">{r.hash.clone()}</dd>
+            </dl>
+        }
+    });
+    let checks = latest
+        .as_ref()
+        .map(|r| script_checks(r, &problems, &missing));
+    let editor = if can_edit {
+        let action = format!("/scripts/{id}/revisions");
+        let risks = [
+            ("C0", "C0: read-only"),
+            ("C1", "C1: bounded and reversible"),
+            (
+                "C2",
+                "C2: consequential (each run will need a second approval)",
+            ),
+            ("C3", "C3: irreversible (interactive, one device at a time)"),
+        ]
+        .into_iter()
+        .map(|(v, l)| view! { <option value=v selected=draft.risk_class == v>{l}</option> })
+        .collect_view();
+        let accept = format!(".{},.txt", s.extension);
+        let save_label = format!("Save as revision {}", draft.base + 1);
+        view! {
+            <section class="card">
+                <h2>{if draft.base == 0 { "First revision" } else { "Edit" }}</h2>
+                <form method="post" action=action class="stack">
+                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                    <input type="hidden" name="base" value=draft.base.to_string()/>
+                    <label>{format!("Script ({})", s.language_label)}
+                        <textarea id="source" name="source" class="code tall" rows="24" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off">{textarea_text(&draft.source)}</textarea>
+                    </label>
+                    <p class="hint">"Tab inserts a tab; Esc then Tab moves on. Values are never put into the text: read them as parameters."</p>
+                    <div hidden=true>
+                        <label>"Or load a file (review it before saving)"<input type="file" id="upload" accept=accept data-max=MAX_SCRIPT_BYTES.to_string()/></label>
+                    </div>
+                    <p id="upload-status" class="hint" aria-live="polite"></p>
+                    <label>"Parameters"
+                        <textarea name="parameters" class="code" rows="5" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off">{textarea_text(&draft.parameters)}</textarea>
+                    </label>
+                    <p class="hint">"One per line: "<span class="mono">"Share = {{org.backup_share}}"</span>", "<span class="mono">"Retries = \"3\""</span>", or "<span class="mono">"Reason = ask \"Why?\""</span>". Fields: global, org, device."</p>
+                    <label>"Risk class"<select name="risk_class">{risks}</select></label>
+                    <label>"What changed (optional)"<input type="text" name="note" maxlength="500" value=draft.note.clone()/></label>
+                    <button type="submit">{save_label}</button>
+                </form>
+            </section>
+        }
+        .into_any()
+    } else {
+        match &latest {
+            Some(r) => {
+                let params = (!r.parameters.is_empty()).then(|| {
+                    view! { <h2>"Parameters"</h2><pre class="code">{r.parameters.clone()}</pre> }
+                });
+                view! { <section class="card"><h2>"Script"</h2><pre class="code">{r.source.clone()}</pre>{params}</section> }
+                    .into_any()
+            }
+            None => view! { <p class="empty">"No revision yet."</p> }.into_any(),
+        }
+    };
+    let revisions = (!history.is_empty()).then(|| {
+        let rows = history
+            .into_iter()
+            .map(|h| {
+                let href = format!("/scripts/{id}/revisions/{}", h.number);
+                let note = if h.note.is_empty() {
+                    view! { <span class="muted">"—"</span> }.into_any()
+                } else {
+                    view! { <span>{h.note}</span> }.into_any()
+                };
+                view! {
+                    <tr>
+                        <td data-label="Revision"><a href=href>{h.number}</a></td>
+                        <td data-label="Risk">{h.risk_class}</td>
+                        <td data-label="What changed">{note}</td>
+                        <td data-label="By">{h.author}</td>
+                        <td data-label="When"><time datetime=fmt::iso(h.created_at)>{fmt::ago(now, h.created_at)}</time></td>
+                        <td data-label="SHA-256" class="mono">{h.hash_prefix}</td>
+                    </tr>
+                }
+            })
+            .collect_view();
+        view! {
+            <section>
+                <h2>"Revisions"</h2>
+                <table class="list">
+                    <thead><tr><th scope="col">"#"</th><th scope="col">"Risk"</th><th scope="col">"What changed"</th><th scope="col">"By"</th><th scope="col">"When"</th><th scope="col">"SHA-256"</th></tr></thead>
+                    <tbody>{rows}</tbody>
+                </table>
+            </section>
+        }
+    });
+    let description = (!s.description.is_empty())
+        .then(|| view! { <p class="muted notes">{s.description.clone()}</p> });
+    let title = s.name.clone();
+    let body = view! {
+        <p class="crumbs"><a href="/scripts">"Scripts"</a>" / "</p>
+        <h1>{title.clone()}</h1>
+        <p>{s.language_label}" · "{script_scope(&s)}</p>
+        {description}
+        <p class="flash bad">"Drafts only: nothing runs scripts yet, and no revision is approved."</p>
+        {facts}
+        {checks}
+        {editor}
+        {revisions}
+    };
+    shell_with(
+        &title,
+        ctx,
+        Nav::Scripts,
+        None,
+        can_edit.then_some("/static/editor.js"),
+        body,
+    )
+}
+
+/// One revision in full, and what changed since the one before.
+pub fn script_revision_page(
+    ctx: &PageCtx,
+    s: ScriptView,
+    r: RevisionView,
+    problems: Vec<ScriptProblem>,
+    missing: Vec<MissingRequired>,
+    changes: Option<RevisionChanges>,
+) -> String {
+    let id = s.id;
+    let n = r.number;
+    let unchanged = |rows: &[DiffRow]| rows.iter().all(|d| matches!(d, DiffRow::Folded(_)));
+    let changes_view = changes.map(|c| {
+        let (source, params) = (c.source, c.parameters);
+        let risk = c.risk_from.map(|old| view! { <p><strong>{format!("Risk class: {old} → {}", r.risk_class)}</strong></p> });
+        let section = |label: &'static str, rows: Option<Vec<DiffRow>>| match rows {
+            None => view! { <p>{format!("{label}: too large to compare here; download both revisions.")}</p> }.into_any(),
+            Some(rows) if unchanged(&rows) => view! { <p class="muted">{format!("{label}: unchanged.")}</p> }.into_any(),
+            Some(rows) => view! { <h3>{label}</h3>{diff_table(rows)} }.into_any(),
+        };
+        view! {
+            <section class="card">
+                <h2>{format!("Changes from revision {}", n - 1)}</h2>
+                {risk}
+                {section("Script", source)}
+                {section("Parameters", params)}
+            </section>
+        }
+    });
+    let checks = script_checks(&r, &problems, &missing);
+    let download = format!("/scripts/{id}/revisions/{n}/download");
+    let script_href = format!("/scripts/{id}");
+    let note =
+        (!r.note.is_empty()).then(|| view! { <dt>"What changed"</dt><dd>{r.note.clone()}</dd> });
+    let params = (!r.parameters.is_empty())
+        .then(|| view! { <h2>"Parameters"</h2><pre class="code">{r.parameters.clone()}</pre> });
+    let title = format!("{}: revision {n}", s.name);
+    let body = view! {
+        <p class="crumbs"><a href="/scripts">"Scripts"</a>" / "<a href=script_href>{s.name.clone()}</a>" / "</p>
+        <h1>{title.clone()}</h1>
+        <p>{s.language_label}" · "{script_scope(&s)}" · draft"</p>
+        <dl class="facts card">
+            <dt>"Risk class"</dt><dd>{r.risk_class.clone()}</dd>
+            <dt>"Saved"</dt><dd>{r.author.clone()}" · "<time datetime=fmt::iso(r.created_at)>{fmt::timestamp(r.created_at)}</time></dd>
+            {note}
+            <dt>"SHA-256"</dt><dd class="mono">{r.hash.clone()}</dd>
+            <dt>"File"</dt><dd><a href=download>"Download"</a></dd>
+        </dl>
+        {checks}
+        {changes_view}
+        <section class="card">
+            <h2>"Script"</h2>
+            <pre class="code">{r.source.clone()}</pre>
+            {params}
+        </section>
+    };
+    shell(&title, ctx, Nav::Scripts, None, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2000,8 +2397,23 @@ mod tests {
             can_control: true,
             can_manage_devices: true,
             can_retire: true,
+            can_view_scripts: true,
             flash: None,
         }
+    }
+
+    #[test]
+    fn textarea_text_cannot_close_the_textarea() {
+        let html = render(
+            view! { <textarea>{textarea_text("a </textarea><script>x</script> &amp; b")}</textarea> },
+        );
+        assert!(
+            html.contains(
+                "<textarea>\na &lt;/textarea>&lt;script>x&lt;/script> &amp;amp; b</textarea>"
+            ),
+            "{html}"
+        );
+        assert_eq!(html.matches("</textarea>").count(), 1);
     }
 
     fn job(state: ExecState, v: Verification) -> JobRow {

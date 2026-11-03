@@ -177,6 +177,32 @@ async fn console_renders_cleanly_everywhere() {
         .create_org(&server, "Contoso Dental — Northside Clinic")
         .await;
     let _ = admin.enrollment_token(&server, org_b, "60", "5").await;
+    // A script with two revisions, a parameter and a long line (the editor must not widen the page).
+    let r = admin
+        .post(
+            &server,
+            "/scripts",
+            &[
+                ("name", "Clear print queue"),
+                ("scope", "global"),
+                ("language", "powershell"),
+            ],
+        )
+        .await;
+    let script = extract(&r.location(), r"/scripts/([0-9a-f-]{36})").unwrap();
+    for (base, source) in [
+        ("0", "Stop-Service Spooler\nRemove-Item C:\\Windows\\System32\\spool\\PRINTERS\\* -Force\nStart-Service Spooler\n"),
+        ("1", "param($Reason)\nWrite-Output \"Clearing the print queue because: $Reason, on a line long enough to scroll sideways in the editor\"\nStop-Service Spooler\nRemove-Item C:\\Windows\\System32\\spool\\PRINTERS\\* -Force\nStart-Service Spooler\n"),
+    ] {
+        let r = admin
+            .post(
+                &server,
+                &format!("/scripts/{script}/revisions"),
+                &[("base", base), ("source", source), ("parameters", "Reason = ask \"Why?\""), ("risk_class", "C1"), ("note", "")],
+            )
+            .await;
+        assert_eq!(r.status, axum::http::StatusCode::SEE_OTHER, "{}", r.body);
+    }
 
     let session_value = admin.cookie.split_once('=').unwrap().1.to_string();
     let pages: Vec<(String, &str)> = vec![
@@ -194,6 +220,9 @@ async fn console_renders_cleanly_everywhere() {
         ("/audit".into(), "audit"),
         ("/admin".into(), "admin"),
         ("/admin/fields".into(), "admin-fields"),
+        ("/scripts".into(), "scripts"),
+        (format!("/scripts/{script}"), "script"),
+        (format!("/scripts/{script}/revisions/2"), "script-revision"),
         ("/support".into(), "support"),
         ("/account".into(), "account"),
         ("/account/mfa".into(), "mfa-setup"),

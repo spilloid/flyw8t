@@ -42,6 +42,9 @@ pub struct Config {
     /// Encrypts secret custom-field values at rest (AES-256-GCM). 32 bytes, base64. Without it, secret fields can be
     /// defined but no secret value can be stored.
     pub field_key: Option<[u8; 32]>,
+    /// Check script syntax on save with the languages' own parsers, when installed (ADR-0014). `FLYW8T_SCRIPT_CHECKS=off`
+    /// turns it off; every revision then says it was not checked.
+    pub script_checks: bool,
 }
 
 impl Config {
@@ -91,6 +94,11 @@ impl Config {
                     )
                 }
             },
+            script_checks: match var("FLYW8T_SCRIPT_CHECKS").as_deref() {
+                None | Some("on") => true,
+                Some("off") => false,
+                Some(_) => anyhow::bail!("FLYW8T_SCRIPT_CHECKS must be on or off"),
+            },
             trusted_proxies: match var("FLYW8T_TRUSTED_PROXIES") {
                 None => Vec::new(),
                 Some(v) => v
@@ -139,6 +147,7 @@ impl Config {
             trusted_proxies: Vec::new(),
             client_ip_header: "cf-connecting-ip".into(),
             field_key: None,
+            script_checks: true,
         }
     }
 

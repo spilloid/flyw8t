@@ -71,6 +71,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
         can_control: p.can(Permission::RunControlSessions),
         can_manage_devices: p.can(Permission::ManageDevices),
         can_retire: p.can(Permission::RetireDevices),
+        can_view_scripts: p.can(Permission::ViewScripts),
         flash,
     }
 }
@@ -92,6 +93,9 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "field-defined" => (true, "Field defined."),
         "field-archived" => (true, "Field archived: it is hidden and its values can no longer change."),
         "field-saved" => (true, "Value saved."),
+        "script-created" => (true, "Script created. Write its first revision below."),
+        "script-saved" => (true, "Revision saved, as a draft."),
+        "script-unchanged" => (true, "Nothing changed, so no new revision was saved."),
         "mfa-reset" => (true, "Two-step verification reset. That user was signed out everywhere and sets it up again at next sign-in."),
         "mfa-disabled" => (true, "Two-step verification turned off."),
         "codes-regenerated" => (true, "New recovery codes issued; the old ones no longer work."),

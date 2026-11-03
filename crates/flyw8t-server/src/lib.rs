@@ -25,6 +25,8 @@ pub mod queries;
 pub mod ratelimit;
 pub mod registry;
 pub mod remote_access;
+pub mod script_check;
+pub mod scripts;
 pub mod support;
 pub mod totp;
 pub mod web;
@@ -139,6 +141,21 @@ pub fn router(state: Shared) -> Router {
         .route("/admin/fields/{id}/archive", post(fields::archive))
         .route("/fields/{id}/value", post(fields::set_value))
         .route("/fields/{id}/history", get(fields::history))
+        .route("/scripts", get(scripts::list_page).post(scripts::create))
+        .route("/scripts/{id}", get(scripts::script_page))
+        // A script of up to 256 KiB, form-encoded, can be several times that on the wire.
+        .route(
+            "/scripts/{id}/revisions",
+            post(scripts::save).layer(axum::extract::DefaultBodyLimit::max(1536 * 1024)),
+        )
+        .route(
+            "/scripts/{id}/revisions/{number}",
+            get(scripts::revision_page),
+        )
+        .route(
+            "/scripts/{id}/revisions/{number}/download",
+            get(scripts::download),
+        )
         .route("/jobs", get(web::jobs_list))
         .route("/jobs/{id}", get(web::job))
         .route("/jobs/{id}/cancel", post(web::cancel_job))
@@ -178,6 +195,7 @@ pub fn router(state: Shared) -> Router {
             get(support::open_invite).post(support::spend_invite),
         )
         .route("/static/support.js", get(support_script))
+        .route("/static/editor.js", get(editor_script))
         .route("/static/app.css", get(stylesheet))
         .route("/static/icon.svg", get(icon))
         .route("/static/icons/{name}", get(app_icon))
@@ -236,6 +254,17 @@ async fn manifest() -> Response {
             (header::CACHE_CONTROL, "max-age=3600"),
         ],
         flyw8t_web::MANIFEST,
+    )
+        .into_response()
+}
+
+async fn editor_script() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        flyw8t_web::EDITOR_JS,
     )
         .into_response()
 }

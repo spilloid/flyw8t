@@ -24,6 +24,8 @@ pub struct PageCtx {
     pub can_manage_devices: bool,
     /// May retire devices.
     pub can_retire: bool,
+    /// May read the script library.
+    pub can_view_scripts: bool,
     pub flash: Option<Flash>,
 }
 
@@ -446,4 +448,107 @@ pub struct AccountView {
     pub mfa_enabled_at: Option<OffsetDateTime>,
     pub recovery_remaining: i64,
     pub require_mfa: bool,
+}
+
+/// One script in the library list.
+#[derive(Debug, Clone)]
+pub struct ScriptListRow {
+    pub id: Uuid,
+    pub name: String,
+    pub language_label: &'static str,
+    /// The organization it belongs to; `None` for a global script.
+    pub organization: Option<String>,
+    /// The latest revision's number, risk class, author and time; `None` before the first save.
+    pub latest: Option<i32>,
+    pub risk_class: Option<String>,
+    pub updated_by: Option<String>,
+    pub updated_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptView {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    /// `None`: a global script.
+    pub organization: Option<OrgRef>,
+    pub language: String,
+    pub language_label: &'static str,
+    /// File extension for downloads and uploads: `ps1`, `sh`, `py`.
+    pub extension: &'static str,
+}
+
+/// One saved revision, in full.
+#[derive(Debug, Clone)]
+pub struct RevisionView {
+    pub number: i32,
+    pub source: String,
+    pub risk_class: String,
+    pub parameters: String,
+    /// SHA-256 of what it would run, hex.
+    pub hash: String,
+    pub note: String,
+    pub author: String,
+    pub created_at: OffsetDateTime,
+    /// What checked its syntax when it was saved, or why nothing did.
+    pub checker: Option<String>,
+    pub unchecked: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RevisionSummary {
+    pub number: i32,
+    pub risk_class: String,
+    pub note: String,
+    pub author: String,
+    pub created_at: OffsetDateTime,
+    pub hash_prefix: String,
+}
+
+/// Something the checks found: in the `source` or the `parameters`, at a line when known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptProblem {
+    pub section: &'static str,
+    pub line: Option<u32>,
+    pub message: String,
+}
+
+/// What the editor shows: the latest revision, or the text someone submitted that could not be saved.
+#[derive(Debug, Clone)]
+pub struct ScriptDraft {
+    /// The revision the text was based on (0: none yet). A save only succeeds if it is still the latest.
+    pub base: i32,
+    pub source: String,
+    pub parameters: String,
+    pub risk_class: String,
+    pub note: String,
+}
+
+/// One row of a line diff. Line numbers count from 1 in the older and newer text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffRow {
+    Same {
+        old: usize,
+        new: usize,
+        text: String,
+    },
+    Removed {
+        old: usize,
+        text: String,
+    },
+    Added {
+        new: usize,
+        text: String,
+    },
+    /// This many unchanged lines, not shown.
+    Folded(usize),
+}
+
+/// What changed from the revision before. A diff is `None` when it was too large to compute.
+#[derive(Debug, Clone)]
+pub struct RevisionChanges {
+    pub source: Option<Vec<DiffRow>>,
+    pub parameters: Option<Vec<DiffRow>>,
+    /// The earlier risk class, when it changed.
+    pub risk_from: Option<String>,
 }
