@@ -1,4 +1,4 @@
-//! Custom fields: definitions, values at three levels with history, resolution, required values, roles and scope,
+//! Custom fields: definitions, values at four levels with history, resolution, required values, roles and scope,
 //! and secrets that are stored encrypted and never shown again.
 
 mod common;
@@ -780,5 +780,249 @@ async fn defaults_device_requirements_secrets_and_markup_are_handled_exactly() {
         !page.contains("<img src=x") && page.contains("&lt;img src=x"),
         "{page}"
     );
+    server.stop().await;
+}
+
+async fn add_site(server: &TestServer, admin: &Browser, org: Uuid, name: &str) -> Uuid {
+    let r = admin
+        .post(
+            server,
+            &format!("/organizations/{org}/sites"),
+            &[("name", name)],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    sqlx::query_as::<_, (Uuid,)>("SELECT id FROM sites WHERE organization_id = $1 AND name = $2")
+        .bind(org)
+        .bind(name)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap()
+        .0
+}
+
+async fn put_in_site(server: &TestServer, admin: &Browser, device: Uuid, site: Uuid) {
+    let site = site.to_string();
+    let r = admin
+        .post(
+            server,
+            &format!("/devices/{device}/edit"),
+            &[
+                ("display_name", ""),
+                ("tags", ""),
+                ("notes", ""),
+                ("site", site.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn sites_sit_between_the_organization_and_the_device() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let (org_a, dev_a) = org_with_device(&server, &admin, "Org A").await;
+    let (org_b, dev_b) = org_with_device(&server, &admin, "Org B").await;
+    let branch = add_site(&server, &admin, org_a, "Branch").await;
+    let elsewhere = add_site(&server, &admin, org_b, "Elsewhere").await;
+    put_in_site(&server, &admin, dev_a, branch).await;
+    let f = define(
+        &server,
+        &admin,
+        &[
+            ("key", "printer"),
+            ("label", "Printer"),
+            ("kind", "text"),
+            ("scope", "organization"),
+            ("scope", "site"),
+            ("scope", "device"),
+            ("required_at", "device"),
+            ("technician_can_edit", "yes"),
+        ],
+    )
+    .await;
+    assert!(admin
+        .get(&server, "/admin/fields")
+        .await
+        .body
+        .contains("2 device(s) missing"));
+
+    // Organization, then site: the site wins for its devices; the site page shows its own value.
+    set(
+        &server,
+        &admin,
+        f,
+        "organization",
+        Some(org_a),
+        "org-printer",
+    )
+    .await;
+    assert_eq!(
+        set(&server, &admin, f, "site", Some(branch), "branch-printer").await,
+        StatusCode::SEE_OTHER
+    );
+    let page = admin.get(&server, &format!("/devices/{dev_a}")).await.body;
+    assert!(
+        page.contains("branch-printer") && page.contains("from the site"),
+        "{page}"
+    );
+    let page = admin.get(&server, &format!("/sites/{branch}")).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(
+        page.body.contains("branch-printer") && page.body.contains(&format!("/devices/{dev_a}")),
+        "{}",
+        page.body
+    );
+    assert!(admin
+        .get(&server, &format!("/organizations/{org_a}"))
+        .await
+        .body
+        .contains(&format!("/sites/{branch}")));
+
+    // A device value overrides the site's; clearing it inherits from the site again.
+    set(&server, &admin, f, "device", Some(dev_a), "desk-printer").await;
+    let page = admin.get(&server, &format!("/devices/{dev_a}")).await.body;
+    assert!(
+        page.contains("desk-printer") && page.contains("set on this device"),
+        "{page}"
+    );
+    set(&server, &admin, f, "device", Some(dev_a), "").await;
+    let page = admin.get(&server, &format!("/devices/{dev_a}")).await.body;
+    assert!(
+        page.contains("branch-printer") && page.contains("from the site"),
+        "{page}"
+    );
+    let hist = admin
+        .get(
+            &server,
+            &format!("/fields/{f}/history?scope=site&target={branch}"),
+        )
+        .await;
+    assert_eq!(hist.status, StatusCode::OK);
+    assert!(hist.body.contains("branch-printer"), "{}", hist.body);
+
+    // A site value counts for the devices in that site only.
+    set(&server, &admin, f, "site", Some(elsewhere), "far-printer").await;
+    let page = admin.get(&server, "/admin/fields").await.body;
+    assert!(page.contains("1 device(s) missing"), "{page}");
+    put_in_site(&server, &admin, dev_b, elsewhere).await;
+    let page = admin.get(&server, "/admin/fields").await.body;
+    assert!(!page.contains("device(s) missing"), "{page}");
+
+    // Stored against the site alone; audited under its organization.
+    let (scope, o, s, d): (String, Option<Uuid>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "SELECT scope, organization_id, site_id, device_id FROM field_values WHERE value = 'branch-printer'",
+    )
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        (scope.as_str(), o, s, d),
+        ("site", None, Some(branch), None)
+    );
+    let (audited,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM audit_events WHERE action = 'field.set' AND organization_id = $1 AND detail->>'site_id' = $2",
+    )
+    .bind(org_a)
+    .bind(branch.to_string())
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+    // The table holds a site row to its one target.
+    let bad = sqlx::query(
+        "INSERT INTO field_values (field_id, scope, organization_id, site_id, set_by)
+         SELECT $1, 'site', $2, $3, id FROM users LIMIT 1",
+    )
+    .bind(f)
+    .bind(org_a)
+    .bind(branch)
+    .execute(&server.state.db)
+    .await;
+    assert!(bad.is_err());
+
+    // A technician of Org A: their sites only.
+    let tech = technician(&server, &admin, "tech@example.com", org_a).await;
+    assert_eq!(
+        set(&server, &tech, f, "site", Some(branch), "tech-printer").await,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        set(&server, &tech, f, "site", Some(elsewhere), "mine-now").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        tech.get(&server, &format!("/sites/{elsewhere}"))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        tech.get(
+            &server,
+            &format!("/fields/{f}/history?scope=site&target={elsewhere}")
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
+    let far = admin
+        .get(&server, &format!("/sites/{elsewhere}"))
+        .await
+        .body;
+    assert!(
+        far.contains("far-printer") && !far.contains("mine-now"),
+        "{far}"
+    );
+    // Each site, its devices and its history see that site's values and no other's (both ways round, whichever sorts
+    // first).
+    for (site, device, mine, other) in [
+        (branch, dev_a, "tech-printer", "far-printer"),
+        (elsewhere, dev_b, "far-printer", "tech-printer"),
+    ] {
+        for path in [
+            format!("/sites/{site}"),
+            format!("/devices/{device}"),
+            format!("/fields/{f}/history?scope=site&target={site}"),
+        ] {
+            let body = admin.get(&server, &path).await.body;
+            assert!(
+                body.contains(mine) && !body.contains(other),
+                "{path}: {body}"
+            );
+        }
+    }
+
+    // A device requirement may be met by site values alone; not by global ones alone.
+    let r = admin
+        .post(
+            &server,
+            "/admin/fields",
+            &[
+                ("key", "site_only"),
+                ("label", "Site only"),
+                ("kind", "text"),
+                ("scope", "site"),
+                ("required_at", "device"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let r = admin
+        .post(
+            &server,
+            "/admin/fields",
+            &[
+                ("key", "global_only"),
+                ("label", "Global only"),
+                ("kind", "text"),
+                ("scope", "global"),
+                ("required_at", "device"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
     server.stop().await;
 }

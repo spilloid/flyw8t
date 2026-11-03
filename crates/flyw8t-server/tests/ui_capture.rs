@@ -204,6 +204,12 @@ async fn console_renders_cleanly_everywhere() {
         assert_eq!(r.status, axum::http::StatusCode::SEE_OTHER, "{}", r.body);
     }
 
+    let (site,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT id FROM sites WHERE organization_id = $1 LIMIT 1")
+            .bind(org)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
     let session_value = admin.cookie.split_once('=').unwrap().1.to_string();
     let pages: Vec<(String, &str)> = vec![
         ("/".into(), "overview"),
@@ -217,6 +223,7 @@ async fn console_renders_cleanly_everywhere() {
         (format!("/jobs/{unknown}"), "job-unknown"),
         ("/organizations".into(), "organizations"),
         (format!("/organizations/{org}"), "organization"),
+        (format!("/sites/{site}"), "site"),
         ("/audit".into(), "audit"),
         ("/admin".into(), "admin"),
         ("/admin/fields".into(), "admin-fields"),

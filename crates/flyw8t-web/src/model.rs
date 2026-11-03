@@ -41,6 +41,15 @@ pub struct OrgRef {
     pub name: String,
 }
 
+/// A site's page: where it belongs and its devices (as id and name).
+#[derive(Debug, Clone, Serialize)]
+pub struct SitePage {
+    pub id: Uuid,
+    pub name: String,
+    pub organization: OrgRef,
+    pub devices: Vec<OrgRef>,
+}
+
 /// Whether the server holds a live, authenticated connection to the device right now.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -314,7 +323,7 @@ pub struct FieldValueView {
     pub set_at: OffsetDateTime,
 }
 
-/// A field as it applies to one organization or device: the value it resolves to, and where that came from.
+/// A field as it applies to one organization, site or device: the value it resolves to, and where that came from.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedField {
     pub id: Uuid,
@@ -324,9 +333,9 @@ pub struct ResolvedField {
     pub choices: Vec<String>,
     /// What applies here, from `source`.
     pub value: Option<FieldValueView>,
-    /// `device`, `organization`, `global`, `default` or `unset`.
+    /// `device`, `site`, `organization`, `global`, `default` or `unset`.
     pub source: &'static str,
-    /// The value set on this very organization or device, if any (it may be overridden or inherited).
+    /// The value set on this very organization, site or device, if any (it may be overridden or inherited).
     pub own: Option<FieldValueView>,
     /// A value may be set at this level by this field's rules.
     pub settable_here: bool,

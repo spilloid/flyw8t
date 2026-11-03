@@ -1023,6 +1023,7 @@ fn field_input(kind: &str, choices: &[String], current: Option<&str>) -> AnyView
 fn source_label(source: &str) -> &'static str {
     match source {
         "device" => "set on this device",
+        "site" => "from the site",
         "organization" => "from the organization",
         "global" => "global",
         "default" => "default",
@@ -1030,7 +1031,8 @@ fn source_label(source: &str) -> &'static str {
     }
 }
 
-/// Custom fields as they apply to an organization (`scope = "organization"`) or a device (`"device"`).
+/// Custom fields as they apply to an organization (`scope = "organization"`), a site (`"site"`) or a device
+/// (`"device"`).
 pub fn fields_card(
     ctx: &PageCtx,
     fields: &[ResolvedField],
@@ -1078,7 +1080,7 @@ pub fn fields_card(
     view! {
         <section>
             <h2>"Custom fields"</h2>
-            <p class="muted">"Device values override the organization's, which override global values and defaults. Secret values are never shown again once set."</p>
+            <p class="muted">"Device values override the site's, which override the organization's, which override global values and defaults. Secret values are never shown again once set."</p>
             <table class="list">
                 <thead><tr><th scope="col">"Field"</th><th scope="col">"Value"</th><th scope="col">"Set here"</th></tr></thead>
                 <tbody>{rows}</tbody>
@@ -1169,14 +1171,14 @@ pub fn fields_page(
     let no_key = (!secrets_enabled).then(|| {
         view! { <p class="flash bad">"Secret fields can be defined, but no secret value can be stored until FLYW8T_FIELD_KEY is set on the server."</p> }
     });
-    let scope_boxes = [("global", "Global"), ("organization", "Organization"), ("device", "Device")]
+    let scope_boxes = [("global", "Global"), ("organization", "Organization"), ("site", "Site"), ("device", "Device")]
         .into_iter()
         .map(|(v, l)| view! { <label class="inline"><input type="checkbox" name="scope" value=v/>{l}</label> })
         .collect_view();
     let body = view! {
         <p class="crumbs"><a href="/admin">"Administration"</a>" / "</p>
         <h1>"Custom fields"</h1>
-        <p class="lead">"Values scripts will read: set globally, per organization or per device. The most specific value wins. Every change is kept."</p>
+        <p class="lead">"Values scripts will read: set globally, per organization, per site or per device. The most specific value wins. Every change is kept."</p>
         {no_key}
         {missing_view}
         {none.then(|| view! { <p class="empty">"No fields yet. Define one below."</p> })}
@@ -1327,7 +1329,10 @@ pub fn organization_page(
     let sites = org
         .sites
         .iter()
-        .map(|s| view! { <li>{s.name.clone()}</li> })
+        .map(|s| {
+            let href = format!("/sites/{}", s.id);
+            view! { <li><a href=href>{s.name.clone()}</a></li> }
+        })
         .collect_view();
     let devices_href = format!("/devices?org={id}");
     let body = view! {
@@ -1357,6 +1362,30 @@ pub fn organization_page(
         </section>
     };
     shell(&org.name, ctx, Nav::Organizations, None, body)
+}
+
+pub fn site_page(ctx: &PageCtx, site: SitePage, fields: Vec<ResolvedField>) -> String {
+    let org_href = format!("/organizations/{}", site.organization.id);
+    let none = site.devices.is_empty();
+    let devices = site
+        .devices
+        .iter()
+        .map(|d| {
+            let href = format!("/devices/{}", d.id);
+            view! { <li><a href=href>{d.name.clone()}</a></li> }
+        })
+        .collect_view();
+    let body = view! {
+        <p class="crumbs"><a href="/organizations">"Organizations"</a>" / "<a href=org_href>{site.organization.name.clone()}</a>" / "</p>
+        <h1>{site.name.clone()}</h1>
+        <section class="card">
+            <h2>"Devices"</h2>
+            {none.then(|| view! { <p class="empty">"No devices in this site."</p> })}
+            <ul class="plain">{devices}</ul>
+        </section>
+        {fields_card(ctx, &fields, "site", site.id)}
+    };
+    shell(&site.name, ctx, Nav::Organizations, None, body)
 }
 
 pub fn audit_page(ctx: &PageCtx, rows: Vec<AuditRow>) -> String {

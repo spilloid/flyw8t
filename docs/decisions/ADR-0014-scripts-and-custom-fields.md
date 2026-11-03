@@ -128,7 +128,7 @@ API tokens get `scripts:run` only, scoped like `jobs:run`. Editing and approving
 
 ## Build order
 
-1. **Done (2026-11-02).** **Custom fields:** definitions, scoped values with history, required-field reporting, and resolved values on device and organization pages. This executes nothing and is useful on its own. **Then:** sites as a level between organization and device.
+1. **Done (2026-11-02).** **Custom fields:** definitions, scoped values with history, required-field reporting, and resolved values on device and organization pages. This executes nothing and is useful on its own. **Done (2026-11-03):** sites as a level between organization and device (migration 0009; a site value also meets a device requirement for the devices in that site).
 2. **Done (2026-11-02).** **Script library:** drafts, revisions, diffs, server-side checks, upload and download. This executes nothing. As built: a script's language is fixed when it is created; the revision hash also covers the script's id; drafts with problems are saved and their problems shown (approval will refuse them); file upload loads the file into the text box to review before saving, so it needs JavaScript (pasting works without). Checker processes run with an empty environment, a time limit and capped output, but **not yet without network access**: that is left to the deployment (for example a container with no egress) until the isolated worker exists.
 3. **Trust list and approval:** WebAuthn registration for approvers, sudo mode, the signed trust list, pinning at enrollment, and approving revisions.
 4. **Running scripts:** agent verification, parameters as data, Job Objects, single runs, then batches. PowerShell first.

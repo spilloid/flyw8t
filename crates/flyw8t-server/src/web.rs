@@ -558,12 +558,60 @@ pub async fn organization(
     page(&p, async {
         let org = visible_org(&state, &p, id).await?;
         let tokens = queries::enrollment_tokens(&state, id).await?;
-        let fields = crate::fields::resolve(&state, &p, id, None).await?;
+        let fields = crate::fields::resolve(&state, &p, id, None, None).await?;
         html(flyw8t_web::organization_page(
             &ctx(&p, flash(m.m.as_deref())),
             org,
             tokens,
             None,
+            fields,
+        ))
+    })
+    .await
+}
+
+/// A site: its devices and the custom field values set on it.
+pub async fn site(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(id): Path<Uuid>,
+    Query(m): Query<MsgQuery>,
+) -> Response {
+    page(&p, async {
+        p.require(Permission::ViewDevices)?;
+        let (all, orgs) = p.scope();
+        let row: Option<(String, Uuid, String)> = sqlx::query_as(
+            "SELECT s.name, o.id, o.name FROM sites s JOIN organizations o ON o.id = s.organization_id
+              WHERE s.id = $1 AND ($2 OR s.organization_id = ANY($3))",
+        )
+        .bind(id)
+        .bind(all)
+        .bind(&orgs)
+        .fetch_optional(&state.db)
+        .await?;
+        let (name, org_id, org_name) = row.ok_or(AppError::NotFound)?;
+        let devices: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, coalesce(display_name, hostname) FROM devices
+              WHERE site_id = $1 AND retired_at IS NULL ORDER BY lower(coalesce(display_name, hostname)) LIMIT 500",
+        )
+        .bind(id)
+        .fetch_all(&state.db)
+        .await?;
+        let fields = crate::fields::resolve(&state, &p, org_id, Some(id), None).await?;
+        html(flyw8t_web::site_page(
+            &ctx(&p, flash(m.m.as_deref())),
+            flyw8t_web::model::SitePage {
+                id,
+                name,
+                organization: flyw8t_web::model::OrgRef {
+                    id: org_id,
+                    name: org_name,
+                },
+                devices: devices
+                    .into_iter()
+                    .map(|(id, name)| flyw8t_web::model::OrgRef { id, name })
+                    .collect(),
+            },
             fields,
         ))
     })
@@ -658,7 +706,7 @@ pub async fn create_enrollment_token(
             secret,
         };
         let tokens = queries::enrollment_tokens(&state, id).await?;
-        let fields = crate::fields::resolve(&state, &p, id, None).await?;
+        let fields = crate::fields::resolve(&state, &p, id, None, None).await?;
         let mut resp =
             Html(flyw8t_web::organization_page(&ctx(&p, None), org, tokens, Some(revealed), fields)).into_response();
         resp.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());

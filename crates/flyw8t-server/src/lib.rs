@@ -165,6 +165,7 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/organizations/{id}", get(web::organization))
         .route("/organizations/{id}/sites", post(web::add_site))
+        .route("/sites/{id}", get(web::site))
         .route(
             "/organizations/{id}/enrollment-tokens",
             post(web::create_enrollment_token),
