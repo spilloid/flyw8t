@@ -12,6 +12,9 @@ jobs:
   windows:
     name: Windows (agent target) - fmt, clippy, unit tests, model test
     runs-on: windows-latest
+    env:
+      # The runner images have all three parsers: a script syntax check that finds none is a failure here.
+      FLYW8T_TEST_REQUIRE_CHECKERS: bash,python,powershell
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
@@ -35,6 +38,7 @@ jobs:
     env:
       FLYW8T_TEST_DATABASE_URL: postgres://flyw8t:ci-only-password@127.0.0.1:5432/postgres
       TARGET: x86_64-unknown-linux-gnu
+      FLYW8T_TEST_REQUIRE_CHECKERS: bash,python,powershell
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

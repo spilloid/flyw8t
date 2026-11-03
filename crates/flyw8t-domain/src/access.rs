@@ -36,6 +36,10 @@ pub enum Permission {
     ManageFields,
     /// Setting organization and device values of custom fields that allow technicians to.
     EditFieldValues,
+    /// Reading scripts in the script library: global ones, and those of the user's organizations.
+    ViewScripts,
+    /// Creating scripts and saving draft revisions, global ones included (ADR-0014). Drafts never run.
+    EditScripts,
 }
 
 impl Role {
@@ -75,6 +79,8 @@ impl Role {
                     | RunControlSessions
                     | ManageDevices
                     | EditFieldValues
+                    | ViewScripts
+                    | EditScripts
             ),
             Role::ReadOnly => matches!(p, ViewDevices),
         }
@@ -101,6 +107,8 @@ mod tests {
             Permission::RetireDevices,
             Permission::ManageFields,
             Permission::EditFieldValues,
+            Permission::ViewScripts,
+            Permission::EditScripts,
         ] {
             assert!(!Role::ReadOnly.allows(p), "{p:?}");
         }
@@ -114,6 +122,7 @@ mod tests {
         assert!(Role::Technician.allows(Permission::ManageDevices));
         assert!(!Role::Technician.allows(Permission::RetireDevices));
         assert!(!Role::Technician.allows(Permission::ManageFields));
+        assert!(Role::Technician.allows(Permission::EditScripts));
         assert!(!Role::Technician.is_global());
     }
 }

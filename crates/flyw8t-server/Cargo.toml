@@ -37,6 +37,13 @@ sqlx.workspace = true
 argon2.workspace = true
 form_urlencoded = "1"
 
+# Resource limits for script syntax checkers (script_check.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 [dev-dependencies]
 flyw8t-agent.workspace = true
 flyw8t-helper.workspace = true

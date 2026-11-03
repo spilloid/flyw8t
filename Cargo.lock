@@ -912,6 +912,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "hex",
+ "libc",
  "proptest",
  "rcgen",
  "regex-lite",
@@ -930,6 +931,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
