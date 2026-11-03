@@ -2,9 +2,15 @@
 //! problems by line. Parsing never runs the script: PowerShell's `Parser.ParseInput`, `bash -n`, Python's `compile()`.
 //!
 //! Each checker is its own process with an empty environment, the source on standard input and nothing else, a time
-//! limit and capped output, and at most two run at once. When no checker is installed, or one does not finish, the
-//! result says the source was not checked; it never claims the source is fine. A clean check says nothing about what a
-//! script does.
+//! limit, a memory limit (`setrlimit` on Unix, a Job Object on Windows; .NET's own heap limit for PowerShell on Unix,
+//! whose runtime reserves more address space than any useful limit) and capped output. At most two run at once, and a
+//! save waits only briefly for a turn: when the server is busy it says so rather than queueing without bound. When no
+//! checker is installed, or one does not finish, the result says the source was not checked; it never claims the source
+//! is fine. A clean check says nothing about what a script does.
+//!
+//! Not yet: running without network access, or as an identity without the server's credentials. PowerShell resolves
+//! `using module` and `using assembly` while parsing (it may look for, and load, what they name), so a script with
+//! either is not given to it.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -14,6 +20,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
 const TIME_LIMIT: Duration = Duration::from_secs(15);
+/// How long a save waits for a checker to be free before saying the server is busy.
+const ADMISSION_WAIT: Duration = Duration::from_secs(5);
+/// Memory a checker may use: several times what the largest allowed script needs (Python: about 240 MiB for 256 KiB).
+const MEMORY_LIMIT: u64 = 768 * 1024 * 1024;
 const OUTPUT_CAP: u64 = 64 * 1024;
 const MAX_PROBLEMS: usize = 100;
 const MAX_MESSAGE: usize = 300;
@@ -34,6 +44,10 @@ pub struct SyntaxCheck {
     pub problems: Vec<Problem>,
 }
 
+/// Every checker was in use for longer than a save should wait: try again shortly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Busy;
+
 impl SyntaxCheck {
     fn unchecked(why: impl Into<String>) -> Self {
         SyntaxCheck {
@@ -51,6 +65,8 @@ struct Checker {
     /// Exit codes that mean "parsed; problems (if any) are in the output".
     parsed: &'static [i32],
     parse: fn(&str) -> Vec<Problem>,
+    /// A .NET program: its memory is limited through the runtime's heap limit on Unix, not the address space.
+    dotnet: bool,
 }
 
 // Reads the source from standard input and prints `line<TAB>message` for each parse error. Single quotes only: the
@@ -83,6 +99,7 @@ fn checker(language: &str) -> Option<Checker> {
             ],
             parsed: &[0],
             parse: tabbed,
+            dotnet: true,
         }),
         "bash" => Some(Checker {
             label: "bash -n",
@@ -90,6 +107,7 @@ fn checker(language: &str) -> Option<Checker> {
             args: &["--norc", "--noprofile", "-n"],
             parsed: &[0, 1, 2],
             parse: bash_messages,
+            dotnet: false,
         }),
         "python" => Some(Checker {
             label: "Python compile()",
@@ -101,6 +119,7 @@ fn checker(language: &str) -> Option<Checker> {
             args: &["-I", "-S", "-c", PY_CHECK],
             parsed: &[0],
             parse: tabbed,
+            dotnet: false,
         }),
         _ => None,
     }
@@ -165,18 +184,52 @@ fn clip(s: &str) -> String {
     }
 }
 
-pub async fn check(enabled: bool, language: &str, source: &str) -> SyntaxCheck {
+/// `using module` or `using assembly` anywhere (case and spacing as PowerShell allows): PowerShell resolves these while
+/// parsing, so such a script is not parsed here. A false alarm only means "not checked".
+pub fn resolves_while_parsing(source: &str) -> bool {
+    let lower = source.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| c.is_whitespace() || c == ';' || c == '`')
+        .filter(|w| !w.is_empty())
+        .collect();
+    words
+        .windows(2)
+        .any(|w| w[0] == "using" && (w[1] == "module" || w[1] == "assembly"))
+}
+
+pub async fn check(enabled: bool, language: &str, source: &str) -> Result<SyntaxCheck, Busy> {
     if !enabled {
-        return SyntaxCheck::unchecked("Syntax checks are turned off on this server.");
+        return Ok(SyntaxCheck::unchecked(
+            "Syntax checks are turned off on this server.",
+        ));
     }
     let Some(c) = checker(language) else {
-        return SyntaxCheck::unchecked("No checker for this language.");
+        return Ok(SyntaxCheck::unchecked("No checker for this language."));
     };
+    if c.dotnet && resolves_while_parsing(source) {
+        return Ok(SyntaxCheck::unchecked(
+            "Not checked: the script has `using module` or `using assembly`, which PowerShell resolves while parsing.",
+        ));
+    }
     let Some(program) = c.programs.iter().find_map(|p| find(p)) else {
-        return SyntaxCheck::unchecked(format!("Not checked: no {} on this server.", c.label));
+        return Ok(SyntaxCheck::unchecked(format!(
+            "Not checked: no {} on this server.",
+            c.label
+        )));
     };
-    let _slot = RUNNING.acquire().await;
-    outcome(&c, run(&program, c.args, source).await)
+    let _slot = admit(&RUNNING, ADMISSION_WAIT).await?;
+    Ok(outcome(&c, run(&program, &c, MEMORY_LIMIT, source).await))
+}
+
+/// A turn on a checker, or `Busy` if none frees up in time: waiting saves never pile up without bound.
+async fn admit(
+    running: &Semaphore,
+    wait: Duration,
+) -> Result<tokio::sync::SemaphorePermit<'_>, Busy> {
+    match tokio::time::timeout(wait, running.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(Busy),
+    }
 }
 
 /// What a checker's run means: problems only when it parsed the source; anything else is "not checked", never clean.
@@ -208,11 +261,17 @@ fn outcome(c: &Checker, run: Result<(Option<i32>, String), String>) -> SyntaxChe
     }
 }
 
-/// Run a checker: the source on standard input, standard output and error together (each capped), within the limit.
-async fn run(program: &Path, args: &[&str], source: &str) -> Result<(Option<i32>, String), String> {
+/// Run a checker: the source on standard input, standard output and error together (each capped), within the time and
+/// memory limits.
+async fn run(
+    program: &Path,
+    c: &Checker,
+    memory: u64,
+    source: &str,
+) -> Result<(Option<i32>, String), String> {
     let tmp = std::env::temp_dir();
     let mut cmd = tokio::process::Command::new(program);
-    cmd.args(args)
+    cmd.args(c.args)
         .env_clear()
         .current_dir(&tmp)
         .env("HOME", &tmp)
@@ -231,9 +290,50 @@ async fn run(program: &Path, args: &[&str], source: &str) -> Result<(Option<i32>
             }
         }
     }
+    if c.dotnet {
+        // .NET's own limit on its heap, honored by PowerShell 7 everywhere (hex bytes).
+        cmd.env("DOTNET_GCHeapHardLimit", format!("{memory:x}"));
+    }
+    #[cfg(unix)]
+    {
+        let address_space = (!c.dotnet).then_some(memory);
+        let cpu_seconds = TIME_LIMIT.as_secs();
+        // SAFETY: between fork and exec only setrlimit (async-signal-safe) is called, and nothing is allocated.
+        unsafe {
+            cmd.pre_exec(move || {
+                let cpu = libc::rlimit {
+                    rlim_cur: cpu_seconds as libc::rlim_t,
+                    rlim_max: cpu_seconds as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if let Some(bytes) = address_space {
+                    let mem = libc::rlimit {
+                        rlim_cur: bytes as libc::rlim_t,
+                        rlim_max: bytes as libc::rlim_t,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_AS, &mem) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
     let mut child = cmd
         .spawn()
         .map_err(|_| "the checker could not start".to_string())?;
+    // Held until the child is done; dropping it ends the process if it still runs. If the limit cannot be put in place,
+    // the checker is stopped before it is given any input.
+    #[cfg(windows)]
+    let _job = match job::contain(&child, memory) {
+        Some(j) => j,
+        None => {
+            let _ = child.start_kill();
+            return Err("the checker's memory could not be limited".into());
+        }
+    };
     let mut stdin = child.stdin.take().ok_or("no input")?;
     let (stdout, stderr) = (
         child.stdout.take().ok_or("no output")?,
@@ -264,6 +364,56 @@ async fn run(program: &Path, args: &[&str], source: &str) -> Result<(Option<i32>
     tokio::time::timeout(TIME_LIMIT, work)
         .await
         .map_err(|_| "the checker took too long".to_string())?
+}
+
+#[cfg(windows)]
+mod job {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    };
+
+    pub struct Job(HANDLE);
+
+    // SAFETY: a job handle may be used and closed from any thread.
+    unsafe impl Send for Job {}
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from CreateJobObjectW and is closed once. Closing it kills the job's processes.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// Put the process in a new job that caps each process's committed memory and kills them when the job is dropped.
+    pub fn contain(child: &tokio::process::Child, memory: u64) -> Option<Job> {
+        let process = child.raw_handle()? as HANDLE;
+        // SAFETY: plain Win32 calls on a handle we own (the job) and the child's live process handle; the limit
+        // structure is zeroed, then filled, and passed with its own size.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() {
+                return None;
+            }
+            let job = Job(handle);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            info.ProcessMemoryLimit = usize::try_from(memory).ok()?;
+            let set = SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set == 0 || AssignProcessToJobObject(job.0, process) == 0 {
+                return None;
+            }
+            Some(job)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +468,22 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_save_waits_briefly_for_a_checker_then_is_told_the_server_is_busy() {
+        let running = Semaphore::new(2);
+        let wait = Duration::from_millis(200);
+        let (a, b) = (
+            admit(&running, wait).await.unwrap(),
+            admit(&running, wait).await.unwrap(),
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(admit(&running, wait).await.err(), Some(Busy));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(a);
+        assert!(admit(&running, wait).await.is_ok());
+        drop(b);
+    }
+
     #[test]
     fn long_messages_are_clipped() {
         assert_eq!(clip(&"é".repeat(400)).chars().count(), MAX_MESSAGE + 1);
@@ -326,10 +492,49 @@ mod tests {
 
     #[tokio::test]
     async fn turned_off_or_unknown_is_unchecked_never_clean() {
-        let off = check(false, "bash", "echo hi").await;
+        let off = check(false, "bash", "echo hi").await.unwrap();
         assert!(off.checker.is_none() && off.unchecked.is_some());
-        let unknown = check(true, "cobol", "x").await;
+        let unknown = check(true, "cobol", "x").await.unwrap();
         assert!(unknown.checker.is_none() && unknown.unchecked.is_some());
+    }
+
+    #[tokio::test]
+    async fn powershell_never_parses_what_it_would_resolve() {
+        for s in [
+            "using module \\\\host\\share\\M.psm1\nWrite-Output x",
+            "USING   Assembly C:\\x.dll",
+            "using namespace System;using module Foo",
+            "using `\n module Foo",
+        ] {
+            assert!(resolves_while_parsing(s), "{s:?}");
+            let r = check(true, "powershell", s).await.unwrap();
+            assert!(
+                r.checker.is_none() && r.unchecked.unwrap().contains("using module"),
+                "{s:?}"
+            );
+        }
+        assert!(!resolves_while_parsing(
+            "using namespace System.IO\n# a module, using it"
+        ));
+    }
+
+    /// A checker that needs more memory than its limit is stopped and reported as not checked; the same checker under
+    /// the same limit still parses a small script.
+    #[tokio::test]
+    async fn checkers_stop_at_their_memory_limit() {
+        let c = checker("python").unwrap();
+        let Some(program) = c.programs.iter().find_map(|p| find(p)) else {
+            return; // no Python here: covered where it is installed
+        };
+        let limit = 128 * 1024 * 1024;
+        let small = outcome(&c, run(&program, &c, limit, "print(1)\n").await);
+        assert!(small.checker.is_some(), "{small:?}");
+        // About 240 MiB to compile.
+        let big = outcome(
+            &c,
+            run(&program, &c, limit, &"x\n".repeat(128 * 1024)).await,
+        );
+        assert!(big.checker.is_none() && big.unchecked.is_some(), "{big:?}");
     }
 
     /// Runs only where the parser is installed; otherwise it must say so. `FLYW8T_TEST_REQUIRE_CHECKERS=bash,python,...`
@@ -356,8 +561,8 @@ mod tests {
             ),
         ];
         for (lang, bad, good) in cases {
-            let b = check(true, lang, &bad).await;
-            let g = check(true, lang, &good).await;
+            let b = check(true, lang, &bad).await.unwrap();
+            let g = check(true, lang, &good).await.unwrap();
             match &b.checker {
                 None => {
                     assert!(b.unchecked.is_some(), "{lang}: unchecked must say why");

@@ -268,6 +268,14 @@ pub async fn resolve(
 
 /// Required fields and who lacks them, within the viewer's organizations.
 pub async fn missing_required(state: &Shared, p: &Principal) -> sqlx::Result<Vec<MissingRequired>> {
+    missing_required_in(state, p.scope()).await
+}
+
+/// Required fields and who lacks them, within these organizations (`(true, _)`: all of them).
+pub async fn missing_required_in(
+    state: &Shared,
+    (all, orgs): (bool, Vec<Uuid>),
+) -> sqlx::Result<Vec<MissingRequired>> {
     let defs: Vec<FieldDef> = definitions(state, false)
         .await?
         .into_iter()
@@ -276,7 +284,6 @@ pub async fn missing_required(state: &Shared, p: &Principal) -> sqlx::Result<Vec
     if defs.is_empty() {
         return Ok(vec![]);
     }
-    let (all, orgs) = p.scope();
     let org_rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, name FROM organizations WHERE ($1 OR id = ANY($2)) ORDER BY lower(name)",
     )

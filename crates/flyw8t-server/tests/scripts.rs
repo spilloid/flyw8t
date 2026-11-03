@@ -312,6 +312,89 @@ async fn checks_name_bad_parameters_missing_fields_and_placeholders() {
         page.contains("Backup share (backup_share): 1 organization(s) without a value"),
         "{page}"
     );
+
+    // Once Acme has its value, another organization lacking one is no concern of Acme's script; a global script that
+    // reads the field still names it.
+    let other = admin.create_org(&server, "Other").await;
+    let (field,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM field_definitions WHERE key = 'backup_share'")
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    let r = admin
+        .post(
+            &server,
+            &format!("/fields/{field}/value"),
+            &[
+                ("scope", "organization"),
+                ("target", &org.to_string()),
+                ("value", "\\\\nas\\acme"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let page = admin.get(&server, &format!("/scripts/{id}")).await.body;
+    assert!(!page.contains("without a value"), "{page}");
+    let global = create(&server, &admin, "Backup everywhere", "global", "python").await;
+    let r = save(
+        &server,
+        &admin,
+        global,
+        0,
+        "print(1)\n",
+        "Share = {{org.backup_share}}\n",
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let page = admin.get(&server, &format!("/scripts/{global}")).await.body;
+    assert!(
+        page.contains("Backup share (backup_share): 1 organization(s) without a value"),
+        "{page}"
+    );
+    let _ = other;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn metadata_that_is_not_text_is_refused_not_a_server_error() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let id = create(&server, &admin, "Notes", "global", "bash").await;
+    let r = admin
+        .post(
+            &server,
+            &format!("/scripts/{id}/revisions"),
+            &[
+                ("base", "0"),
+                ("source", "echo kept\n"),
+                ("parameters", ""),
+                ("risk_class", "C0"),
+                ("note", "a\0b"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
+    assert!(r.body.contains("echo kept"), "the text is kept: {}", r.body);
+    assert_eq!(revisions(&server, id).await, 0);
+    for (name, description) in [("a\0b", ""), ("ok name", "x\0y")] {
+        let r = admin
+            .post(
+                &server,
+                "/scripts",
+                &[
+                    ("name", name),
+                    ("scope", "global"),
+                    ("language", "bash"),
+                    ("description", description),
+                ],
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{name:?} {description:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

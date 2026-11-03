@@ -353,7 +353,11 @@ fn diff_ops<'a>(old: &[&'a str], new: &[&'a str]) -> Option<Vec<(Op, &'a str)>> 
 /// The diff from `old` to `new` as rows to show: changes with a few lines around them, the rest folded. `None` when too
 /// large to compare.
 pub fn diff(old: &str, new: &str) -> Option<Vec<DiffRow>> {
-    let (o, n): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    // Lines keep their endings, so a final line with and without its newline differ (as their hashes do).
+    let (o, n): (Vec<&str>, Vec<&str>) = (
+        old.split_inclusive('\n').collect(),
+        new.split_inclusive('\n').collect(),
+    );
     let ops = diff_ops(&o, &n)?;
     let near: Vec<bool> = (0..ops.len())
         .map(|k| {
@@ -364,7 +368,10 @@ pub fn diff(old: &str, new: &str) -> Option<Vec<DiffRow>> {
         .collect();
     let (mut rows, mut folded, mut ol, mut nl) = (Vec::new(), 0usize, 0usize, 0usize);
     for (k, (op, text)) in ops.iter().enumerate() {
-        let text = text.to_string();
+        let text = match text.strip_suffix('\n') {
+            Some(t) => t.to_string(),
+            None => format!("{text}  (no newline at end)"),
+        };
         match op {
             Op::Same => {
                 ol += 1;
@@ -497,6 +504,7 @@ fn revision_view(r: &RevisionRow) -> RevisionView {
 async fn problems(
     state: &Shared,
     p: &Principal,
+    org: Option<Uuid>,
     r: &RevisionRow,
 ) -> sqlx::Result<(Vec<ScriptProblem>, Vec<MissingRequired>)> {
     let mut out: Vec<ScriptProblem> = r
@@ -531,7 +539,12 @@ async fn problems(
     let missing = if used.is_empty() {
         vec![]
     } else {
-        crate::fields::missing_required(state, p)
+        // A script of one organization only runs there; a global one, anywhere the viewer sees.
+        let scope = match org {
+            Some(o) => (false, vec![o]),
+            None => p.scope(),
+        };
+        crate::fields::missing_required_in(state, scope)
             .await?
             .into_iter()
             .filter(|m| used.contains(&m.key.as_str()))
@@ -601,13 +614,13 @@ pub async fn create(State(state): State<Shared>, WebUser(p): WebUser, body: Byte
         check_csrf(&p, &form)?;
         p.require(Permission::EditScripts)?;
         let name = form.get("name").unwrap_or("").trim().to_string();
-        if name.is_empty() || name.chars().count() > 100 {
-            return Err(AppError::BadRequest("The name must be 1-100 characters.".into()));
+        if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+            return Err(AppError::BadRequest("The name must be 1-100 characters of text.".into()));
         }
         let lang = form.get("language").and_then(language).ok_or_else(|| AppError::BadRequest("Unknown language.".into()))?.0;
         let description = normalize(form.get("description").unwrap_or("")).trim().to_string();
-        if description.chars().count() > 2000 {
-            return Err(AppError::BadRequest("The description is at most 2000 characters.".into()));
+        if description.chars().count() > 2000 || description.contains('\0') {
+            return Err(AppError::BadRequest("The description is at most 2000 characters of text.".into()));
         }
         let org = match form.get("scope").unwrap_or("") {
             "global" => None,
@@ -660,7 +673,7 @@ async fn editor(
 ) -> AppResult<String> {
     let latest = revision(state, s.id, None).await?;
     let (found, missing) = match &latest {
-        Some(r) => problems(state, p, r).await?,
+        Some(r) => problems(state, p, s.organization_id, r).await?,
         None => (vec![], vec![]),
     };
     let draft = draft.unwrap_or_else(|| match &latest {
@@ -734,6 +747,38 @@ pub async fn script_page(
     )
 }
 
+/// Where a save stands against the latest revision.
+enum Next {
+    /// Someone saved revision `.0` (as `.1`) since the editor was opened.
+    Stale(i32, String),
+    /// The same content as the latest revision: nothing to save.
+    Unchanged,
+    /// Save as this number.
+    Number(i32),
+}
+
+async fn latest_revision<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    script: Uuid,
+) -> sqlx::Result<Option<(i32, Vec<u8>, String)>> {
+    sqlx::query_as(
+        "SELECT r.number, r.content_hash, u.email FROM script_revisions r JOIN users u ON u.id = r.author
+          WHERE r.script_id = $1 ORDER BY r.number DESC LIMIT 1",
+    )
+    .bind(script)
+    .fetch_optional(db)
+    .await
+}
+
+fn next(latest: Option<(i32, Vec<u8>, String)>, base: i32, hash: &[u8; 32]) -> Next {
+    let current = latest.as_ref().map_or(0, |l| l.0);
+    match latest {
+        _ if current != base => Next::Stale(current, latest.map(|l| l.2).unwrap_or_default()),
+        Some((_, h, _)) if h == hash => Next::Unchanged,
+        _ => Next::Number(current + 1),
+    }
+}
+
 /// Save a new revision. The text the person typed is never lost: a problem that stops the save shows the editor again
 /// with their text in it.
 pub async fn save(
@@ -765,8 +810,8 @@ pub async fn save(
             if !RISK_CLASSES.contains(&draft.risk_class.as_str()) {
                 return refuse(StatusCode::UNPROCESSABLE_ENTITY, "Choose a risk class.".into(), draft).await;
             }
-            if draft.note.chars().count() > 500 {
-                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "The note is at most 500 characters.".into(), draft).await;
+            if draft.note.chars().count() > 500 || draft.note.contains('\0') {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "The note is at most 500 characters of text.".into(), draft).await;
             }
             let source = match normalize_source(&draft.source) {
                 Ok(v) => v,
@@ -777,32 +822,38 @@ pub async fn save(
                 Err(e) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, e, draft).await,
             };
             let hash = content_hash(s.id, &s.language, &draft.risk_class, &parameters, &source);
-            // Checked before taking any lock: a parser can take seconds.
-            let check = script_check::check(state.config.script_checks, &s.language, &source).await;
-            let mut tx = state.db.begin().await?;
-            // One save at a time per script, so revision numbers and the "changed meanwhile" check are exact.
-            sqlx::query("SELECT 1 FROM scripts WHERE id = $1 FOR UPDATE").bind(s.id).execute(&mut *tx).await?;
-            let latest: Option<(i32, Vec<u8>, String)> = sqlx::query_as(
-                "SELECT r.number, r.content_hash, u.email FROM script_revisions r JOIN users u ON u.id = r.author
-                  WHERE r.script_id = $1 ORDER BY r.number DESC LIMIT 1",
-            )
-            .bind(s.id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let current = latest.as_ref().map_or(0, |l| l.0);
-            if current != draft.base {
-                drop(tx);
-                let by = latest.map(|l| l.2).unwrap_or_default();
+            let stale = |current: i32, by: String, draft: ScriptDraft| {
                 let msg = format!(
                     "Not saved: {by} saved revision {current} while you were editing. Your text is below; compare it with revision {current} before saving again."
                 );
-                let draft = ScriptDraft { base: current, ..draft };
-                return refuse(StatusCode::CONFLICT, msg, draft).await;
+                refuse(StatusCode::CONFLICT, msg, ScriptDraft { base: current, ..draft })
+            };
+            // Before spending a checker on it: a save that is stale or changes nothing goes no further. (Checked again
+            // under the lock below.)
+            match next(latest_revision(&state.db, s.id).await?, draft.base, &hash) {
+                Next::Stale(current, by) => return stale(current, by, draft).await,
+                Next::Unchanged => return to(format!("/scripts/{id}?m=script-unchanged")),
+                Next::Number(_) => {}
             }
-            if latest.as_ref().is_some_and(|l| l.1 == hash) {
-                return to(format!("/scripts/{id}?m=script-unchanged"));
-            }
-            let number = current + 1;
+            // Checked before taking any lock: a parser can take seconds.
+            let check = match script_check::check(state.config.script_checks, &s.language, &source).await {
+                Ok(c) => c,
+                Err(script_check::Busy) => {
+                    let msg = "Not saved: the server is busy checking other scripts. Your text is below; save again in a moment.";
+                    return refuse(StatusCode::SERVICE_UNAVAILABLE, msg.into(), draft).await;
+                }
+            };
+            let mut tx = state.db.begin().await?;
+            // One save at a time per script, so revision numbers and the "changed meanwhile" check are exact.
+            sqlx::query("SELECT 1 FROM scripts WHERE id = $1 FOR UPDATE").bind(s.id).execute(&mut *tx).await?;
+            let number = match next(latest_revision(&mut *tx, s.id).await?, draft.base, &hash) {
+                Next::Stale(current, by) => {
+                    drop(tx);
+                    return stale(current, by, draft).await;
+                }
+                Next::Unchanged => return to(format!("/scripts/{id}?m=script-unchanged")),
+                Next::Number(n) => n,
+            };
             sqlx::query(
                 "INSERT INTO script_revisions (script_id, number, source, risk_class, parameters, content_hash, syntax_check, note, author)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -846,7 +897,7 @@ pub async fn revision_page(
         let r = revision(&state, s.id, Some(number))
             .await?
             .ok_or(AppError::NotFound)?;
-        let (found, missing) = problems(&state, &p, &r).await?;
+        let (found, missing) = problems(&state, &p, s.organization_id, &r).await?;
         let previous = if number > 1 {
             revision(&state, s.id, Some(number - 1)).await?
         } else {
@@ -1067,6 +1118,27 @@ mod tests {
         }));
         assert_eq!(render(&diff("a\nb\n", "a\nb\n").unwrap()), ["~2"]);
         assert_eq!(render(&diff("", "x\n").unwrap()), ["+x"]);
+    }
+
+    #[test]
+    fn a_dropped_final_newline_is_a_change() {
+        assert_eq!(
+            render(&diff("echo hello\n", "echo hello").unwrap()),
+            ["-echo hello", "+echo hello  (no newline at end)"]
+        );
+    }
+
+    #[test]
+    fn a_save_is_stale_unchanged_or_next() {
+        let h = [1u8; 32];
+        let latest = |n: i32| Some((n, h.to_vec(), "ada@example.test".to_string()));
+        assert!(matches!(next(None, 0, &h), Next::Number(1)));
+        assert!(matches!(next(None, 3, &h), Next::Stale(0, _)));
+        assert!(
+            matches!(next(latest(2), 1, &h), Next::Stale(2, ref by) if by == "ada@example.test")
+        );
+        assert!(matches!(next(latest(2), 2, &h), Next::Unchanged));
+        assert!(matches!(next(latest(2), 2, &[2u8; 32]), Next::Number(3)));
     }
 
     #[test]
