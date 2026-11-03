@@ -497,3 +497,120 @@ async fn technicians_edit_global_and_their_own_scripts_and_never_see_others() {
     assert_eq!(r.status, StatusCode::CONFLICT);
     create(&server, &admin, "Mine", &org_b.to_string(), "bash").await;
 }
+
+/// What a script reads at a level sees that level and those above it only, so missing values are counted there.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn missing_values_are_counted_at_the_level_a_script_reads() {
+    let mut config = test_config(&fresh_database().await);
+    config.script_checks = false;
+    let server = start(config).await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Acme").await;
+    let token = admin.enrollment_token(&server, org, "60", "1").await;
+    let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
+    let device = agent.device_id;
+    std::mem::forget(agent);
+    let (site,): (Uuid,) = sqlx::query_as("SELECT id FROM sites WHERE organization_id = $1")
+        .bind(org)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    let (site_s, device_s, org_s) = (site.to_string(), device.to_string(), org.to_string());
+    let r = admin
+        .post(
+            &server,
+            &format!("/devices/{device}/edit"),
+            &[
+                ("display_name", ""),
+                ("tags", ""),
+                ("notes", ""),
+                ("site", &site_s),
+            ],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    for (key, scopes) in [
+        ("printer", ["site", "device"]),
+        ("share", ["organization", "site"]),
+    ] {
+        let mut form = vec![
+            ("key", key),
+            ("label", key),
+            ("kind", "text"),
+            ("required_at", "device"),
+        ];
+        form.extend(scopes.iter().map(|s| ("scope", *s)));
+        let r = admin.post(&server, "/admin/fields", &form).await;
+        assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    }
+    let field = |key: &'static str| {
+        let db = server.state.db.clone();
+        async move {
+            sqlx::query_as::<_, (Uuid,)>("SELECT id FROM field_definitions WHERE key = $1")
+                .bind(key)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+                .0
+        }
+    };
+    // Every device has its own printer, and the site has a share: both requirements are met.
+    for (key, scope, target) in [("printer", "device", &device_s), ("share", "site", &site_s)] {
+        let r = admin
+            .post(
+                &server,
+                &format!("/fields/{}/value", field(key).await),
+                &[
+                    ("scope", scope),
+                    ("target", target.as_str()),
+                    ("value", "x"),
+                ],
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    }
+    assert!(!admin
+        .get(&server, "/admin/fields")
+        .await
+        .body
+        .contains("device(s) missing"));
+
+    let script = create(&server, &admin, "Levels", &org_s, "python").await;
+    let page = |params: &'static str| {
+        let (server, admin) = (&server, &admin);
+        async move {
+            let n: (i32,) = sqlx::query_as(
+                "SELECT coalesce(max(number), 0) FROM script_revisions WHERE script_id = $1",
+            )
+            .bind(script)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+            let r = save(server, admin, script, n.0, "print(1)\n", params).await;
+            assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+            admin.get(server, &format!("/scripts/{script}")).await.body
+        }
+    };
+    // A site-level read cannot see the device's printer; an organization-level read cannot see the site's share.
+    let body = page("P = {{site.printer}}\n").await;
+    assert!(
+        body.contains("printer (printer): 1 site(s) without a value"),
+        "{body}"
+    );
+    let body = page("S = {{org.share}}\n").await;
+    assert!(
+        body.contains("share (share): 1 organization(s) without a value"),
+        "{body}"
+    );
+    // Read where the values are, nothing is missing.
+    let body = page("P = {{device.printer}}\nS = {{site.share}}\nT = {{device.share}}\n").await;
+    assert!(!body.contains("without a value"), "{body}");
+    // A global read of a field with no global value or default.
+    let body = page("S = {{global.share}}\n").await;
+    assert!(
+        body.contains("share (share): no global value or default"),
+        "{body}"
+    );
+    server.stop().await;
+}

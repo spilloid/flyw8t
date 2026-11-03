@@ -351,7 +351,7 @@ pub struct ResolvedField {
 pub struct MissingRequired {
     pub key: String,
     pub label: String,
-    /// `organization` or `device`.
+    /// `organization` or `device` (a field's own requirement); for what a script reads, also `global` or `site`.
     pub level: &'static str,
     /// (id, name), at most 50.
     pub targets: Vec<(Uuid, String)>,

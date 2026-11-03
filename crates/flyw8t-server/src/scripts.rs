@@ -522,27 +522,19 @@ async fn problems(
         .collect();
     out.extend(check_references(&params, &infos));
     out.sort_by_key(|x| (x.section != "parameters", x.line));
-    let used: Vec<&str> = params
+    let used: Vec<(String, String)> = params
         .iter()
         .filter_map(|p| match &p.source {
-            ParamSource::Field { key, .. } => Some(key.as_str()),
+            ParamSource::Field { level, key } => Some((level.clone(), key.clone())),
             _ => None,
         })
         .collect();
-    let missing = if used.is_empty() {
-        vec![]
-    } else {
-        // A script of one organization only runs there; a global one, anywhere the viewer sees.
-        let scope = match org {
-            Some(o) => (false, vec![o]),
-            None => p.scope(),
-        };
-        crate::fields::missing_required_in(state, scope)
-            .await?
-            .into_iter()
-            .filter(|m| used.contains(&m.key.as_str()))
-            .collect()
+    // A script of one organization only runs there; a global one, anywhere the viewer sees.
+    let scope = match org {
+        Some(o) => (false, vec![o]),
+        None => p.scope(),
     };
+    let missing = crate::fields::unresolved_in(state, scope, &used).await?;
     Ok((out, missing))
 }
 

@@ -371,6 +371,117 @@ pub async fn missing_required_in(
     Ok(out)
 }
 
+/// For each required field a script reads at a level (`global`, `org`, `site` or `device`): the places at that level, within
+/// these organizations, where the reference would find no value. A reference reads only its own level and those above it
+/// (a `{{site.key}}` never sees a device's value), so this is not the field's own requirement, which may be met lower down.
+pub async fn unresolved_in(
+    state: &Shared,
+    (all, orgs): (bool, Vec<Uuid>),
+    refs: &[(String, String)],
+) -> sqlx::Result<Vec<MissingRequired>> {
+    let defs: Vec<FieldDef> = definitions(state, false)
+        .await?
+        .into_iter()
+        .filter(|d| d.required_at.is_some())
+        .collect();
+    if refs.is_empty() || defs.is_empty() {
+        return Ok(vec![]);
+    }
+    let org_rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, name FROM organizations WHERE ($1 OR id = ANY($2)) ORDER BY lower(name)",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .fetch_all(&state.db)
+    .await?;
+    let site_rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT id, organization_id, name FROM sites WHERE ($1 OR organization_id = ANY($2)) ORDER BY lower(name)",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .fetch_all(&state.db)
+    .await?;
+    let device_rows: Vec<(Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT id, organization_id, site_id, coalesce(display_name, hostname) FROM devices
+          WHERE retired_at IS NULL AND ($1 OR organization_id = ANY($2)) ORDER BY lower(coalesce(display_name, hostname))",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .fetch_all(&state.db)
+    .await?;
+    let set: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT field_id, scope, coalesce(organization_id, site_id, device_id) FROM (
+             SELECT DISTINCT ON (field_id, scope, organization_id, site_id, device_id)
+                    field_id, scope, organization_id, site_id, device_id,
+                    value IS NOT NULL OR secret IS NOT NULL AS present
+               FROM field_values
+              ORDER BY field_id, scope, organization_id, site_id, device_id, set_at DESC, id DESC) latest
+          WHERE present",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let has = |f: Uuid, scope: &str, target: Option<Uuid>| {
+        set.iter()
+            .any(|(id, s, t)| *id == f && s == scope && *t == target)
+    };
+    let mut out = Vec::new();
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for (level, key) in refs {
+        if seen.contains(&(level.as_str(), key.as_str())) {
+            continue;
+        }
+        seen.push((level, key));
+        let Some(d) = defs.iter().find(|d| &d.key == key) else {
+            continue;
+        };
+        // Each level sees its own value, then everything above it.
+        let global = d.default_value.is_some() || has(d.id, "global", None);
+        let org_ok = |o: Uuid| global || has(d.id, "organization", Some(o));
+        let site_ok = |s: Uuid, o: Uuid| org_ok(o) || has(d.id, "site", Some(s));
+        let (name, targets): (&'static str, Vec<(Uuid, String)>) = match level.as_str() {
+            "global" if global => ("global", vec![]),
+            "global" => ("global", vec![(Uuid::nil(), "global".into())]),
+            "org" => (
+                "organization",
+                org_rows
+                    .iter()
+                    .filter(|(o, _)| !org_ok(*o))
+                    .cloned()
+                    .collect(),
+            ),
+            "site" => (
+                "site",
+                site_rows
+                    .iter()
+                    .filter(|(s, o, _)| !site_ok(*s, *o))
+                    .map(|(s, _, n)| (*s, n.clone()))
+                    .collect(),
+            ),
+            _ => (
+                "device",
+                device_rows
+                    .iter()
+                    .filter(|(dev, o, site, _)| {
+                        !has(d.id, "device", Some(*dev))
+                            && !site.map_or(org_ok(*o), |s| site_ok(s, *o))
+                    })
+                    .map(|(dev, _, _, n)| (*dev, n.clone()))
+                    .collect(),
+            ),
+        };
+        if !targets.is_empty() {
+            out.push(MissingRequired {
+                key: d.key.clone(),
+                label: d.label.clone(),
+                level: name,
+                total: targets.len(),
+                targets: targets.into_iter().take(50).collect(),
+            });
+        }
+    }
+    Ok(out)
+}
+
 fn def_view(d: &FieldDef, global: Option<FieldValueView>) -> FieldDefView {
     FieldDefView {
         id: d.id,

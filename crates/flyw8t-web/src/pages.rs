@@ -2115,7 +2115,17 @@ fn script_checks(
     let missing_view = (!missing.is_empty()).then(|| {
         let items = missing
             .iter()
-            .map(|m| view! { <li>{format!("{} ({}): {} {}(s) without a value", m.label, m.key, m.total, m.level)}</li> })
+            .map(|m| {
+                let text = if m.level == "global" {
+                    format!("{} ({}): no global value or default", m.label, m.key)
+                } else {
+                    format!(
+                        "{} ({}): {} {}(s) without a value",
+                        m.label, m.key, m.total, m.level
+                    )
+                };
+                view! { <li>{text}</li> }
+            })
             .collect_view();
         view! {
             <p>"Required values this script reads are missing; it would not run there:"</p>
