@@ -99,6 +99,8 @@ pub struct Principal {
     /// Digest of the presented session cookie, so a check made under lock can tell that this
     /// exact credential is still the session's (it changes on rotation). `None` for tokens.
     pub session_token: Option<Vec<u8>>,
+    /// The session confirmed a passkey within the last few minutes (ADR-0014 sudo mode). Never true for tokens.
+    pub sudo: bool,
 }
 
 impl Principal {
@@ -126,6 +128,16 @@ impl Principal {
             Ok(())
         } else {
             Err(AppError::Forbidden)
+        }
+    }
+
+    /// For a change that widens what can run: the session must be in sudo mode. If it is not, the person is sent to
+    /// confirm a passkey and then back to `back`, the page the change was made from, to make it again.
+    pub fn require_sudo(&self, back: &str) -> AppResult<()> {
+        if self.sudo && self.channel == Channel::Web {
+            Ok(())
+        } else {
+            Err(AppError::SudoRequired(back.to_string()))
         }
     }
 
@@ -169,6 +181,7 @@ fn principal(
         csrf,
         session_id,
         session_token: None,
+        sudo: false,
     })
 }
 
@@ -198,8 +211,8 @@ pub async fn session_principal(
     let Some(raw) = cookie_value(headers, cookie_name(state)) else {
         return Ok(None);
     };
-    let row: Option<(Uuid, String, Uuid, String, String, String, Vec<Uuid>)> = sqlx::query_as(&format!(
-        "SELECT s.id, s.csrf_token, {USER_COLUMNS}
+    let row: Option<(Uuid, String, bool, Uuid, String, String, String, Vec<Uuid>)> = sqlx::query_as(&format!(
+        "SELECT s.id, s.csrf_token, coalesce(s.sudo_until > now(), false), {USER_COLUMNS}
            FROM sessions s
            JOIN users u ON u.id = s.user_id
            LEFT JOIN user_organizations uo ON uo.user_id = u.id
@@ -210,7 +223,7 @@ pub async fn session_principal(
     .bind(digest(raw))
     .fetch_optional(&state.db)
     .await?;
-    let Some((sid, csrf, uid, email, name, role, orgs)) = row else {
+    let Some((sid, csrf, sudo, uid, email, name, role, orgs)) = row else {
         return Ok(None);
     };
     principal(
@@ -223,6 +236,7 @@ pub async fn session_principal(
     )
     .map(|mut p| {
         p.session_token = Some(digest(raw));
+        p.sudo = sudo;
         Some(p)
     })
 }
@@ -370,7 +384,8 @@ pub async fn promote_session(
     let ttl = state.config.session_ttl;
     let r = sqlx::query(
         "UPDATE sessions SET token_hash = $2, csrf_token = $3, stage = 'full', pending_totp_secret = NULL,
-                mfa_attempts = 0, expires_at = now() + make_interval(secs => $4)
+                mfa_attempts = 0, sudo_until = NULL, webauthn_challenge = NULL, webauthn_purpose = NULL,
+                webauthn_expires_at = NULL, expires_at = now() + make_interval(secs => $4)
           WHERE id = $1 AND revoked_at IS NULL",
     )
     .bind(session_id)
@@ -579,6 +594,7 @@ mod tests {
             csrf: String::new(),
             session_id: None,
             session_token: None,
+            sudo: false,
         }
     }
 

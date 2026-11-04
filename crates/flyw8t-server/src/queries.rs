@@ -649,10 +649,11 @@ pub async fn audit(state: &Shared) -> sqlx::Result<Vec<AuditRow>> {
 }
 
 pub async fn users(state: &Shared) -> sqlx::Result<Vec<UserRow>> {
-    let rows: Vec<(Uuid, String, String, String, Vec<String>, bool, bool)> = sqlx::query_as(
+    let rows: Vec<(Uuid, String, String, String, Vec<String>, bool, bool, i64)> = sqlx::query_as(
         "SELECT u.id, u.email, u.display_name, u.role,
                 coalesce(array_agg(o.name ORDER BY o.name) FILTER (WHERE o.name IS NOT NULL), '{}'),
-                u.disabled_at IS NOT NULL, u.totp_enabled_at IS NOT NULL
+                u.disabled_at IS NOT NULL, u.totp_enabled_at IS NOT NULL,
+                (SELECT count(*) FROM webauthn_credentials w WHERE w.user_id = u.id)
            FROM users u LEFT JOIN user_organizations uo ON uo.user_id = u.id LEFT JOIN organizations o ON o.id = uo.organization_id
           GROUP BY u.id ORDER BY u.email",
     )
@@ -661,7 +662,7 @@ pub async fn users(state: &Shared) -> sqlx::Result<Vec<UserRow>> {
     Ok(rows
         .into_iter()
         .map(
-            |(id, email, display_name, role, organizations, disabled, mfa)| UserRow {
+            |(id, email, display_name, role, organizations, disabled, mfa, passkeys)| UserRow {
                 id,
                 email,
                 display_name,
@@ -669,6 +670,7 @@ pub async fn users(state: &Shared) -> sqlx::Result<Vec<UserRow>> {
                 organizations,
                 disabled,
                 mfa,
+                passkeys,
             },
         )
         .collect())

@@ -182,7 +182,7 @@ async fn db_state(server: &TestServer, id: Uuid) -> String {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn consented_session_relays_signaling_and_ends_cleanly() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let inv = create_invite(&server, &admin).await;
     let mut tech = ws(
         &server,
@@ -348,7 +348,7 @@ async fn consented_session_relays_signaling_and_ends_cleanly() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn access_control_and_cross_site_sockets() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let inv = create_invite(&server, &admin).await;
 
     // Cross-site or Origin-less WebSocket handshakes are refused even with a valid cookie.
@@ -434,7 +434,7 @@ async fn invitations_expire_and_guessing_is_limited() {
     let mut cfg = test_config(&fresh_database().await);
     cfg.support_invite_ttl = Duration::from_secs(1);
     let server = start(cfg).await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let inv = create_invite(&server, &admin).await;
     let db = server.state.db.clone();
     let id = inv.session;
@@ -477,7 +477,7 @@ async fn invitations_expire_and_guessing_is_limited() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn decline_and_technician_revocation() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
 
     // The participant declines.
     let inv = create_invite(&server, &admin).await;
@@ -564,7 +564,7 @@ async fn add_user(
         fields.push(("org", o.as_str()));
     }
     let r = admin.post(server, "/admin/users", &fields).await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/admin?m=user-created", "{}", r.body);
     server.login(email, "long-enough-password").await
 }
 
@@ -582,7 +582,7 @@ async fn audit_rows(server: &TestServer, action: &str) -> Vec<(String, String, S
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn only_the_creator_attaches_and_sessions_are_scoped_to_organizations() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org_a = admin.create_org(&server, "Org A").await;
     let org_b = admin.create_org(&server, "Org B").await;
     let tech = add_user(
@@ -659,7 +659,7 @@ async fn only_the_creator_attaches_and_sessions_are_scoped_to_organizations() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn opening_a_link_spends_nothing_and_one_browser_holds_one_session() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let first = create_invite(&server, &admin).await;
     for _ in 0..3 {
         let r = server
@@ -720,7 +720,7 @@ async fn opening_a_link_spends_nothing_and_one_browser_holds_one_session() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn sockets_check_the_scheme_and_floods_are_cut_off() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let inv = create_invite(&server, &admin).await;
     let path = format!("/api/support/{}/ws", inv.session);
     // Same host and port, different scheme: a different origin.
@@ -761,7 +761,7 @@ async fn sockets_check_the_scheme_and_floods_are_cut_off() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn the_live_session_cap_holds_under_concurrent_creation() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Busy").await.to_string();
     let fields = [("organization", org.as_str())];
     let attempts = (0..10).map(|_| admin.post(&server, "/support", &fields));
@@ -790,7 +790,7 @@ async fn the_live_session_cap_holds_under_concurrent_creation() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn resetting_a_technicians_sign_in_ends_their_live_sessions() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Org").await;
     let tech = add_user(
         &server,
@@ -832,7 +832,7 @@ async fn resetting_a_technicians_sign_in_ends_their_live_sessions() {
     let r = admin
         .post(&server, &format!("/admin/users/{tech_id}/mfa/reset"), &[])
         .await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/admin?m=mfa-reset", "{}", r.body);
     assert_eq!(recv_kind(&mut t, "ended").await["state"], "closed");
     assert_eq!(recv_kind(&mut part, "ended").await["state"], "closed");
     assert_eq!(db_state(&server, inv.session).await, "closed");
@@ -843,7 +843,7 @@ async fn resetting_a_technicians_sign_in_ends_their_live_sessions() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn signing_out_ends_the_sockets_that_session_opened() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let inv = create_invite(&server, &admin).await;
     let mut t = ws(
         &server,
@@ -872,7 +872,7 @@ async fn signing_out_ends_the_sockets_that_session_opened() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn disabling_an_account_ends_its_live_sockets() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Org").await;
     let tech = add_user(
         &server,
@@ -930,7 +930,7 @@ async fn control_needs_the_helper_and_its_own_consent() {
     let mut cfg = test_config(&fresh_database().await);
     cfg.helper_path = Some(helper_file.path().to_path_buf());
     let server = start(cfg).await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Org").await;
     let inv = create_invite_with(&server, &admin, org, "control").await;
     let mut tech = ws(
@@ -1120,7 +1120,7 @@ async fn control_needs_the_helper_and_its_own_consent() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn view_sessions_never_issue_a_helper_and_control_is_permissioned() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Org").await;
     let inv = create_invite_with(&server, &admin, org, "view").await;
     let cookie = spend_code(&server, &inv.code).await.unwrap();
@@ -1173,7 +1173,7 @@ async fn helper_tokens_expire_and_unstarted_helpers_time_out() {
     let mut cfg = test_config(&fresh_database().await);
     cfg.helper_path = Some(helper_file.path().to_path_buf());
     let server = start(cfg).await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Org").await;
     let inv = create_invite_with(&server, &admin, org, "control").await;
     let cookie = spend_code(&server, &inv.code).await.unwrap();
@@ -1230,7 +1230,7 @@ async fn awaiting_helper_session() -> (TestServer, tempfile::NamedTempFile, Uuid
     let mut cfg = test_config(&fresh_database().await);
     cfg.helper_path = Some(helper_file.path().to_path_buf());
     let server = start(cfg).await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Org").await;
     let inv = create_invite_with(&server, &admin, org, "control").await;
     let cookie = spend_code(&server, &inv.code).await.unwrap();

@@ -1998,6 +1998,52 @@ pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
         }
         .into_any(),
     };
+    let sudo = a.sudo_until.map(|t| {
+        view! {
+            <p><span class="badge good">"Sudo mode"</span>" until "{fmt::timestamp(t)}"."</p>
+        }
+    });
+    let passkey_rows = a
+        .passkeys
+        .into_iter()
+        .map(|k| {
+            let url = format!("/account/passkeys/{}/remove", k.id);
+            let used = match k.last_used_at {
+                Some(t) => time_cell(now, t).into_any(),
+                None => view! { <span class="muted">"never"</span> }.into_any(),
+            };
+            view! {
+                <tr>
+                    <td data-label="Name">{k.name}</td>
+                    <td data-label="Added">{time_cell(now, k.created_at)}</td>
+                    <td data-label="Last used">{used}</td>
+                    <td>
+                        <form method="post" action=url class="inline-form">
+                            <input type="hidden" name="csrf" value=csrf.clone()/>
+                            <button type="submit" class="link">"Remove"</button>
+                        </form>
+                    </td>
+                </tr>
+            }
+        })
+        .collect::<Vec<_>>();
+    let passkeys = if passkey_rows.is_empty() {
+        view! {
+            <p><span class="badge neutral">"None"</span>" Changes that widen what can run (custom field definitions, users, API tokens) need one."</p>
+            <p><a class="button" href="/account/passkeys/new">"Add a passkey"</a></p>
+        }
+        .into_any()
+    } else {
+        view! {
+            <table class="list">
+                <thead><tr><th>"Name"</th><th>"Added"</th><th>"Last used"</th><th></th></tr></thead>
+                <tbody>{passkey_rows}</tbody>
+            </table>
+            {sudo}
+            <p><a href="/account/passkeys/new">"Add another"</a>" · "<a href="/sudo?next=/account">"Confirm now (sudo mode)"</a></p>
+        }
+        .into_any()
+    };
     let body = view! {
         <h1>"Your account"</h1>
         <dl class="facts">
@@ -2009,20 +2055,134 @@ pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
             <h2>"Two-step verification"</h2>
             {mfa}
         </section>
+        <section>
+            <h2>"Passkeys and security keys"</h2>
+            {passkeys}
+        </section>
     };
     shell("Your account", ctx, Nav::Account, None, body)
 }
 
+/// A WebAuthn ceremony as a form: `/static/passkey.js` runs it when the form is submitted, fills the hidden fields and
+/// posts. The button starts disabled and the script enables it once it is ready, so a click
+/// before the script has loaded cannot post the form with its ceremony fields empty. `fields` are the visible inputs that go with it.
+fn ceremony_form(
+    c: WebAuthnCeremony,
+    csrf: String,
+    fields: impl IntoView + 'static,
+    button: &'static str,
+) -> impl IntoView {
+    let err = c
+        .error
+        .map(|e| view! { <p class="flash bad" role="alert">{e}</p> });
+    let hidden = [
+        "client_data_json",
+        "attestation_object",
+        "credential_id",
+        "authenticator_data",
+        "signature",
+    ]
+    .map(|n| view! { <input type="hidden" name=n value=""/> });
+    view! {
+        {err}
+        <form method="post" action=c.action id="webauthn" class="stack" data-options=c.options>
+            <input type="hidden" name="csrf" value=csrf/>
+            {fields}
+            {hidden}
+            <button type="submit" disabled=true>{button}</button>
+            <p id="webauthn-status" class="muted" role="status"></p>
+        </form>
+        <noscript><p class="flash bad">"Passkeys need JavaScript in this browser."</p></noscript>
+    }
+}
+
+/// Registering a passkey or security key.
+pub fn passkey_new_page(ctx: &PageCtx, v: PasskeyNewView) -> String {
+    let password = v.needs_password.then(|| view! {
+        <p class="muted">"Your first passkey needs your password, so that someone holding only your signed-in browser cannot add one."</p>
+        <label>"Password"<input type="password" name="password" autocomplete="current-password" required=true/></label>
+    });
+    let code = v.needs_code.then(|| view! {
+        <label>"Current code"<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required=true maxlength="12"/></label>
+    });
+    let fields = view! {
+        <label>"Name"<input type="text" name="name" required=true maxlength="100" placeholder="YubiKey on my keyring"/></label>
+        {password}
+        {code}
+    };
+    let body = view! {
+        <h1>"Add a passkey"</h1>
+        <p class="muted">"A passkey or security key confirms changes that widen what can run (sudo mode), and will sign script approvals. It must check that it is you (a PIN, a fingerprint or your device's unlock), not only be touched."</p>
+        {ceremony_form(v.ceremony, ctx.csrf.clone(), fields, "Add passkey")}
+        <p><a href="/account">"Cancel"</a></p>
+    };
+    shell_with(
+        "Add a passkey",
+        ctx,
+        Nav::Account,
+        None,
+        Some("/static/passkey.js"),
+        body,
+    )
+}
+
+/// Sudo mode: confirm a passkey before a change that widens what can run.
+pub fn sudo_page(ctx: &PageCtx, v: SudoView) -> String {
+    let next = v.next.clone();
+    let inner = match v.ceremony {
+        Some(c) => {
+            let fields = view! { <input type="hidden" name="next" value=next/> };
+            view! {
+                <p class="muted">{format!("Changes to custom field definitions, users, API tokens and two-step verification need a fresh confirmation with your passkey. It lasts {} minutes; then come back and make the change.", v.minutes)}</p>
+                {ceremony_form(c, ctx.csrf.clone(), fields, "Confirm with passkey")}
+            }
+            .into_any()
+        }
+        None => view! {
+            <p>"This change needs a passkey or security key, and you have not added one yet."</p>
+            <p><a class="button" href="/account/passkeys/new">"Add a passkey"</a></p>
+        }
+        .into_any(),
+    };
+    let body = view! {
+        <h1>"Confirm it is you"</h1>
+        {inner}
+        <p><a href=v.next>"Back"</a></p>
+    };
+    shell_with(
+        "Confirm it is you",
+        ctx,
+        Nav::Account,
+        None,
+        Some("/static/passkey.js"),
+        body,
+    )
+}
+
 fn mfa_cell(u: &UserRow, csrf: &str) -> impl IntoView {
-    if !u.mfa {
+    if !u.mfa && u.passkeys == 0 {
         return view! { <span class="badge neutral">"Not set up"</span> }.into_any();
     }
+    let keys = (u.passkeys > 0).then(|| {
+        let n = if u.passkeys == 1 {
+            "1 passkey".to_string()
+        } else {
+            format!("{} passkeys", u.passkeys)
+        };
+        view! { " "<span class="badge good">{n}</span> }
+    });
+    let code = if u.mfa {
+        view! { <span class="badge good">"On"</span> }.into_any()
+    } else {
+        view! { <span class="badge neutral">"No code"</span> }.into_any()
+    };
     let url = format!("/admin/users/{}/mfa/reset", u.id);
     view! {
-        <span class="badge good">"On"</span>
+        {code}
+        {keys}
         <form method="post" action=url class="inline-form">
             <input type="hidden" name="csrf" value=csrf.to_string()/>
-            <button type="submit" class="link" title="Removes their authenticator and recovery codes and signs them out everywhere">"Reset"</button>
+            <button type="submit" class="link" title="Removes their authenticator, recovery codes and passkeys, and signs them out everywhere">"Reset"</button>
         </form>
     }
     .into_any()

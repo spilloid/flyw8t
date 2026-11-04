@@ -19,6 +19,9 @@ pub const SUPPORT_JS: &str = include_str!("support.js");
 /// Script for the script editor page only (ADR-0014), served at `/static/editor.js`.
 pub const EDITOR_JS: &str = include_str!("editor.js");
 
+/// Script for the passkey pages only (registration and sudo mode; ADR-0014), served at `/static/passkey.js`.
+pub const PASSKEY_JS: &str = include_str!("passkey.js");
+
 /// Icon served at `/static/icon.svg` and `/favicon.ico`.
 pub const ICON_SVG: &str = include_str!("icon.svg");
 

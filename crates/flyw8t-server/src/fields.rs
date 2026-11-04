@@ -536,6 +536,7 @@ pub async fn define(State(state): State<Shared>, WebUser(p): WebUser, body: Byte
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
         p.require(Permission::ManageFields)?;
+        p.require_sudo("/admin/fields")?;
         let key = form.get("key").unwrap_or("").trim().to_lowercase();
         let key_ok = (1..=40).contains(&key.len())
             && key.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
@@ -644,6 +645,7 @@ pub async fn archive(
     page(&p, async {
         check_csrf(&p, &Form::parse(&body))?;
         p.require(Permission::ManageFields)?;
+        p.require_sudo("/admin/fields")?;
         let mut tx = state.db.begin().await?;
         let n = sqlx::query("UPDATE field_definitions SET archived_at = now() WHERE id = $1 AND archived_at IS NULL")
             .bind(id)

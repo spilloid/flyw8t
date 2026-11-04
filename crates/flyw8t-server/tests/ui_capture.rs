@@ -233,6 +233,8 @@ async fn console_renders_cleanly_everywhere() {
         ("/support".into(), "support"),
         ("/account".into(), "account"),
         ("/account/mfa".into(), "mfa-setup"),
+        ("/account/passkeys/new".into(), "passkey-new"),
+        ("/sudo?next=/admin".into(), "sudo"),
         (
             "/devices/00000000-0000-0000-0000-000000000000".into(),
             "not-found",

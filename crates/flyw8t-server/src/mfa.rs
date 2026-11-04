@@ -17,7 +17,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use flyw8t_domain::Permission;
-use flyw8t_web::model::{AccountView, Flash, MfaSetupView};
+use flyw8t_web::model::{AccountView, Flash, MfaSetupView, PasskeyRow};
 use serde_json::json;
 use sqlx::PgConnection;
 use std::time::Duration;
@@ -33,7 +33,7 @@ fn csrf_ok(s: &SessionInfo, form: &Form) -> bool {
         .is_some_and(|t| constant_time_eq(t.as_bytes(), s.csrf.as_bytes()))
 }
 
-fn rate_limited(state: &Shared, user: Uuid) -> bool {
+pub(crate) fn rate_limited(state: &Shared, user: Uuid) -> bool {
     !state
         .limiter
         .allow(&format!("mfa-user:{user}"), 10, Duration::from_secs(300))
@@ -66,14 +66,14 @@ async fn spend_attempt(db: &mut PgConnection, session: Uuid) -> AppResult<bool> 
 
 /// Which factor a submitted code satisfied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Spent {
+pub(crate) enum Spent {
     Totp,
     Recovery,
 }
 
 /// Check `input` against the user's enrolled factor and spend it: a TOTP step only if it is
 /// later than the last one accepted (atomic in the database), a recovery code only once.
-async fn spend_factor(
+pub(crate) async fn spend_factor(
     db: &mut PgConnection,
     user: Uuid,
     secret: &[u8],
@@ -413,7 +413,7 @@ pub async fn setup(
 // ---------------------------------------------------------------------------------------
 // Account page (full sessions)
 
-async fn account_view(state: &Shared, user: Uuid) -> AppResult<AccountView> {
+async fn account_view(state: &Shared, user: Uuid, session: Option<Uuid>) -> AppResult<AccountView> {
     let (email, display_name, enabled_at, remaining): (String, String, Option<OffsetDateTime>, i64) =
         sqlx::query_as(
             "SELECT u.email, u.display_name, u.totp_enabled_at,
@@ -423,12 +423,34 @@ async fn account_view(state: &Shared, user: Uuid) -> AppResult<AccountView> {
         .bind(user)
         .fetch_one(&state.db)
         .await?;
+    let passkeys: Vec<(Uuid, String, OffsetDateTime, Option<OffsetDateTime>)> = sqlx::query_as(
+        "SELECT id, name, created_at, last_used_at FROM webauthn_credentials WHERE user_id = $1 ORDER BY created_at",
+    )
+    .bind(user)
+    .fetch_all(&state.db)
+    .await?;
+    let (sudo_until,): (Option<OffsetDateTime>,) = sqlx::query_as(
+        "SELECT CASE WHEN sudo_until > now() THEN sudo_until END FROM sessions WHERE id = $1",
+    )
+    .bind(session)
+    .fetch_one(&state.db)
+    .await?;
     Ok(AccountView {
         email,
         display_name,
         mfa_enabled_at: enabled_at,
         recovery_remaining: remaining,
         require_mfa: state.config.require_mfa,
+        passkeys: passkeys
+            .into_iter()
+            .map(|(id, name, created_at, last_used_at)| PasskeyRow {
+                id,
+                name,
+                created_at,
+                last_used_at,
+            })
+            .collect(),
+        sudo_until,
     })
 }
 
@@ -438,7 +460,7 @@ pub async fn account(
     Query(m): Query<MsgQuery>,
 ) -> Response {
     page(&p, async {
-        let v = account_view(&state, p.user_id).await?;
+        let v = account_view(&state, p.user_id, p.session_id).await?;
         web::html(flyw8t_web::account_page(
             &ctx(&p, web::flash(m.m.as_deref())),
             v,
@@ -449,7 +471,7 @@ pub async fn account(
 
 /// Re-render the account page with an error, for a wrong code on a full session.
 async fn account_error(state: &Shared, p: &auth::Principal, msg: &str) -> AppResult<Response> {
-    let v = account_view(state, p.user_id).await?;
+    let v = account_view(state, p.user_id, p.session_id).await?;
     let flash = Flash {
         ok: false,
         message: msg.into(),
@@ -584,6 +606,7 @@ pub async fn admin_reset(
     page(&p, async {
         check_csrf(&p, &Form::parse(&body))?;
         p.require(Permission::ManageUsers)?;
+        p.require_sudo("/admin")?;
         let mut tx = state.db.begin().await?;
         let email: Option<(String,)> =
             sqlx::query_as("SELECT email FROM users WHERE id = $1 FOR UPDATE")
@@ -594,6 +617,7 @@ pub async fn admin_reset(
             return Err(AppError::NotFound);
         };
         clear_mfa(&mut tx, id).await?;
+        crate::passkeys::remove_all(&mut tx, id).await?;
         auth::revoke_other_sessions(&mut tx, id, None).await?;
         Audit::user(&p, "user.mfa.reset")
             .target("user", id)

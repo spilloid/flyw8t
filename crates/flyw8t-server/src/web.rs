@@ -84,6 +84,8 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "site-added" => (true, "Site added."),
         "token-revoked" => (true, "Token revoked."),
         "user-created" => (true, "User created."),
+        "passkey-added" => (true, "Passkey added."),
+        "passkey-removed" => (true, "Passkey removed."),
         "device-revoked" => (true, "Device credential revoked and its connection closed."),
         "device-updated" => (true, "Device updated."),
         "device-retired" => (true, "Device retired: its credential is revoked and its connection closed."),
@@ -113,6 +115,10 @@ pub struct MsgQuery {
 }
 
 pub fn error_response(ctx: Option<&PageCtx>, e: AppError) -> Response {
+    if let AppError::SudoRequired(back) = &e {
+        let next: String = form_urlencoded::byte_serialize(back.as_bytes()).collect();
+        return Redirect::to(&format!("/sudo?next={next}")).into_response();
+    }
     e.log();
     let status = e.status();
     (
@@ -796,6 +802,7 @@ pub async fn create_user(
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
         p.require(Permission::ManageUsers)?;
+        p.require_sudo("/admin")?;
         let email = form.get("email").unwrap_or("").trim().to_lowercase();
         if !email.contains('@') || email.len() > 254 {
             return Err(AppError::BadRequest("Enter a valid email address.".into()));
@@ -849,6 +856,7 @@ pub async fn create_api_token(
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
         p.require(Permission::ManageUsers)?;
+        p.require_sudo("/admin")?;
         let name = clean_name(form.get("name"))?;
         let mut scopes: Vec<String> = form.all("scope").into_iter().filter(|s| matches!(*s, "read" | "jobs:run")).map(String::from).collect();
         scopes.sort();

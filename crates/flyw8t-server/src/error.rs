@@ -14,6 +14,9 @@ pub enum AppError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    /// The change needs sudo mode; the browser is sent to confirm a passkey, then back to this page.
+    #[error("confirm with your passkey first")]
+    SudoRequired(String),
     #[error("too many attempts; wait a minute and try again")]
     RateLimited,
     #[error("internal error")]
@@ -30,7 +33,7 @@ impl AppError {
     pub fn status(&self) -> StatusCode {
         match self {
             AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::Forbidden | AppError::SudoRequired(_) => StatusCode::FORBIDDEN,
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::BadRequest(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::Conflict(_) => StatusCode::CONFLICT,
