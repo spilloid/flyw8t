@@ -1,7 +1,7 @@
-//! Custom fields (ADR-0014 step 1): values set globally, per organization or per device, resolved device →
-//! organization → global → default. Every change is a new row, so the history of a value is the rows before it.
+//! Custom fields (ADR-0014 step 1): values set globally, per organization, per site or per device, resolved device →
+//! site → organization → global → default. Every change is a new row, so the history of a value is the rows before it.
 //!
-//! Definitions and global values are for administrators (`ManageFields`). Organization and device values are for
+//! Definitions and global values are for administrators (`ManageFields`). Organization, site and device values are for
 //! administrators, and for technicians (`EditFieldValues`) on fields that allow it, in their own organizations. Secret
 //! values are encrypted at rest with the server's field key and never shown again; nothing here runs anything.
 
@@ -25,7 +25,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub const KINDS: &[&str] = &["text", "number", "boolean", "choice", "secret"];
-pub const SCOPES: &[&str] = &["global", "organization", "device"];
+pub const SCOPES: &[&str] = &["global", "organization", "site", "device"];
 const MAX_VALUE: usize = 1000;
 const MASK: &str = "••••••";
 
@@ -148,7 +148,7 @@ async fn definition(state: &Shared, id: Uuid) -> AppResult<FieldDef> {
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct Latest {
     field_id: Uuid,
-    // (One organization and one device are queried at a time, so the scope alone tells the rows apart.)
+    // (One organization, site and device are queried at a time, so the scope alone tells the rows apart.)
     scope: String,
     value: Option<String>,
     has_secret: bool,
@@ -172,23 +172,25 @@ impl Latest {
     }
 }
 
-/// Current rows for the global scope, one organization, and one device (any of them optional).
+/// Current rows for the global scope, one organization, one site and one device (any of them optional).
 async fn latest(
     state: &Shared,
     org: Option<Uuid>,
+    site: Option<Uuid>,
     device: Option<Uuid>,
 ) -> sqlx::Result<Vec<Latest>> {
     sqlx::query_as(
-        "SELECT DISTINCT ON (v.field_id, v.scope, v.organization_id, v.device_id)
-                v.field_id, v.scope, v.organization_id, v.device_id, v.value, v.secret IS NOT NULL AS has_secret,
-                u.email AS set_by, v.set_at
+        "SELECT DISTINCT ON (v.field_id, v.scope, v.organization_id, v.site_id, v.device_id)
+                v.field_id, v.scope, v.value, v.secret IS NOT NULL AS has_secret, u.email AS set_by, v.set_at
            FROM field_values v JOIN users u ON u.id = v.set_by
           WHERE v.scope = 'global'
              OR (v.scope = 'organization' AND v.organization_id = $1)
-             OR (v.scope = 'device' AND v.device_id = $2)
-          ORDER BY v.field_id, v.scope, v.organization_id, v.device_id, v.set_at DESC, v.id DESC",
+             OR (v.scope = 'site' AND v.site_id = $2)
+             OR (v.scope = 'device' AND v.device_id = $3)
+          ORDER BY v.field_id, v.scope, v.organization_id, v.site_id, v.device_id, v.set_at DESC, v.id DESC",
     )
     .bind(org)
+    .bind(site)
     .bind(device)
     .fetch_all(&state.db)
     .await
@@ -205,29 +207,32 @@ pub fn can_edit(p: &Principal, def: &FieldDef, scope: &str) -> bool {
     scope != "global" && def.technician_can_edit && p.can(Permission::EditFieldValues)
 }
 
-/// Every active field as it applies to an organization (`device` = None) or a device in it.
+/// Every active field as it applies to an organization (no site, no device), a site in it (no device), or a device in it
+/// (and in its site, if it has one).
 pub async fn resolve(
     state: &Shared,
     p: &Principal,
     org: Uuid,
+    site: Option<Uuid>,
     device: Option<Uuid>,
 ) -> sqlx::Result<Vec<ResolvedField>> {
     let defs = definitions(state, false).await?;
-    let rows = latest(state, Some(org), device).await?;
+    let rows = latest(state, Some(org), site, device).await?;
     let find = |id: Uuid, scope: &str| {
         rows.iter()
             .find(|r| r.field_id == id && r.scope == scope)
             .and_then(Latest::view)
     };
-    let level = if device.is_some() {
-        "device"
-    } else {
-        "organization"
+    let level = match (site, device) {
+        (_, Some(_)) => "device",
+        (Some(_), None) => "site",
+        (None, None) => "organization",
     };
     Ok(defs
         .into_iter()
         .map(|d| {
             let dev = device.and(find(d.id, "device"));
+            let site_v = site.and(find(d.id, "site"));
             let org_v = find(d.id, "organization");
             let glob = find(d.id, "global");
             let default = d.default_value.clone().map(|v| FieldValueView {
@@ -236,14 +241,22 @@ pub async fn resolve(
                 set_by: "default".into(),
                 set_at: OffsetDateTime::UNIX_EPOCH,
             });
-            let (value, source) = match (dev.clone(), org_v.clone(), glob, default) {
-                (Some(v), ..) => (Some(v), "device"),
-                (None, Some(v), ..) => (Some(v), "organization"),
-                (None, None, Some(v), _) => (Some(v), "global"),
-                (None, None, None, Some(v)) => (Some(v), "default"),
-                _ => (None, "unset"),
+            let own = match level {
+                "device" => dev.clone(),
+                "site" => site_v.clone(),
+                _ => org_v.clone(),
             };
-            let own = if device.is_some() { dev } else { org_v };
+            // The most specific value wins.
+            let (value, source) = [
+                ("device", dev),
+                ("site", site_v),
+                ("organization", org_v),
+                ("global", glob),
+                ("default", default),
+            ]
+            .into_iter()
+            .find_map(|(source, v)| v.map(|v| (Some(v), source)))
+            .unwrap_or((None, "unset"));
             let missing = match d.required_at.as_deref() {
                 Some("organization") if level == "organization" => own.is_none(),
                 Some("device") => level == "device" && value.is_none(),
@@ -291,27 +304,30 @@ pub async fn missing_required_in(
     .bind(&orgs)
     .fetch_all(&state.db)
     .await?;
-    let device_rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT id, organization_id, coalesce(display_name, hostname) FROM devices
+    let device_rows: Vec<(Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT id, organization_id, site_id, coalesce(display_name, hostname) FROM devices
           WHERE retired_at IS NULL AND ($1 OR organization_id = ANY($2)) ORDER BY lower(coalesce(display_name, hostname))",
     )
     .bind(all)
     .bind(&orgs)
     .fetch_all(&state.db)
     .await?;
-    // Every current non-empty value, by (field, scope, target).
-    let set: Vec<(Uuid, String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT field_id, scope, organization_id, device_id FROM (
-             SELECT DISTINCT ON (field_id, scope, organization_id, device_id)
-                    field_id, scope, organization_id, device_id, value IS NOT NULL OR secret IS NOT NULL AS present
-               FROM field_values ORDER BY field_id, scope, organization_id, device_id, set_at DESC, id DESC) latest
+    // Every current non-empty value, by (field, scope, target): the target is the one organization, site or device its
+    // scope names (none for global).
+    let set: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT field_id, scope, coalesce(organization_id, site_id, device_id) FROM (
+             SELECT DISTINCT ON (field_id, scope, organization_id, site_id, device_id)
+                    field_id, scope, organization_id, site_id, device_id,
+                    value IS NOT NULL OR secret IS NOT NULL AS present
+               FROM field_values
+              ORDER BY field_id, scope, organization_id, site_id, device_id, set_at DESC, id DESC) latest
           WHERE present",
     )
     .fetch_all(&state.db)
     .await?;
-    let has = |f: Uuid, scope: &str, org: Option<Uuid>, dev: Option<Uuid>| {
+    let has = |f: Uuid, scope: &str, target: Option<Uuid>| {
         set.iter()
-            .any(|(id, s, o, d)| *id == f && s == scope && *o == org && *d == dev)
+            .any(|(id, s, t)| *id == f && s == scope && *t == target)
     };
     let mut out = Vec::new();
     for d in defs {
@@ -320,22 +336,23 @@ pub async fn missing_required_in(
                 "organization",
                 org_rows
                     .iter()
-                    .filter(|(o, _)| !has(d.id, "organization", Some(*o), None))
+                    .filter(|(o, _)| !has(d.id, "organization", Some(*o)))
                     .cloned()
                     .collect(),
             ),
             _ => {
-                let inherited = d.default_value.is_some() || has(d.id, "global", None, None);
+                let inherited = d.default_value.is_some() || has(d.id, "global", None);
                 let targets = if inherited {
                     vec![]
                 } else {
                     device_rows
                         .iter()
-                        .filter(|(dev, org, _)| {
-                            !has(d.id, "device", None, Some(*dev))
-                                && !has(d.id, "organization", Some(*org), None)
+                        .filter(|(dev, org, site, _)| {
+                            !has(d.id, "device", Some(*dev))
+                                && !site.is_some_and(|s| has(d.id, "site", Some(s)))
+                                && !has(d.id, "organization", Some(*org))
                         })
-                        .map(|(dev, _, name)| (*dev, name.clone()))
+                        .map(|(dev, _, _, name)| (*dev, name.clone()))
                         .collect()
                 };
                 ("device", targets)
@@ -346,6 +363,117 @@ pub async fn missing_required_in(
                 key: d.key,
                 label: d.label,
                 level,
+                total: targets.len(),
+                targets: targets.into_iter().take(50).collect(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// For each required field a script reads at a level (`global`, `org`, `site` or `device`): the places at that level, within
+/// these organizations, where the reference would find no value. A reference reads only its own level and those above it
+/// (a `{{site.key}}` never sees a device's value), so this is not the field's own requirement, which may be met lower down.
+pub async fn unresolved_in(
+    state: &Shared,
+    (all, orgs): (bool, Vec<Uuid>),
+    refs: &[(String, String)],
+) -> sqlx::Result<Vec<MissingRequired>> {
+    let defs: Vec<FieldDef> = definitions(state, false)
+        .await?
+        .into_iter()
+        .filter(|d| d.required_at.is_some())
+        .collect();
+    if refs.is_empty() || defs.is_empty() {
+        return Ok(vec![]);
+    }
+    let org_rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, name FROM organizations WHERE ($1 OR id = ANY($2)) ORDER BY lower(name)",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .fetch_all(&state.db)
+    .await?;
+    let site_rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT id, organization_id, name FROM sites WHERE ($1 OR organization_id = ANY($2)) ORDER BY lower(name)",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .fetch_all(&state.db)
+    .await?;
+    let device_rows: Vec<(Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT id, organization_id, site_id, coalesce(display_name, hostname) FROM devices
+          WHERE retired_at IS NULL AND ($1 OR organization_id = ANY($2)) ORDER BY lower(coalesce(display_name, hostname))",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .fetch_all(&state.db)
+    .await?;
+    let set: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT field_id, scope, coalesce(organization_id, site_id, device_id) FROM (
+             SELECT DISTINCT ON (field_id, scope, organization_id, site_id, device_id)
+                    field_id, scope, organization_id, site_id, device_id,
+                    value IS NOT NULL OR secret IS NOT NULL AS present
+               FROM field_values
+              ORDER BY field_id, scope, organization_id, site_id, device_id, set_at DESC, id DESC) latest
+          WHERE present",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let has = |f: Uuid, scope: &str, target: Option<Uuid>| {
+        set.iter()
+            .any(|(id, s, t)| *id == f && s == scope && *t == target)
+    };
+    let mut out = Vec::new();
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for (level, key) in refs {
+        if seen.contains(&(level.as_str(), key.as_str())) {
+            continue;
+        }
+        seen.push((level, key));
+        let Some(d) = defs.iter().find(|d| &d.key == key) else {
+            continue;
+        };
+        // Each level sees its own value, then everything above it.
+        let global = d.default_value.is_some() || has(d.id, "global", None);
+        let org_ok = |o: Uuid| global || has(d.id, "organization", Some(o));
+        let site_ok = |s: Uuid, o: Uuid| org_ok(o) || has(d.id, "site", Some(s));
+        let (name, targets): (&'static str, Vec<(Uuid, String)>) = match level.as_str() {
+            "global" if global => ("global", vec![]),
+            "global" => ("global", vec![(Uuid::nil(), "global".into())]),
+            "org" => (
+                "organization",
+                org_rows
+                    .iter()
+                    .filter(|(o, _)| !org_ok(*o))
+                    .cloned()
+                    .collect(),
+            ),
+            "site" => (
+                "site",
+                site_rows
+                    .iter()
+                    .filter(|(s, o, _)| !site_ok(*s, *o))
+                    .map(|(s, _, n)| (*s, n.clone()))
+                    .collect(),
+            ),
+            _ => (
+                "device",
+                device_rows
+                    .iter()
+                    .filter(|(dev, o, site, _)| {
+                        !has(d.id, "device", Some(*dev))
+                            && !site.map_or(org_ok(*o), |s| site_ok(s, *o))
+                    })
+                    .map(|(dev, _, _, n)| (*dev, n.clone()))
+                    .collect(),
+            ),
+        };
+        if !targets.is_empty() {
+            out.push(MissingRequired {
+                key: d.key.clone(),
+                label: d.label.clone(),
+                level: name,
                 total: targets.len(),
                 targets: targets.into_iter().take(50).collect(),
             });
@@ -381,7 +509,7 @@ pub async fn admin_page(
     page(&p, async {
         p.require(Permission::ManageFields)?;
         let defs = definitions(&state, true).await?;
-        let globals = latest(&state, None, None).await?;
+        let globals = latest(&state, None, None, None).await?;
         let views = defs
             .iter()
             .map(|d| {
@@ -447,7 +575,9 @@ pub async fn define(State(state): State<Shared>, WebUser(p): WebUser, body: Byte
         let required_at = match form.get("required_at").unwrap_or("") {
             "" => None,
             r @ ("organization" | "device") => {
-                if !scopes.iter().any(|s| s == r) && !(r == "device" && scopes.iter().any(|s| s == "organization")) {
+                // Every device resolves to a value when one may be set on it, its site or its organization.
+                let inherited = r == "device" && scopes.iter().any(|s| s == "organization" || s == "site");
+                if !scopes.iter().any(|s| s == r) && !inherited {
                     return Err(AppError::BadRequest(
                         "A value cannot be required where it cannot be set.".into(),
                     ));
@@ -531,23 +661,31 @@ pub async fn archive(
     .await
 }
 
-/// Which level a value is for, checked against the viewer's organizations. Returns (scope, org, device, the organization
-/// the change belongs to, where to go back to).
-async fn target(
-    state: &Shared,
-    p: &Principal,
-    form: &Form,
-) -> AppResult<(
-    &'static str,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<Uuid>,
-    String,
-)> {
+/// Where a value is set: its scope, the one target column it fills, the organization the change belongs to (for the
+/// audit log), and the page to go back to.
+struct Target {
+    scope: &'static str,
+    org: Option<Uuid>,
+    site: Option<Uuid>,
+    device: Option<Uuid>,
+    belongs: Option<Uuid>,
+    back: String,
+}
+
+/// Which level a value is for, checked against the viewer's organizations.
+async fn target(state: &Shared, p: &Principal, form: &Form) -> AppResult<Target> {
+    let none = |scope, back: String| Target {
+        scope,
+        org: None,
+        site: None,
+        device: None,
+        belongs: None,
+        back,
+    };
     let id = |k: &str| form.get(k).and_then(|v| v.parse::<Uuid>().ok());
     let (all, orgs) = p.scope();
     match form.get("scope").unwrap_or("") {
-        "global" => Ok(("global", None, None, None, "/admin/fields".into())),
+        "global" => Ok(none("global", "/admin/fields".into())),
         "organization" => {
             let org = id("target").ok_or(AppError::NotFound)?;
             if !(all || orgs.contains(&org)) {
@@ -559,13 +697,28 @@ async fn target(
                     .fetch_optional(&state.db)
                     .await?;
             exists.ok_or(AppError::NotFound)?;
-            Ok((
-                "organization",
-                Some(org),
-                None,
-                Some(org),
-                format!("/organizations/{org}"),
-            ))
+            Ok(Target {
+                org: Some(org),
+                belongs: Some(org),
+                ..none("organization", format!("/organizations/{org}"))
+            })
+        }
+        "site" => {
+            let site = id("target").ok_or(AppError::NotFound)?;
+            let row: Option<(Uuid,)> = sqlx::query_as(
+                "SELECT organization_id FROM sites WHERE id = $1 AND ($2 OR organization_id = ANY($3))",
+            )
+            .bind(site)
+            .bind(all)
+            .bind(&orgs)
+            .fetch_optional(&state.db)
+            .await?;
+            let (org,) = row.ok_or(AppError::NotFound)?;
+            Ok(Target {
+                site: Some(site),
+                belongs: Some(org),
+                ..none("site", format!("/sites/{site}"))
+            })
         }
         "device" => {
             let dev = id("target").ok_or(AppError::NotFound)?;
@@ -578,13 +731,11 @@ async fn target(
             .fetch_optional(&state.db)
             .await?;
             let (org,) = row.ok_or(AppError::NotFound)?;
-            Ok((
-                "device",
-                None,
-                Some(dev),
-                Some(org),
-                format!("/devices/{dev}"),
-            ))
+            Ok(Target {
+                device: Some(dev),
+                belongs: Some(org),
+                ..none("device", format!("/devices/{dev}"))
+            })
         }
         _ => Err(AppError::BadRequest("Unknown scope.".into())),
     }
@@ -599,7 +750,14 @@ pub async fn set_value(
     page(&p, async {
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
-        let (scope, org, device, belongs, back) = target(&state, &p, &form).await?;
+        let Target {
+            scope,
+            org,
+            site,
+            device,
+            belongs,
+            back,
+        } = target(&state, &p, &form).await?;
         let mut tx = state.db.begin().await?;
         // Read and share-lock the definition in the same transaction as the write: archiving (which updates the row)
         // either happens first and is seen here, or waits until this value is committed.
@@ -625,12 +783,13 @@ pub async fn set_value(
         };
         let cleared = plain.is_none() && secret.is_none();
         sqlx::query(
-            "INSERT INTO field_values (field_id, scope, organization_id, device_id, value, secret, set_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO field_values (field_id, scope, organization_id, site_id, device_id, value, secret, set_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(id)
         .bind(scope)
         .bind(org)
+        .bind(site)
         .bind(device)
         .bind(&plain)
         .bind(&secret)
@@ -641,7 +800,7 @@ pub async fn set_value(
         let shown = if def.kind == "secret" { None } else { plain.clone() };
         let mut audit = Audit::user(&p, "field.set")
             .target("field", id)
-            .detail(json!({ "key": def.key, "scope": scope, "organization_id": org, "device_id": device, "value": shown, "cleared": cleared }));
+            .detail(json!({ "key": def.key, "scope": scope, "organization_id": org, "site_id": site, "device_id": device, "value": shown, "cleared": cleared }));
         if let Some(o) = belongs {
             audit = audit.org(o);
         }
@@ -673,17 +832,18 @@ pub async fn history(
         }
         let encoded = form_urlencoded::Serializer::new(String::new()).extend_pairs(&form_fields).finish();
         let form = Form::parse(encoded.as_bytes());
-        let (scope, org, device, _, back) = target(&state, &p, &form).await?;
+        let t = target(&state, &p, &form).await?;
         let rows: Vec<(Option<String>, bool, String, OffsetDateTime)> = sqlx::query_as(
             "SELECT v.value, v.secret IS NOT NULL, u.email, v.set_at FROM field_values v JOIN users u ON u.id = v.set_by
-              WHERE v.field_id = $1 AND v.scope = $2
-                AND v.organization_id IS NOT DISTINCT FROM $3 AND v.device_id IS NOT DISTINCT FROM $4
+              WHERE v.field_id = $1 AND v.scope = $2 AND v.organization_id IS NOT DISTINCT FROM $3
+                AND v.site_id IS NOT DISTINCT FROM $4 AND v.device_id IS NOT DISTINCT FROM $5
               ORDER BY v.set_at DESC, v.id DESC LIMIT 200",
         )
         .bind(id)
-        .bind(scope)
-        .bind(org)
-        .bind(device)
+        .bind(t.scope)
+        .bind(t.org)
+        .bind(t.site)
+        .bind(t.device)
         .fetch_all(&state.db)
         .await?;
         let rows = rows
@@ -694,7 +854,7 @@ pub async fn history(
                 set_at,
             })
             .collect();
-        html(flyw8t_web::field_history_page(&ctx(&p, None), &def.label, &def.key, scope, &back, rows))
+        html(flyw8t_web::field_history_page(&ctx(&p, None), &def.label, &def.key, t.scope, &t.back, rows))
     })
     .await
 }

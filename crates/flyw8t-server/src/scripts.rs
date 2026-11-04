@@ -252,14 +252,7 @@ pub fn check_references(params: &[Param], fields: &[FieldInfo]) -> Vec<ScriptPro
         let reachable = match level.as_str() {
             "global" => allows("global") || f.has_default,
             "org" => allows("organization") || allows("global") || f.has_default,
-            "site" => {
-                out.push(problem(
-                    "parameters",
-                    line,
-                    "Site values are not available yet.",
-                ));
-                continue;
-            }
+            "site" => allows("site") || allows("organization") || allows("global") || f.has_default,
             _ => true,
         };
         if !reachable {
@@ -529,27 +522,19 @@ async fn problems(
         .collect();
     out.extend(check_references(&params, &infos));
     out.sort_by_key(|x| (x.section != "parameters", x.line));
-    let used: Vec<&str> = params
+    let used: Vec<(String, String)> = params
         .iter()
         .filter_map(|p| match &p.source {
-            ParamSource::Field { key, .. } => Some(key.as_str()),
+            ParamSource::Field { level, key } => Some((level.clone(), key.clone())),
             _ => None,
         })
         .collect();
-    let missing = if used.is_empty() {
-        vec![]
-    } else {
-        // A script of one organization only runs there; a global one, anywhere the viewer sees.
-        let scope = match org {
-            Some(o) => (false, vec![o]),
-            None => p.scope(),
-        };
-        crate::fields::missing_required_in(state, scope)
-            .await?
-            .into_iter()
-            .filter(|m| used.contains(&m.key.as_str()))
-            .collect()
+    // A script of one organization only runs there; a global one, anywhere the viewer sees.
+    let scope = match org {
+        Some(o) => (false, vec![o]),
+        None => p.scope(),
     };
+    let missing = crate::fields::unresolved_in(state, scope, &used).await?;
     Ok((out, missing))
 }
 
@@ -1040,7 +1025,7 @@ mod tests {
     #[test]
     fn references_must_name_a_field_that_can_have_a_value_there() {
         let (params, _) = parse_parameters(
-            "A = {{org.share}}\nB = {{global.share}}\nC = {{device.gone}}\nD = {{device.old}}\nE = {{global.tag}}\nF = {{site.share}}\nG = {{global.dflt}}\n",
+            "A = {{org.share}}\nB = {{global.share}}\nC = {{device.gone}}\nD = {{device.old}}\nE = {{global.tag}}\nF = {{site.share}}\nG = {{global.dflt}}\nH = {{site.tag}}\n",
         );
         let org = vec!["organization".to_string()];
         let dev = vec!["device".to_string()];
@@ -1074,7 +1059,8 @@ mod tests {
             .iter()
             .map(|x| x.line)
             .collect();
-        assert_eq!(lines, vec![Some(2), Some(3), Some(4), Some(5), Some(6)]);
+        // F: a site inherits the organization's value. H: a device-only field has no value at a site.
+        assert_eq!(lines, vec![Some(2), Some(3), Some(4), Some(5), Some(8)]);
     }
 
     #[test]
