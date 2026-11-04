@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flyw8t: self-hosted RMM that never pretends</title>
+<meta name="description" content="flyw8t is a self-hosted remote monitoring and management platform for MSP technicians, written in Rust. Every job succeeds with evidence, fails with an explanation, or says its outcome is unknown.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#2456c7">
+<meta property="og:title" content="flyw8t: lightweight agents, heavyweight control">
+<meta property="og:description" content="Self-hosted RMM for MSP technicians, in Rust. Every job succeeds with evidence, fails with an explanation, or says its outcome is unknown.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://spilloid.github.io/flyw8t/">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --text: #16191d; --muted: #5d6670; --line: #dde1e6;
+  --accent: #2456c7; --accent-ink: #ffffff; --hero: #0f1b3d; --hero-text: #eef2ff; --hero-muted: #aab6d6;
+  --good-bg: #e3f5e9; --good-fg: #11643a;
+  --bad-bg: #fde8e8; --bad-fg: #a3191f;
+  --unk-bg: #fff2d6; --unk-fg: #7a4d00;
+  --busy-bg: #e5edfd; --busy-fg: #1f469e;
+  --neutral-bg: #eceff2; --neutral-fg: #3c444d;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --surface: #1a1e24; --text: #e6e9ed; --muted: #9aa4af; --line: #2c333b;
+    --accent: #7ea6ff; --accent-ink: #0d1424; --hero: #0b1226; --hero-text: #eef2ff; --hero-muted: #9aa8cc;
+    --good-bg: #13321f; --good-fg: #7fdca2;
+    --bad-bg: #3a1618; --bad-fg: #ff9a9e;
+    --unk-bg: #3a2c0c; --unk-fg: #ffcf73;
+    --busy-bg: #172645; --busy-fg: #9dbbff;
+    --neutral-bg: #262c33; --neutral-fg: #c3cad2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+.mono { font-family: var(--mono); font-size: 0.9em; }
+
+/* top bar */
+.bar { background: var(--hero); color: var(--hero-text); }
+.bar .wrap { display: flex; align-items: center; gap: 1rem; padding-top: 14px; padding-bottom: 14px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 0.55rem; color: inherit; text-decoration: none; font-weight: 700; font-size: 1.15rem; letter-spacing: 0.02em; }
+.brand img { width: 30px; height: 30px; }
+.bar nav { display: flex; gap: 1.1rem; margin-left: auto; flex-wrap: wrap; }
+.bar nav a { color: var(--hero-muted); text-decoration: none; font-size: 0.95rem; }
+.bar nav a:hover { color: var(--hero-text); }
+
+/* hero */
+.hero { background: var(--hero); color: var(--hero-text); padding: 48px 0 72px; overflow: hidden; }
+.hero .wrap { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 48px; align-items: center; }
+.pill { display: inline-block; font-size: 0.8rem; font-weight: 600; padding: 0.2rem 0.65rem; border-radius: 999px; background: rgba(255, 207, 115, 0.14); color: #ffcf73; border: 1px solid rgba(255, 207, 115, 0.35); }
+.hero h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); line-height: 1.08; margin: 18px 0 16px; letter-spacing: -0.02em; }
+.hero h1 span { color: #9dbbff; }
+.hero p.lead { font-size: 1.15rem; color: var(--hero-muted); margin: 0 0 28px; max-width: 34em; }
+.cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.7rem 1.15rem; border-radius: 8px; font-weight: 600; text-decoration: none; border: 1px solid transparent; }
+.btn.primary { background: #7ea6ff; color: #0d1424; }
+.btn.primary:hover { background: #9dbbff; }
+.btn.ghost { color: var(--hero-text); border-color: rgba(238, 242, 255, 0.28); }
+.btn.ghost:hover { border-color: rgba(238, 242, 255, 0.6); }
+.say { margin-top: 18px; font-size: 0.85rem; color: var(--hero-muted); }
+
+/* console mock */
+.console { background: var(--surface); color: var(--text); border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.55); overflow: hidden; font-size: 0.88rem; min-width: 0; }
+.console .chrome { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.console .chrome i { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+.console .chrome b { margin-left: 8px; font-weight: 600; font-size: 0.8rem; color: var(--muted); }
+.console table { width: 100%; border-collapse: collapse; }
+.console th { text-align: left; font-weight: 600; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 12px; }
+.console td { padding: 9px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+.console td small { display: block; color: var(--muted); font-size: 0.78rem; }
+.badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600; white-space: nowrap; }
+.good { background: var(--good-bg); color: var(--good-fg); }
+.bad { background: var(--bad-bg); color: var(--bad-fg); }
+.unk { background: var(--unk-bg); color: var(--unk-fg); }
+.busy { background: var(--busy-bg); color: var(--busy-fg); }
+.neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+
+/* sections */
+section.band { padding: 72px 0; }
+section.band.alt { background: var(--surface); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.eyebrow { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.78rem; font-weight: 700; color: var(--accent); margin: 0 0 8px; }
+h2 { font-size: clamp(1.6rem, 3.2vw, 2.2rem); line-height: 1.15; margin: 0 0 14px; letter-spacing: -0.01em; }
+.intro { color: var(--muted); font-size: 1.08rem; max-width: 42em; margin: 0 0 36px; }
+
+.rule { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.rule div { border-radius: 12px; padding: 22px; border: 1px solid var(--line); background: var(--surface); }
+.rule h3 { margin: 10px 0 6px; font-size: 1.1rem; }
+.rule p { margin: 0; color: var(--muted); }
+blockquote { margin: 0 0 36px; padding: 18px 22px; border-left: 4px solid var(--accent); background: var(--busy-bg); color: var(--text); border-radius: 0 10px 10px 0; font-size: 1.1rem; max-width: 46em; }
+
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; }
+.feature { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+section.band:not(.alt) .feature { background: var(--surface); }
+.feature h3 { margin: 0 0 6px; font-size: 1.05rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.feature p { margin: 0; color: var(--muted); }
+.feature .new { font-size: 0.7rem; }
+
+.checks { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: start; }
+.checks ul { margin: 0; padding-left: 1.2rem; }
+.checks li { margin: 0 0 10px; }
+pre { margin: 0; background: #0d1424; color: #dbe4ff; padding: 18px 20px; border-radius: 12px; overflow-x: auto; font: 0.86rem/1.6 var(--mono); }
+pre .c { color: #7f8db3; }
+
+.status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.status div { border-radius: 12px; padding: 20px 22px; border: 1px solid var(--line); background: var(--surface); }
+.status h3 { margin: 0 0 10px; font-size: 1rem; display: flex; gap: 0.5rem; align-items: center; }
+.status ul { margin: 0; padding-left: 1.1rem; color: var(--muted); }
+.status li { margin-bottom: 6px; }
+
+footer { padding: 36px 0 48px; color: var(--muted); font-size: 0.9rem; }
+footer .wrap { display: flex; gap: 1rem 2rem; flex-wrap: wrap; align-items: center; }
+footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-left: auto; }
+
+@media (max-width: 900px) {
+  .hero .wrap, .checks { grid-template-columns: minmax(0, 1fr); }
+  .rule, .status { grid-template-columns: minmax(0, 1fr); }
+  .hero { padding: 32px 0 56px; }
+  section.band { padding: 56px 0; }
+}
+@media (max-width: 560px) {
+  .bar nav { margin-left: 0; width: 100%; }
+  .console .hide-sm { display: none; }
+}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="">flyw8t</a>
+    <nav aria-label="Site">
+      <a href="#rule">The rule</a>
+      <a href="#features">Features</a>
+      <a href="#checked">How it's checked</a>
+      <a href="#status">Status</a>
+      <a href="https://github.com/spilloid/flyw8t">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<section class="hero">
+  <div class="wrap">
+    <div>
+      <span class="pill">Pre-release · not production-ready yet</span>
+      <h1>Lightweight agents.<br><span>Heavyweight control.</span></h1>
+      <p class="lead">flyw8t is a self-hosted remote monitoring and management platform for MSP technicians, written in Rust. One binary and PostgreSQL. It never tells you something worked unless it can prove it.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/spilloid/flyw8t#try-it">Get started</a>
+        <a class="btn ghost" href="https://github.com/spilloid/flyw8t/releases">Releases</a>
+        <a class="btn ghost" href="https://github.com/spilloid/flyw8t/tree/main/docs">Docs</a>
+      </div>
+      <p class="say">Pronounced “flyweight”. MIT licensed.</p>
+    </div>
+    <div class="console" role="img" aria-label="An example of the flyw8t jobs list: one job succeeded with evidence, one failed with a reason, one has an unknown outcome, and one is running.">
+      <div class="chrome"><i></i><i></i><i></i><b>Jobs</b></div>
+      <table>
+        <thead><tr><th>Action</th><th class="hide-sm">Device</th><th>Outcome</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mono">system.info</span><small>evidence: OS build, uptime, disks</small></td><td class="hide-sm">FRONT-DESK-01</td><td><span class="badge good">succeeded</span></td></tr>
+          <tr><td><span class="mono">net.ping</span><small>host unreachable: 4 of 4 lost</small></td><td class="hide-sm">NAS-GATEWAY</td><td><span class="badge bad">failed</span></td></tr>
+          <tr><td><span class="mono">process.top</span><small>device went silent after delivery</small></td><td class="hide-sm">LAPTOP-0142</td><td><span class="badge unk">outcome unknown</span></td></tr>
+          <tr><td><span class="mono">net.ipconfig</span><small>delivered, waiting for the report</small></td><td class="hide-sm">RECEPTION-PC</td><td><span class="badge busy">running</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="rule">
+  <div class="wrap">
+    <p class="eyebrow">The rule</p>
+    <h2>No green tick it can’t back up.</h2>
+    <blockquote>An operation either succeeds <strong>with evidence</strong>, fails <strong>with an explanation</strong>, or explicitly reports that its outcome is <strong>unknown</strong>. Never pretend otherwise.</blockquote>
+    <div class="rule">
+      <div><span class="badge good">succeeded</span><h3>With evidence</h3><p>The device ran it <em>and</em> what it reported back meets that action’s success contract. Running is not the same as working.</p></div>
+      <div><span class="badge bad">failed</span><h3>With an explanation</h3><p>You see what went wrong, from the device, in words, not a bare exit code.</p></div>
+      <div><span class="badge unk">outcome unknown</span><h3>Honestly unknown</h3><p>A device that goes quiet mid-job gets <span class="mono">outcome_unknown</span>, never a guess either way. You decide what to do next.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="band alt" id="features">
+  <div class="wrap">
+    <p class="eyebrow">What works today</p>
+    <h2>Small, careful, and built to be checked.</h2>
+    <p class="intro">Each of these exists on <span class="mono">main</span> and is covered by tests against a real server, a real database and real agents.</p>
+    <div class="features">
+      <div class="feature"><h3>Windows agent in Rust</h3><p>Runs as a service and makes one outbound TLS WebSocket, so there are no inbound ports. Its device key never leaves the device, and a durable journal runs each job at most once across reconnects, restarts and crashes.</p></div>
+      <div class="feature"><h3>A catalog, not a shell</h3><p>Diagnostics come from a compiled-in catalog (<span class="mono">system.info</span>, <span class="mono">process.top</span>, <span class="mono">net.ipconfig</span>, <span class="mono">net.ping</span>). There are no arbitrary commands, and the agent enforces the catalog itself.</p></div>
+      <div class="feature"><h3>A console that works without JavaScript</h3><p>Server-rendered pages for devices, jobs, organizations, enrollment, audit and administration. It shows whether data is live or cached, and installs on a phone’s home screen.</p></div>
+      <div class="feature"><h3>Attended support</h3><p>Send a code; the person agrees in their own browser and shares the tab or screen they choose. Nothing to install. Screen view only for now.</p></div>
+      <div class="feature"><h3>Devices at scale</h3><p>Names, notes, tags and sites; search and filters; batch changes and runs across hundreds of devices, confirmed with the exact count and done all at once or not at all.</p></div>
+      <div class="feature"><h3>Custom fields <span class="badge busy new">new</span></h3><p>Values set globally, per organization, per site or per device; the most specific wins. Every change is kept, required values are reported until set, and secrets are encrypted at rest and never shown again.</p></div>
+      <div class="feature"><h3>Script library <span class="badge busy new">new</span></h3><p>PowerShell, Bash and Python with permanent, hashed revisions, diffs, and syntax checks by each language’s own parser. Parameters are checked against your custom fields. Scripts don’t run on devices yet: that comes after approval and signing.</p></div>
+      <div class="feature"><h3>Accounts and audit</h3><p>Roles scoped to organizations, two-step sign-in required by default, and an audit log of who did what, from where, under which organization.</p></div>
+      <div class="feature"><h3>API and self-hosting</h3><p>A JSON API with scoped tokens and idempotency keys. One binary plus PostgreSQL: no Redis, no message broker, no SaaS. Docker Compose included.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="checked">
+  <div class="wrap checks">
+    <div>
+      <p class="eyebrow">How it’s checked</p>
+      <h2>Reliability you can read, not just a claim.</h2>
+      <ul>
+        <li>Real agents run real Windows commands against a real server and database, including deliberate crashes mid-job.</li>
+        <li>A model-based test drives the real journal and state machine through thousands of random sequences of lost, duplicated and reordered messages.</li>
+        <li>Headless Chrome checks every console page at three widths, in light and dark.</li>
+        <li>Each change gets an adversarial review by a second AI model and mutation testing. Every round, and what it found, is <a href="https://github.com/spilloid/flyw8t/blob/main/docs/dev-process.md">logged in the repo</a>.</li>
+      </ul>
+    </div>
+    <pre><span class="c"># unit, state machine, model-based property test</span>
+cargo test --workspace
+
+<span class="c"># + PostgreSQL end-to-end, protocol, TLS,
+#   UI capture and two-browser WebRTC</span>
+export FLYW8T_TEST_DATABASE_URL=postgres://…
+cargo test --workspace -- --include-ignored</pre>
+  </div>
+</section>
+
+<section class="band alt" id="status">
+  <div class="wrap">
+    <p class="eyebrow">Status</p>
+    <h2>Honest about where it is.</h2>
+    <p class="intro">flyw8t is a pre-release (<a href="https://github.com/spilloid/flyw8t/releases">v0.1.1</a>). Try it in a lab, not on customers yet. The <a href="https://github.com/spilloid/flyw8t/blob/main/docs/threat-model.md">threat model</a> lists what stands between it and production.</p>
+    <div class="status">
+      <div><h3><span class="badge good">done</span> Works now</h3><ul><li>Windows agent and enrollment</li><li>Catalog diagnostics with honest outcomes</li><li>Attended support (view)</li><li>Device management and batches</li><li>Custom fields and the script library</li></ul></div>
+      <div><h3><span class="badge busy">next</span> In progress</h3><ul><li>Approving and signing script revisions with passkeys</li><li>Running approved scripts on devices</li><li>Remote control, with consent on the device</li></ul></div>
+      <div><h3><span class="badge neutral">later</span> Planned</h3><ul><li>Schedules and policies</li><li>Single sign-on (OIDC)</li><li>Linux and macOS agents</li></ul></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>flyw8t · MIT licensed · built in the open</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/spilloid/flyw8t">Source</a>
+      <a href="https://github.com/spilloid/flyw8t/blob/main/docs/architecture.md">Architecture</a>
+      <a href="https://github.com/spilloid/flyw8t/blob/main/docs/roadmap.md">Roadmap</a>
+      <a href="https://github.com/spilloid/flyw8t/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/spilloid/flyw8t/blob/main/SECURITY.md">Security</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>
