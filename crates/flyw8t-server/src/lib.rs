@@ -57,6 +57,7 @@ pub struct AppState {
     pub remote_access: Box<dyn remote_access::RemoteAccessProvider>,
     pub support: support::SupportHub,
     pub started_unix: u64,
+    pub bodies: BodyGate,
 }
 
 pub type Shared = Arc<AppState>;
@@ -87,6 +88,7 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         remote_access: Box::new(remote_access::NotConfigured),
         support: Default::default(),
         started_unix: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
+        bodies: BodyGate::default(),
     });
     bootstrap_admin(&state).await?;
     Ok(state)
@@ -244,6 +246,10 @@ pub fn router(state: Shared) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
+            whole_body,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             security_headers,
         ))
         .with_state(state)
@@ -348,6 +354,117 @@ async fn metrics_handler(State(state): State<Shared>) -> Response {
             (StatusCode::SERVICE_UNAVAILABLE, "metrics unavailable").into_response()
         }
     }
+}
+
+/// How long a client may take to send a request body.
+pub const BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Bodies being received at once, server-wide and from one address.
+pub const BODIES_IN_FLIGHT: usize = 256;
+pub const BODIES_PER_ADDRESS: u32 = 16;
+/// The body size every route accepts, and the script editor's larger one (as its route's `DefaultBodyLimit` says).
+const BODY_LIMIT: usize = 256 * 1024;
+const SCRIPT_BODY_LIMIT: usize = 1536 * 1024;
+
+/// Requests whose bodies are being read: a bound on the memory a client can make the server hold before it has
+/// shown who it is.
+pub struct BodyGate {
+    total: Arc<tokio::sync::Semaphore>,
+    per_address: std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, u32>>,
+}
+
+impl Default for BodyGate {
+    fn default() -> Self {
+        Self {
+            total: Arc::new(tokio::sync::Semaphore::new(BODIES_IN_FLIGHT)),
+            per_address: std::sync::Mutex::default(),
+        }
+    }
+}
+
+struct AddressSlot<'a>(&'a BodyGate, std::net::IpAddr);
+
+impl Drop for AddressSlot<'_> {
+    fn drop(&mut self) {
+        let mut m = self.0.per_address.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.1);
+            }
+        }
+    }
+}
+
+impl BodyGate {
+    fn admit(
+        &self,
+        ip: std::net::IpAddr,
+    ) -> Option<(tokio::sync::OwnedSemaphorePermit, AddressSlot<'_>)> {
+        {
+            let mut m = self.per_address.lock().unwrap_or_else(|e| e.into_inner());
+            let n = m.entry(ip).or_insert(0);
+            if *n >= BODIES_PER_ADDRESS {
+                return None;
+            }
+            *n += 1;
+        }
+        let slot = AddressSlot(self, ip);
+        let permit = self.total.clone().try_acquire_owned().ok()?;
+        Some((permit, slot))
+    }
+}
+
+/// Read the whole request body before any handler runs. Extractors check the session (and its sudo mode) from the
+/// headers, and handlers read the body afterwards; without this, a client holding a stolen cookie could send the
+/// headers while the session was valid, stall the body, and finish it after the session was signed out or its sudo
+/// mode had ended, and the change would still be made. With it, the session is checked only once the client has
+/// sent everything, so the client no longer controls that window. Because this runs before anyone is known, it is
+/// bounded: each route's own size limit, a deadline, and a cap on bodies in flight in all and from one address.
+async fn whole_body(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    use axum::http::Method;
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map_or(std::net::IpAddr::from([0, 0, 0, 0]), |c| c.0.ip());
+    let ip = client_ip::resolve(
+        peer,
+        req.headers(),
+        &state.config.trusted_proxies,
+        &state.config.client_ip_header,
+    );
+    let Some(_admitted) = state.bodies.admit(ip) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "5")],
+            "too many requests in progress",
+        )
+            .into_response();
+    };
+    let limit = if is_script_save(req.uri().path()) {
+        SCRIPT_BODY_LIMIT
+    } else {
+        BODY_LIMIT
+    };
+    let (parts, body) = req.into_parts();
+    let bytes = match tokio::time::timeout(BODY_DEADLINE, axum::body::to_bytes(body, limit)).await {
+        Ok(Ok(b)) => b,
+        Ok(Err(_)) => return (StatusCode::PAYLOAD_TOO_LARGE, "request too large").into_response(),
+        Err(_) => return (StatusCode::REQUEST_TIMEOUT, "request body too slow").into_response(),
+    };
+    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+        .await
+}
+
+/// `/scripts/{id}/revisions`, the one route with a larger body limit.
+fn is_script_save(path: &str) -> bool {
+    let mut s = path.trim_end_matches('/').split('/');
+    matches!(
+        (s.next(), s.next(), s.next(), s.next(), s.next()),
+        (Some(""), Some("scripts"), Some(id), Some("revisions"), None) if !id.is_empty()
+    )
 }
 
 async fn security_headers(State(state): State<Shared>, req: Request, next: Next) -> Response {
@@ -537,6 +654,21 @@ fn canonical_origin(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
+
+    #[test]
+    fn only_the_script_editor_gets_the_larger_body_limit() {
+        assert!(is_script_save("/scripts/0b7e/revisions"));
+        assert!(is_script_save("/scripts/0b7e/revisions/"));
+        for p in [
+            "/scripts",
+            "/scripts//revisions",
+            "/scripts/0b7e/revisions/3",
+            "/admin/scripts/x/revisions",
+            "/scripts/x/revisionsx",
+        ] {
+            assert!(!is_script_save(p), "{p}");
+        }
+    }
 
     fn headers(host: &str, origin: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();

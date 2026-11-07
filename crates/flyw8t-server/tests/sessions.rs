@@ -328,3 +328,205 @@ fn user_agents_are_named_briefly() {
     assert_eq!(browser_summary(""), "Unknown browser");
     assert_eq!(browser_summary("curl/8.9"), "curl/8.9");
 }
+
+/// Start an administrator-creation request whose body arrives in two parts; between them, `meanwhile` runs. Returns
+/// the response status and whether the account was created.
+async fn stalled_create_user<F, Fut>(
+    server: &TestServer,
+    admin: &Browser,
+    email: &str,
+    meanwhile: F,
+) -> (StatusCode, bool)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let body = form(&[
+        ("csrf", admin.csrf.as_str()),
+        ("email", email),
+        ("display_name", "Late"),
+        ("password", "a-long-enough-password"),
+        ("role", "admin"),
+    ]);
+    let (first, rest) = body.split_at(body.len() / 2);
+    let (tx, rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(2);
+    // Told when the server has taken the first part. Without `whole_body` that happens in the handler, after the
+    // session was checked, so what `meanwhile` changes comes strictly after that check.
+    let (taken_tx, taken) = tokio::sync::oneshot::channel::<()>();
+    let stream =
+        futures_util::stream::unfold((rx, Some(taken_tx)), |(mut rx, mut taken)| async move {
+            let b = rx.recv().await?;
+            if let Some(t) = taken.take() {
+                let _ = t.send(());
+            }
+            Some((Ok::<_, std::io::Error>(b), (rx, taken)))
+        });
+    let req = Request::post("/admin/users")
+        .header(header::COOKIE, &admin.cookie)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from_stream(stream))
+        .unwrap();
+    let pending =
+        {
+            let state = server.state.clone();
+            tokio::spawn(async move {
+                let mut req = req;
+                req.extensions_mut().insert(axum::extract::ConnectInfo(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 50000)),
+                ));
+                tower::ServiceExt::oneshot(flyw8t_server::router(state), req)
+                    .await
+                    .unwrap()
+                    .status()
+            })
+        };
+    tx.send(axum::body::Bytes::from(first.to_string()))
+        .await
+        .unwrap();
+    taken.await.unwrap();
+    // The server is now waiting for the rest of the body.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    meanwhile().await;
+    tx.send(axum::body::Bytes::from(rest.to_string()))
+        .await
+        .unwrap();
+    drop(tx);
+    let status = pending.await.unwrap();
+    let created: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)")
+        .bind(email)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    (status, created)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL"]
+async fn a_request_is_judged_by_the_session_as_it_is_when_the_request_is_complete() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let sudo = || async {
+        sqlx::query("UPDATE sessions SET sudo_until = now() + interval '5 minutes' WHERE revoked_at IS NULL")
+            .execute(&server.state.db)
+            .await
+            .unwrap();
+    };
+
+    // Control: in sudo mode throughout, the slow request makes its change.
+    sudo().await;
+    let (_, created) = stalled_create_user(&server, &admin, "slow@example.test", || async {}).await;
+    assert!(created, "a slow but valid request still works");
+
+    // Sudo mode ends while the body is still arriving: nothing is created.
+    let (status, created) =
+        stalled_create_user(&server, &admin, "expired@example.test", || async {
+            sqlx::query("UPDATE sessions SET sudo_until = now() - interval '1 second'")
+                .execute(&server.state.db)
+                .await
+                .unwrap();
+        })
+        .await;
+    assert!(
+        !created,
+        "sudo mode that ended mid-request must not count ({status})"
+    );
+
+    // The session is signed out while the body is still arriving: nothing is created.
+    sudo().await;
+    let (status, created) =
+        stalled_create_user(&server, &admin, "revoked@example.test", || async {
+            sqlx::query("UPDATE sessions SET revoked_at = now()")
+                .execute(&server.state.db)
+                .await
+                .unwrap();
+        })
+        .await;
+    assert!(
+        !created,
+        "a session signed out mid-request must not count ({status})"
+    );
+    assert_eq!(status, StatusCode::SEE_OTHER, "sent to sign in");
+    server.stop().await;
+}
+
+/// A POST whose body never finishes, from `ip`; returns its response once it has one.
+fn stalled_post(
+    server: &TestServer,
+    ip: [u8; 4],
+) -> (
+    tokio::sync::mpsc::Sender<axum::body::Bytes>,
+    tokio::task::JoinHandle<StatusCode>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
+    let stream = futures_util::stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|b| (Ok::<_, std::io::Error>(b), rx))
+    });
+    let mut req = Request::post("/login")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from_stream(stream))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            ip, 50000,
+        ))));
+    let state = server.state.clone();
+    let task = tokio::spawn(async move {
+        tower::ServiceExt::oneshot(flyw8t_server::router(state), req)
+            .await
+            .unwrap()
+            .status()
+    });
+    (tx, task)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL"]
+async fn bodies_read_before_sign_in_are_bounded() {
+    let server = start_fresh().await;
+
+    // Too large for the route: refused while reading, before anything else.
+    let big = "x".repeat(300 * 1024);
+    let resp = server
+        .request(
+            Request::post("/admin/users")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("email={big}")))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    // One address may hold only so many unfinished bodies; others are not affected, and a slot frees when one ends.
+    let held: Vec<_> = (0..flyw8t_server::BODIES_PER_ADDRESS)
+        .map(|_| stalled_post(&server, [10, 0, 0, 1]))
+        .collect();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (_tx, refused) = stalled_post(&server, [10, 0, 0, 1]);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), refused)
+            .await
+            .unwrap()
+            .unwrap(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let (other_tx, other) = stalled_post(&server, [10, 0, 0, 2]);
+    drop(other_tx);
+    assert_ne!(
+        other.await.unwrap(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "another address still gets in"
+    );
+    let mut held = held.into_iter();
+    let (first_tx, first) = held.next().unwrap();
+    drop(first_tx);
+    first.await.unwrap();
+    let (again_tx, again) = stalled_post(&server, [10, 0, 0, 1]);
+    drop(again_tx);
+    assert_ne!(
+        again.await.unwrap(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a finished body frees its slot"
+    );
+    drop(held);
+    server.stop().await;
+}
