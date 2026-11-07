@@ -39,14 +39,7 @@ async fn raw(
 
 /// Password step: returns where it sends the browser, and the (partial) session cookie.
 async fn password(server: &TestServer, email: &str, pw: &str) -> (String, String) {
-    let r = raw(
-        server,
-        "POST",
-        "/login",
-        None,
-        &[("email", email), ("password", pw)],
-    )
-    .await;
+    let r = server.request(server.login_request(email, pw).await).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
     (r.location(), r.cookie().expect("session cookie"))
 }
@@ -363,7 +356,27 @@ async fn wrong_codes_end_the_partial_session() {
 async fn admin_reset_signs_the_user_out_and_forces_setup_again() {
     let server = start_mfa(true).await;
     let (_, partial) = password(&server, ADMIN_EMAIL, ADMIN_PASSWORD).await;
-    let admin = server.browser(enroll(&server, &partial).await.cookie).await;
+    let enrolled = enroll(&server, &partial).await;
+    let admin = server.browser(enrolled.cookie.clone()).await;
+    // Creating users and resetting them need sudo mode: a first passkey (password and a code later than the one
+    // just used), then a confirmation with it.
+    let mut key = SoftKey::new(&server);
+    let code = totp::code_at(&enrolled.secret, enrolled.step + 1);
+    let r = admin
+        .add_passkey(
+            &server,
+            &key,
+            &[("password", ADMIN_PASSWORD), ("code", &code)],
+        )
+        .await;
+    assert_eq!(r.location(), "/account?m=passkey-added", "{}", r.body);
+    assert_eq!(
+        admin
+            .confirm_sudo(&server, &mut key, "/admin")
+            .await
+            .location(),
+        "/admin"
+    );
 
     let r = admin
         .post(

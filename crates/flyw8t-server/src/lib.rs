@@ -21,12 +21,14 @@ pub mod gateway;
 pub mod jobs;
 pub mod metrics;
 pub mod mfa;
+pub mod passkeys;
 pub mod queries;
 pub mod ratelimit;
 pub mod registry;
 pub mod remote_access;
 pub mod script_check;
 pub mod scripts;
+pub mod sessions;
 pub mod support;
 pub mod totp;
 pub mod web;
@@ -68,6 +70,15 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         .await
         .context("connecting to PostgreSQL")?;
     MIGRATOR.run(&db).await.context("applying migrations")?;
+    if let Some((_, rp_id)) = flyw8t_protocol::webauthn::origin_and_rp_id(&config.public_url) {
+        if !flyw8t_protocol::webauthn::rp_id_usable(&rp_id) {
+            tracing::warn!(
+                public_url = %config.public_url,
+                "FLYW8T_PUBLIC_URL is an IP address: browsers refuse passkeys for it, so sudo mode (field definitions, \
+                 users, API tokens, second-factor resets) is unavailable; use a host name"
+            );
+        }
+    }
     let state = Arc::new(AppState {
         db,
         config,
@@ -120,10 +131,23 @@ pub fn router(state: Shared) -> Router {
         .route("/login", get(web::login_form).post(web::login))
         .route("/logout", post(web::logout))
         .route("/login/mfa", get(mfa::challenge_form).post(mfa::challenge))
+        .route(
+            "/login/passkey",
+            get(passkeys::sign_in_form).post(passkeys::sign_in),
+        )
         .route("/account", get(mfa::account))
         .route("/account/mfa", get(mfa::setup_form).post(mfa::setup))
         .route("/account/mfa/recovery-codes", post(mfa::regenerate_codes))
         .route("/account/mfa/disable", post(mfa::disable))
+        .route("/account/passkeys/new", get(passkeys::new_form))
+        .route("/account/passkeys", post(passkeys::register))
+        .route("/account/passkeys/{id}/remove", post(passkeys::remove))
+        .route("/account/sessions/{id}/revoke", post(sessions::revoke))
+        .route(
+            "/account/sessions/revoke-others",
+            post(sessions::revoke_others),
+        )
+        .route("/sudo", get(passkeys::sudo_form).post(passkeys::sudo))
         .route("/", get(web::overview))
         .route("/devices", get(web::devices))
         .route("/devices/{id}", get(web::device))
@@ -178,6 +202,7 @@ pub fn router(state: Shared) -> Router {
         .route("/admin", get(web::admin))
         .route("/admin/users", post(web::create_user))
         .route("/admin/users/{id}/mfa/reset", post(mfa::admin_reset))
+        .route("/admin/users/{id}/sign-out", post(sessions::admin_sign_out))
         .route("/admin/tokens", post(web::create_api_token))
         .route("/admin/tokens/{id}/revoke", post(web::revoke_api_token))
         .route(
@@ -197,6 +222,7 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/static/support.js", get(support_script))
         .route("/static/editor.js", get(editor_script))
+        .route("/static/passkey.js", get(passkey_script))
         .route("/static/app.css", get(stylesheet))
         .route("/static/icon.svg", get(icon))
         .route("/static/icons/{name}", get(app_icon))
@@ -266,6 +292,17 @@ async fn editor_script() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         flyw8t_web::EDITOR_JS,
+    )
+        .into_response()
+}
+
+async fn passkey_script() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        flyw8t_web::PASSKEY_JS,
     )
         .into_response()
 }

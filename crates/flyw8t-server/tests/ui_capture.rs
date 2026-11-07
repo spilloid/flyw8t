@@ -233,6 +233,8 @@ async fn console_renders_cleanly_everywhere() {
         ("/support".into(), "support"),
         ("/account".into(), "account"),
         ("/account/mfa".into(), "mfa-setup"),
+        ("/account/passkeys/new".into(), "passkey-new"),
+        ("/sudo?next=/admin".into(), "sudo"),
         (
             "/devices/00000000-0000-0000-0000-000000000000".into(),
             "not-found",
@@ -324,32 +326,34 @@ async fn console_renders_cleanly_everywhere() {
         (saved, problems)
     };
 
-    // The sign-in page, signed out.
-    for theme in THEMES {
-        for (w, h, size) in SIZES {
-            cdp.call(
-                "Emulation.setDeviceMetricsOverride",
-                json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": w < 600}),
-            )
-            .await;
-            cdp.call(
-                "Emulation.setEmulatedMedia",
-                json!({"features": [{"name": "prefers-color-scheme", "value": theme}]}),
-            )
-            .await;
-            cdp.call("Page.navigate", json!({"url": format!("{base}/login")}))
+    // The sign-in pages, signed out.
+    for (path, name) in [("/login", "login"), ("/login/passkey", "passkey-sign-in")] {
+        for theme in THEMES {
+            for (w, h, size) in SIZES {
+                cdp.call(
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": w < 600}),
+                )
                 .await;
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            let overflow = cdp
-                .eval("document.documentElement.scrollWidth > window.innerWidth")
+                cdp.call(
+                    "Emulation.setEmulatedMedia",
+                    json!({"features": [{"name": "prefers-color-scheme", "value": theme}]}),
+                )
                 .await;
-            let png = cdp
-                .call("Page.captureScreenshot", json!({"format": "png"}))
-                .await;
-            let errs = std::mem::take(&mut cdp.errors);
-            let (saved, problems) = save(errs, format!("login-{size}-{theme}"), overflow, png);
-            shots += usize::from(saved);
-            failures.extend(problems);
+                cdp.call("Page.navigate", json!({"url": format!("{base}{path}")}))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let overflow = cdp
+                    .eval("document.documentElement.scrollWidth > window.innerWidth")
+                    .await;
+                let png = cdp
+                    .call("Page.captureScreenshot", json!({"format": "png"}))
+                    .await;
+                let errs = std::mem::take(&mut cdp.errors);
+                let (saved, problems) = save(errs, format!("{name}-{size}-{theme}"), overflow, png);
+                shots += usize::from(saved);
+                failures.extend(problems);
+            }
         }
     }
 
@@ -431,5 +435,5 @@ async fn console_renders_cleanly_everywhere() {
         "UI validation failures:\n{}",
         failures.join("\n")
     );
-    assert_eq!(shots, (pages.len() + 1) * SIZES.len() * THEMES.len());
+    assert_eq!(shots, (pages.len() + 2) * SIZES.len() * THEMES.len());
 }

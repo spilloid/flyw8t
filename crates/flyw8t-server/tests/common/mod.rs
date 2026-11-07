@@ -53,6 +53,8 @@ pub struct TestServer {
     pub addr: SocketAddr,
     pub shutdown: CancellationToken,
     pub task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    /// The administrator's passkey, once `admin_sudo` has registered one.
+    pub admin_key: std::sync::Mutex<Option<SoftKey>>,
 }
 
 pub fn test_config(database_url: &str) -> Config {
@@ -64,6 +66,8 @@ pub fn test_config(database_url: &str) -> Config {
         silence_grace: Duration::from_secs(1),
         // MFA has its own suite (tests/mfa.rs); the rest sign in with a password alone.
         require_mfa: false,
+        // A host name, not 127.0.0.1: browsers refuse passkeys for an IP address (sudo mode needs one).
+        public_url: "http://localhost".into(),
         ..Config::defaults()
     }
 }
@@ -86,6 +90,7 @@ pub async fn start(config: Config) -> TestServer {
         addr,
         shutdown,
         task,
+        admin_key: Default::default(),
     }
 }
 
@@ -125,15 +130,34 @@ impl TestServer {
         }
     }
 
+    /// Open the sign-in page: its login CSRF cookie (`name=value`) and the token its form carries.
+    pub async fn login_token(&self) -> (String, String) {
+        let page = self
+            .request(Request::get("/login").body(Body::empty()).unwrap())
+            .await;
+        let cookie = page.cookie().expect("sign-in cookie");
+        let token = extract(&page.body, r#"name="login_csrf" value="([^"]+)""#)
+            .expect("login token on the sign-in page");
+        (cookie, token)
+    }
+
+    /// A sign-in form post, as the sign-in page would send it.
+    pub async fn login_request(&self, email: &str, password: &str) -> Request<Body> {
+        let (cookie, token) = self.login_token().await;
+        Request::post("/login")
+            .header(header::COOKIE, cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form(&[
+                ("login_csrf", token.as_str()),
+                ("email", email),
+                ("password", password),
+            ])))
+            .unwrap()
+    }
+
     pub async fn login(&self, email: &str, password: &str) -> Browser {
-        let body = form(&[("email", email), ("password", password)]);
         let resp = self
-            .request(
-                Request::post("/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
+            .request(self.login_request(email, password).await)
             .await;
         assert_eq!(
             resp.status,
@@ -466,7 +490,7 @@ pub async fn event_kinds(server: &TestServer, job: Uuid) -> Vec<String> {
 
 /// Admin signs in, creates an organization and token, and an agent enrolls and connects.
 pub async fn enrolled(server: &TestServer) -> (Browser, Uuid, TestAgent) {
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin
         .create_org(server, &format!("Org {}", Uuid::new_v4().simple()))
         .await;
@@ -475,4 +499,230 @@ pub async fn enrolled(server: &TestServer) -> (Browser, Uuid, TestAgent) {
         .await
         .expect("enrollment");
     (admin, org, agent)
+}
+
+// ---------------------------------------------------------------------------------------
+// Passkeys: a software authenticator, and sudo mode (ADR-0014)
+
+/// A passkey in software: an ES256 key that answers WebAuthn ceremonies the way a browser and authenticator would.
+pub struct SoftKey {
+    pair: ring::signature::EcdsaKeyPair,
+    pub id: Vec<u8>,
+    pub rp_id: String,
+    pub origin: String,
+    /// The signature counter it reports next; 0 behaves like a synced passkey.
+    pub counter: u32,
+    /// Flags it sets: user present and verified, unless a test says otherwise.
+    pub flags: u8,
+}
+
+fn cbor_head(major: u8, n: usize, out: &mut Vec<u8>) {
+    let m = major << 5;
+    match n {
+        0..=23 => out.push(m | n as u8),
+        24..=0xff => out.extend([m | 24, n as u8]),
+        _ => {
+            out.push(m | 25);
+            out.extend((n as u16).to_be_bytes());
+        }
+    }
+}
+
+fn cbor_bytes(b: &[u8], out: &mut Vec<u8>) {
+    cbor_head(2, b.len(), out);
+    out.extend_from_slice(b);
+}
+
+fn cbor_text(t: &str, out: &mut Vec<u8>) {
+    cbor_head(3, t.len(), out);
+    out.extend_from_slice(t.as_bytes());
+}
+
+/// The options a ceremony page gives the browser (its `data-options`), as JSON.
+pub fn ceremony_options(html: &str) -> serde_json::Value {
+    let raw = extract(html, r#"data-options="([^"]+)""#).expect("a WebAuthn ceremony on the page");
+    let json = raw
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    serde_json::from_str(&json).unwrap()
+}
+
+pub fn ceremony_challenge(html: &str) -> Vec<u8> {
+    let o = ceremony_options(html);
+    flyw8t_protocol::webauthn::from_b64url(o["publicKey"]["challenge"].as_str().unwrap()).unwrap()
+}
+
+impl SoftKey {
+    pub fn new(server: &TestServer) -> Self {
+        use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng)
+            .unwrap();
+        let (origin, rp_id) =
+            flyw8t_protocol::webauthn::origin_and_rp_id(&server.state.config.public_url).unwrap();
+        SoftKey {
+            pair,
+            id: Uuid::new_v4().as_bytes().to_vec(),
+            rp_id,
+            origin,
+            counter: 0,
+            flags: flyw8t_protocol::webauthn::FLAG_UP | flyw8t_protocol::webauthn::FLAG_UV,
+        }
+    }
+
+    pub fn public_key(&self) -> Vec<u8> {
+        use ring::signature::KeyPair;
+        self.pair.public_key().as_ref().to_vec()
+    }
+
+    fn auth_data(&self, extra: u8) -> Vec<u8> {
+        let mut d = ring::digest::digest(&ring::digest::SHA256, self.rp_id.as_bytes())
+            .as_ref()
+            .to_vec();
+        d.push(self.flags | extra);
+        d.extend(self.counter.to_be_bytes());
+        d
+    }
+
+    pub fn client_data(&self, kind: &str, challenge: &[u8]) -> Vec<u8> {
+        serde_json::json!({
+            "type": kind,
+            "challenge": flyw8t_protocol::webauthn::b64url(challenge),
+            "origin": self.origin,
+            "crossOrigin": false,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// `navigator.credentials.create`: the attestation object (format "none") and client data.
+    pub fn register(&self, challenge: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let pk = self.public_key();
+        let mut auth = self.auth_data(flyw8t_protocol::webauthn::FLAG_AT);
+        auth.extend([0u8; 16]); // AAGUID
+        auth.extend((self.id.len() as u16).to_be_bytes());
+        auth.extend_from_slice(&self.id);
+        // COSE key: {1: 2, 3: -7, -1: 1, -2: x, -3: y}
+        auth.extend([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21]);
+        cbor_bytes(&pk[1..33], &mut auth);
+        auth.push(0x22);
+        cbor_bytes(&pk[33..], &mut auth);
+        let mut att = vec![0xa3];
+        cbor_text("fmt", &mut att);
+        cbor_text("none", &mut att);
+        cbor_text("attStmt", &mut att);
+        att.push(0xa0);
+        cbor_text("authData", &mut att);
+        cbor_bytes(&auth, &mut att);
+        (att, self.client_data("webauthn.create", challenge))
+    }
+
+    /// `navigator.credentials.get`: authenticator data, client data and signature. Moves the counter on if it keeps one.
+    pub fn assert(&mut self, challenge: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        if self.counter > 0 {
+            self.counter += 1;
+        }
+        let auth = self.auth_data(0);
+        let client = self.client_data("webauthn.get", challenge);
+        let mut signed = auth.clone();
+        signed.extend_from_slice(ring::digest::digest(&ring::digest::SHA256, &client).as_ref());
+        let sig = self
+            .pair
+            .sign(&ring::rand::SystemRandom::new(), &signed)
+            .unwrap()
+            .as_ref()
+            .to_vec();
+        (auth, client, sig)
+    }
+}
+
+impl Browser {
+    /// Register `key` from the account page. `fields` carries the password (and code) for a first key.
+    pub async fn add_passkey(
+        &self,
+        server: &TestServer,
+        key: &SoftKey,
+        fields: &[(&str, &str)],
+    ) -> Response {
+        let page = self.get(server, "/account/passkeys/new").await;
+        assert_eq!(
+            page.status,
+            StatusCode::OK,
+            "{} {}",
+            page.location(),
+            page.body
+        );
+        let (att, client) = key.register(&ceremony_challenge(&page.body));
+        let (att, client) = (
+            flyw8t_protocol::webauthn::b64url(&att),
+            flyw8t_protocol::webauthn::b64url(&client),
+        );
+        let mut all = vec![
+            ("name", "test key"),
+            ("attestation_object", att.as_str()),
+            ("client_data_json", client.as_str()),
+        ];
+        all.extend_from_slice(fields);
+        self.post(server, "/account/passkeys", &all).await
+    }
+
+    /// Answer the sudo page with `key`; returns the response to the answer.
+    pub async fn confirm_sudo(
+        &self,
+        server: &TestServer,
+        key: &mut SoftKey,
+        next: &str,
+    ) -> Response {
+        let page = self.get(server, &format!("/sudo?next={next}")).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        let (auth, client, sig) = key.assert(&ceremony_challenge(&page.body));
+        let b = flyw8t_protocol::webauthn::b64url;
+        self.post(
+            server,
+            "/sudo",
+            &[
+                ("next", next),
+                ("credential_id", &b(&key.id)),
+                ("authenticator_data", &b(&auth)),
+                ("client_data_json", &b(&client)),
+                ("signature", &b(&sig)),
+            ],
+        )
+        .await
+    }
+
+    /// Add a first passkey (with `password`) and enter sudo mode with it.
+    pub async fn sudo(&self, server: &TestServer, password: &str) -> SoftKey {
+        let mut key = SoftKey::new(server);
+        let r = self
+            .add_passkey(server, &key, &[("password", password)])
+            .await;
+        assert_eq!(r.location(), "/account?m=passkey-added", "{}", r.body);
+        let r = self.confirm_sudo(server, &mut key, "/account").await;
+        assert_eq!(r.location(), "/account", "{}", r.body);
+        key
+    }
+}
+
+impl TestServer {
+    /// The administrator, in sudo mode (for changes to field definitions, users and tokens).
+    /// The first call registers the administrator's passkey; later ones (other sessions) confirm with it.
+    pub async fn admin_sudo(&self) -> Browser {
+        let b = self.admin().await;
+        let existing = self.admin_key.lock().unwrap().take();
+        let key = match existing {
+            Some(mut key) => {
+                let r = b.confirm_sudo(self, &mut key, "/account").await;
+                assert_eq!(r.location(), "/account", "{}", r.body);
+                key
+            }
+            None => b.sudo(self, ADMIN_PASSWORD).await,
+        };
+        *self.admin_key.lock().unwrap() = Some(key);
+        b
+    }
 }

@@ -525,9 +525,15 @@ async fn cross_origin_posts_are_refused() {
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     let server = start_fresh().await;
-    let body = form(&[("email", ADMIN_EMAIL), ("password", ADMIN_PASSWORD)]);
+    let (cookie, token) = server.login_token().await;
+    let body = form(&[
+        ("login_csrf", token.as_str()),
+        ("email", ADMIN_EMAIL),
+        ("password", ADMIN_PASSWORD),
+    ]);
     let req = |origin: &str| {
         Request::post("/login")
+            .header(header::COOKIE, &cookie)
             .header(header::HOST, "rmm.example.test")
             .header(header::ORIGIN, origin)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -618,11 +624,21 @@ async fn the_client_address_comes_through_a_trusted_proxy_only() {
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use flyw8t_server::client_ip::Cidr;
+    // A login token is a cookie and form value only, with nothing held by the server, so one
+    // minted by any test server is good for another with the same (insecure) cookie name.
+    let token = start_fresh().await;
+    let (cookie, csrf) = token.login_token().await;
+    token.stop().await;
     let login_as = |email: &'static str, via: &'static str| {
         Request::post("/login")
+            .header(header::COOKIE, &cookie)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header("cf-connecting-ip", via)
-            .body(Body::from(form(&[("email", email), ("password", "wrong")])))
+            .body(Body::from(form(&[
+                ("login_csrf", csrf.as_str()),
+                ("email", email),
+                ("password", "wrong"),
+            ])))
             .unwrap()
     };
     let failed_login = |via: &'static str| login_as("nobody@example.test", via);

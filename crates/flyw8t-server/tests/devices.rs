@@ -42,7 +42,7 @@ async fn technician(server: &TestServer, admin: &Browser, email: &str, org: Uuid
             ],
         )
         .await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/admin?m=user-created", "{}", r.body);
     server.login(email, "tech-password-123").await
 }
 
@@ -70,7 +70,7 @@ async fn batch_jobs(server: &TestServer, batch: &str) -> i64 {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn a_device_can_be_named_tagged_annotated_and_sited() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org, devices) = org_with_devices(&server, &admin, "Contoso", 1).await;
     let (other, _) = org_with_devices(&server, &admin, "Fabrikam", 0).await;
     let d = devices[0];
@@ -182,7 +182,7 @@ async fn a_device_can_be_named_tagged_annotated_and_sited() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn device_changes_respect_organization_scope_and_role() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org_a, a) = org_with_devices(&server, &admin, "Org A", 1).await;
     let (_, b) = org_with_devices(&server, &admin, "Org B", 1).await;
     let tech = technician(&server, &admin, "tech@example.test", org_a).await;
@@ -271,7 +271,7 @@ async fn device_changes_respect_organization_scope_and_role() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn many_devices_are_tagged_and_run_as_one_confirmed_batch() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (_, devices) = org_with_devices(&server, &admin, "Contoso", 3).await;
     let ids: Vec<String> = devices.iter().map(Uuid::to_string).collect();
     let mut picked: Vec<(&str, &str)> = ids.iter().map(|i| ("device", i.as_str())).collect();
@@ -375,7 +375,7 @@ async fn many_devices_are_tagged_and_run_as_one_confirmed_batch() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn retired_devices_leave_the_active_list_and_never_move() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (_, devices) = org_with_devices(&server, &admin, "Contoso", 2).await;
     let (other, _) = org_with_devices(&server, &admin, "Fabrikam", 0).await;
     let (keep, gone) = (devices[0], devices[1]);
@@ -453,7 +453,7 @@ async fn retired_devices_leave_the_active_list_and_never_move() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn a_batch_is_all_or_nothing_and_its_totals_are_scoped() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org_a, a) = org_with_devices(&server, &admin, "Org A", 2).await;
     let (_, b) = org_with_devices(&server, &admin, "Org B", 1).await;
     let mut ids: Vec<String> = a.iter().chain(&b).map(Uuid::to_string).collect();
@@ -542,7 +542,7 @@ async fn a_batch_is_all_or_nothing_and_its_totals_are_scoped() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn retiring_disconnects_and_cannot_interleave_with_a_new_job() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Contoso").await;
     let token = admin.enrollment_token(&server, org, "60", "2").await;
     let live = TestAgent::enroll(&server.url(), &token).await.unwrap();

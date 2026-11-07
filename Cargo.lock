@@ -888,6 +888,8 @@ dependencies = [
 name = "flyw8t-protocol"
 version = "0.1.1"
 dependencies = [
+ "base64",
+ "ring",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

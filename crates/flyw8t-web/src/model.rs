@@ -251,6 +251,10 @@ pub struct UserRow {
     pub disabled: bool,
     /// Two-step verification is set up.
     pub mfa: bool,
+    /// Passkeys and security keys registered.
+    pub passkeys: i64,
+    /// Live sessions, partial ones included.
+    pub sessions: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -457,6 +461,58 @@ pub struct AccountView {
     pub mfa_enabled_at: Option<OffsetDateTime>,
     pub recovery_remaining: i64,
     pub require_mfa: bool,
+    pub passkeys: Vec<PasskeyRow>,
+    /// Sudo mode lasts until then, when the session is in it.
+    pub sudo_until: Option<OffsetDateTime>,
+    pub sessions: Vec<SessionRow>,
+}
+
+/// A live browser session of the person viewing the account page.
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub id: Uuid,
+    /// The session this page was loaded with.
+    pub current: bool,
+    /// The password was accepted and the second factor is still owed.
+    pub partial: bool,
+    pub created_at: OffsetDateTime,
+    pub last_seen_at: OffsetDateTime,
+    pub client_ip: String,
+    pub user_agent: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasskeyRow {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: OffsetDateTime,
+    pub last_used_at: Option<OffsetDateTime>,
+}
+
+/// A WebAuthn ceremony for `/static/passkey.js`: the form it posts to and the options for the browser (JSON, with
+/// binary values in base64url).
+#[derive(Debug, Clone)]
+pub struct WebAuthnCeremony {
+    pub action: String,
+    pub options: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasskeyNewView {
+    pub ceremony: WebAuthnCeremony,
+    /// The first passkey needs the password, and the current code when two-step verification is on.
+    pub needs_password: bool,
+    pub needs_code: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SudoView {
+    /// `None` when the user has no passkey yet.
+    pub ceremony: Option<WebAuthnCeremony>,
+    /// Where to go once confirmed: a path on this site.
+    pub next: String,
+    pub minutes: u64,
 }
 
 /// One script in the library list.

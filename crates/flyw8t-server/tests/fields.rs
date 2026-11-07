@@ -30,7 +30,7 @@ async fn technician(server: &TestServer, admin: &Browser, email: &str, org: Uuid
             ],
         )
         .await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/admin?m=user-created", "{}", r.body);
     server.login(email, "tech-password-123").await
 }
 
@@ -69,7 +69,7 @@ async fn set(
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn values_resolve_from_device_to_organization_to_global_with_history() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org_a, dev_a) = org_with_device(&server, &admin, "Org A").await;
     let (_, dev_b) = org_with_device(&server, &admin, "Org B").await;
     let f = define(
@@ -161,7 +161,7 @@ async fn values_resolve_from_device_to_organization_to_global_with_history() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn roles_and_organizations_limit_who_sets_what() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org_a, dev_a) = org_with_device(&server, &admin, "Org A").await;
     let (org_b, _) = org_with_device(&server, &admin, "Org B").await;
     let tech = technician(&server, &admin, "tech@example.test", org_a).await;
@@ -255,7 +255,7 @@ async fn roles_and_organizations_limit_who_sets_what() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn values_are_checked_by_kind() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org, _) = org_with_device(&server, &admin, "Org").await;
     let n = define(
         &server,
@@ -345,7 +345,7 @@ async fn values_are_checked_by_kind() {
 async fn secrets_are_encrypted_and_never_shown_again() {
     // Without a field key, a secret value is refused.
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org, _) = org_with_device(&server, &admin, "Org").await;
     let f = define(
         &server,
@@ -367,7 +367,7 @@ async fn secrets_are_encrypted_and_never_shown_again() {
     let mut cfg = test_config(&fresh_database().await);
     cfg.field_key = Some([9u8; 32]);
     let server = start(cfg).await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org, dev) = org_with_device(&server, &admin, "Org").await;
     let f = define(
         &server,
@@ -452,7 +452,7 @@ async fn server_api_device(
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn missing_required_values_are_reported_until_set() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org_a, _) = org_with_device(&server, &admin, "Org A").await;
     let (org_b, dev_b) = org_with_device(&server, &admin, "Org B").await;
     let per_org = define(
@@ -527,7 +527,7 @@ async fn readonly(server: &TestServer, admin: &Browser, email: &str, org: Uuid) 
             ],
         )
         .await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/admin?m=user-created", "{}", r.body);
     server.login(email, "viewer-password-123").await
 }
 
@@ -544,7 +544,7 @@ async fn value_rows(server: &TestServer, field: Uuid) -> i64 {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn foreign_devices_readonly_users_and_forged_forms_change_nothing() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org_a, dev_a) = org_with_device(&server, &admin, "Org A").await;
     let (_, dev_b) = org_with_device(&server, &admin, "Org B").await;
     let tech = technician(&server, &admin, "tech@example.test", org_a).await;
@@ -616,7 +616,7 @@ async fn foreign_devices_readonly_users_and_forged_forms_change_nothing() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn archiving_cannot_interleave_with_a_save_and_is_audited_or_not_done() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org, _) = org_with_device(&server, &admin, "Org").await;
     let f = define(
         &server,
@@ -697,7 +697,7 @@ async fn defaults_device_requirements_secrets_and_markup_are_handled_exactly() {
     let mut cfg = test_config(&fresh_database().await);
     cfg.field_key = Some([5u8; 32]);
     let server = start(cfg).await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org, dev) = org_with_device(&server, &admin, "Org").await;
 
     // A default applies where nothing is set, and says so.
@@ -822,7 +822,7 @@ async fn put_in_site(server: &TestServer, admin: &Browser, device: Uuid, site: U
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn sites_sit_between_the_organization_and_the_device() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let (org_a, dev_a) = org_with_device(&server, &admin, "Org A").await;
     let (org_b, dev_b) = org_with_device(&server, &admin, "Org B").await;
     let branch = add_site(&server, &admin, org_a, "Branch").await;

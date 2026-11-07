@@ -84,6 +84,11 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "site-added" => (true, "Site added."),
         "token-revoked" => (true, "Token revoked."),
         "user-created" => (true, "User created."),
+        "passkey-added" => (true, "Passkey added."),
+        "passkey-removed" => (true, "Passkey removed."),
+        "session-revoked" => (true, "That session is signed out."),
+        "sessions-revoked" => (true, "Signed out everywhere except this browser."),
+        "user-signed-out" => (true, "That user was signed out everywhere."),
         "device-revoked" => (true, "Device credential revoked and its connection closed."),
         "device-updated" => (true, "Device updated."),
         "device-retired" => (true, "Device retired: its credential is revoked and its connection closed."),
@@ -113,6 +118,10 @@ pub struct MsgQuery {
 }
 
 pub fn error_response(ctx: Option<&PageCtx>, e: AppError) -> Response {
+    if let AppError::SudoRequired(back) = &e {
+        let next: String = form_urlencoded::byte_serialize(back.as_bytes()).collect();
+        return Redirect::to(&format!("/sudo?next={next}")).into_response();
+    }
     e.log();
     let status = e.status();
     (
@@ -148,11 +157,31 @@ async fn no_users(state: &Shared) -> bool {
         .unwrap_or(false)
 }
 
+/// The sign-in page with a fresh login CSRF token, and the cookie that holds it.
+pub(crate) fn login_page_response(
+    state: &Shared,
+    status: StatusCode,
+    error: Option<&str>,
+    no_admin: bool,
+) -> Response {
+    let token = auth::random_secret(24);
+    (
+        status,
+        [(header::SET_COOKIE, auth::set_login_cookie(state, &token))],
+        Html(flyw8t_web::login_page(
+            error.map(String::from),
+            no_admin,
+            &token,
+        )),
+    )
+        .into_response()
+}
+
 pub async fn login_form(State(state): State<Shared>, headers: HeaderMap) -> Response {
     if let Ok(Some(_)) = auth::session_principal(&state, &headers).await {
         return Redirect::to("/").into_response();
     }
-    Html(flyw8t_web::login_page(None, no_users(&state).await, None)).into_response()
+    login_page_response(&state, StatusCode::OK, None, no_users(&state).await)
 }
 
 pub async fn login(
@@ -166,12 +195,20 @@ pub async fn login(
     let password = form.get("password").unwrap_or("");
     let ip: String = ip;
     let fail = |status: StatusCode, msg: &str, no_admin: bool| {
-        (
-            status,
-            Html(flyw8t_web::login_page(Some(msg.into()), no_admin, None)),
-        )
-            .into_response()
+        login_page_response(&state, status, Some(msg), no_admin)
     };
+    // Login CSRF: the form must carry the value of the cookie its page set. Checked before
+    // anything else, so a forged sign-in costs no rate-limit place and leaves no audit row.
+    let presented = form.get("login_csrf").unwrap_or("");
+    if !auth::login_cookie_value(&state, &headers)
+        .is_some_and(|c| constant_time_eq(c.as_bytes(), presented.as_bytes()))
+    {
+        return fail(
+            StatusCode::FORBIDDEN,
+            "This sign-in page had expired, or did not come from this console. Sign in again.",
+            false,
+        );
+    }
     if !state
         .limiter
         .allow(&format!("login-ip:{ip}"), 20, Duration::from_secs(300))
@@ -796,6 +833,7 @@ pub async fn create_user(
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
         p.require(Permission::ManageUsers)?;
+        p.require_sudo("/admin")?;
         let email = form.get("email").unwrap_or("").trim().to_lowercase();
         if !email.contains('@') || email.len() > 254 {
             return Err(AppError::BadRequest("Enter a valid email address.".into()));
@@ -849,6 +887,7 @@ pub async fn create_api_token(
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
         p.require(Permission::ManageUsers)?;
+        p.require_sudo("/admin")?;
         let name = clean_name(form.get("name"))?;
         let mut scopes: Vec<String> = form.all("scope").into_iter().filter(|s| matches!(*s, "read" | "jobs:run")).map(String::from).collect();
         scopes.sort();

@@ -30,7 +30,7 @@ For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pe
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `FLYW8T_DATABASE_URL` (or `DATABASE_URL`) | yes | — | PostgreSQL URL |
-| `FLYW8T_PUBLIC_URL` | yes | — | URL technicians and agents use; `https://` unless loopback |
+| `FLYW8T_PUBLIC_URL` | yes | — | URL technicians and agents use; `https://` unless loopback. Use a **host name**, not an IP address (`http://localhost:8080` locally): browsers refuse passkeys for an IP address, and sudo mode (field definitions, users, API tokens) needs one. It must also be the address people actually open, since passkeys are bound to it |
 | `FLYW8T_BIND` | no | `127.0.0.1:8080` (image: `0.0.0.0:8080`) | listen address |
 | `FLYW8T_TLS_CERT`, `FLYW8T_TLS_KEY` | together | — | PEM chain and key for native TLS |
 | `FLYW8T_BOOTSTRAP_ADMIN_EMAIL`, `…_PASSWORD` | together | — | first administrator, created only while no users exist; password ≥ 12 characters |

@@ -404,7 +404,7 @@ async fn tenant_isolation_and_token_scopes() {
             ],
         )
         .await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/admin?m=user-created", "{}", r.body);
     let tech = server.login("tech@example.test", "tech-password-123").await;
 
     let list = tech.get(&server, "/devices").await;
@@ -560,7 +560,7 @@ async fn tenant_isolation_and_token_scopes() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn enrollment_and_device_revocation() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Acme").await;
     let token = admin.enrollment_token(&server, org, "60", "1").await;
     let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();

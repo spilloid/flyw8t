@@ -50,4 +50,6 @@ Dated claims that no automated check covers (STD-003 rule 4):
 - **2026-10-30**: The round-4 fixes (dev-process row 16) have not been reviewed. Still open from row 15: two link posts racing in one browser can bind two support sessions.
 - **2026-10-29**: Windows journal-rename durability across power loss is assumed from NTFS journaling, not proven (review finding 10).
 - **2026-10-30**: The protocol-suite flake (dev-process row 9) was identified and fixed; watch CI for any recurrence.
+- **2026-11-04**: Passkeys were exercised only with Chrome's DevTools virtual authenticator and a software key in the router tests. No hardware security key, Windows Hello, Touch ID, synced passkey, Firefox or Safari has been tried.
+- **2026-11-06**: Passkey sign-in (usernameless, `allowCredentials` empty) was exercised with the software key in the router tests and in Chrome with DevTools' virtual authenticator (a discoverable key). It needs a discoverable credential; whether a given security key or platform stored one at registration (`residentKey: "preferred"`) has not been checked on real hardware.
 - **2026-10-29**: Console screenshots are not in the repository. `ui_capture` renders the test machine's real hostname, IP and MAC addresses, so `docs/img/` is git-ignored until captures come from a synthetic device (a fake agent with fabricated inventory).

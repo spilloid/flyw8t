@@ -99,6 +99,8 @@ pub struct Principal {
     /// Digest of the presented session cookie, so a check made under lock can tell that this
     /// exact credential is still the session's (it changes on rotation). `None` for tokens.
     pub session_token: Option<Vec<u8>>,
+    /// The session confirmed a passkey within the last few minutes (ADR-0014 sudo mode). Never true for tokens.
+    pub sudo: bool,
 }
 
 impl Principal {
@@ -126,6 +128,16 @@ impl Principal {
             Ok(())
         } else {
             Err(AppError::Forbidden)
+        }
+    }
+
+    /// For a change that widens what can run: the session must be in sudo mode. If it is not, the person is sent to
+    /// confirm a passkey and then back to `back`, the page the change was made from, to make it again.
+    pub fn require_sudo(&self, back: &str) -> AppResult<()> {
+        if self.sudo && self.channel == Channel::Web {
+            Ok(())
+        } else {
+            Err(AppError::SudoRequired(back.to_string()))
         }
     }
 
@@ -169,6 +181,7 @@ fn principal(
         csrf,
         session_id,
         session_token: None,
+        sudo: false,
     })
 }
 
@@ -178,6 +191,38 @@ pub fn cookie_name(state: &Shared) -> &'static str {
     } else {
         "flyw8t_session"
     }
+}
+
+/// Login CSRF (double submit): the sign-in page sets this cookie and puts the same value in the
+/// form, and a sign-in is accepted only when the two match. Another site can neither read the
+/// cookie nor set it (`__Host-` over HTTPS, SameSite=Strict), so it cannot sign a browser in to
+/// an account of its choosing. There is no session yet, so nothing is stored on the server.
+pub fn login_cookie_name(state: &Shared) -> &'static str {
+    if state.config.secure_cookies() {
+        "__Host-flyw8t_login"
+    } else {
+        "flyw8t_login"
+    }
+}
+
+/// How long a sign-in page can be left open before its form must be reloaded.
+pub const LOGIN_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+pub fn login_cookie_value<'a>(state: &Shared, headers: &'a HeaderMap) -> Option<&'a str> {
+    cookie_value(headers, login_cookie_name(state)).filter(|v| !v.is_empty())
+}
+
+pub fn set_login_cookie(state: &Shared, value: &str) -> String {
+    let secure = if state.config.secure_cookies() {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "{}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{secure}",
+        login_cookie_name(state),
+        LOGIN_TOKEN_TTL.as_secs()
+    )
 }
 
 fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -198,8 +243,8 @@ pub async fn session_principal(
     let Some(raw) = cookie_value(headers, cookie_name(state)) else {
         return Ok(None);
     };
-    let row: Option<(Uuid, String, Uuid, String, String, String, Vec<Uuid>)> = sqlx::query_as(&format!(
-        "SELECT s.id, s.csrf_token, {USER_COLUMNS}
+    let row: Option<(Uuid, String, bool, Uuid, String, String, String, Vec<Uuid>)> = sqlx::query_as(&format!(
+        "SELECT s.id, s.csrf_token, coalesce(s.sudo_until > now(), false), {USER_COLUMNS}
            FROM sessions s
            JOIN users u ON u.id = s.user_id
            LEFT JOIN user_organizations uo ON uo.user_id = u.id
@@ -210,9 +255,16 @@ pub async fn session_principal(
     .bind(digest(raw))
     .fetch_optional(&state.db)
     .await?;
-    let Some((sid, csrf, uid, email, name, role, orgs)) = row else {
+    let Some((sid, csrf, sudo, uid, email, name, role, orgs)) = row else {
         return Ok(None);
     };
+    // For the session list; at most one write a minute per session.
+    sqlx::query(
+        "UPDATE sessions SET last_seen_at = now() WHERE id = $1 AND last_seen_at < now() - interval '1 minute'",
+    )
+    .bind(sid)
+    .execute(&state.db)
+    .await?;
     principal(
         (uid, email, name, role, orgs),
         Channel::Web,
@@ -223,6 +275,7 @@ pub async fn session_principal(
     )
     .map(|mut p| {
         p.session_token = Some(digest(raw));
+        p.sudo = sudo;
         Some(p)
     })
 }
@@ -370,7 +423,8 @@ pub async fn promote_session(
     let ttl = state.config.session_ttl;
     let r = sqlx::query(
         "UPDATE sessions SET token_hash = $2, csrf_token = $3, stage = 'full', pending_totp_secret = NULL,
-                mfa_attempts = 0, expires_at = now() + make_interval(secs => $4)
+                mfa_attempts = 0, sudo_until = NULL, webauthn_challenge = NULL, webauthn_purpose = NULL,
+                webauthn_expires_at = NULL, expires_at = now() + make_interval(secs => $4)
           WHERE id = $1 AND revoked_at IS NULL",
     )
     .bind(session_id)
@@ -579,6 +633,7 @@ mod tests {
             csrf: String::new(),
             session_id: None,
             session_token: None,
+            sudo: false,
         }
     }
 

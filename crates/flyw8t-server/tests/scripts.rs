@@ -21,7 +21,7 @@ async fn user(server: &TestServer, admin: &Browser, email: &str, role: &str, org
             ],
         )
         .await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    assert_eq!(r.location(), "/admin?m=user-created", "{}", r.body);
     server.login(email, "user-password-123").await
 }
 
@@ -82,7 +82,7 @@ async fn revisions(server: &TestServer, id: Uuid) -> i64 {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn every_save_is_a_permanent_revision_with_its_hash_diff_and_file() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let id = create(&server, &admin, "Clear temp", "global", "powershell").await;
 
     let r = save(
@@ -214,7 +214,7 @@ async fn every_save_is_a_permanent_revision_with_its_hash_diff_and_file() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn a_save_that_cannot_be_made_keeps_the_text_typed() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let id = create(&server, &admin, "Inventory", "global", "bash").await;
     assert_eq!(
         save(&server, &admin, id, 0, "echo first\n", "")
@@ -262,7 +262,7 @@ async fn checks_name_bad_parameters_missing_fields_and_placeholders() {
     let mut config = test_config(&fresh_database().await);
     config.script_checks = false;
     let server = start(config).await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Acme").await;
     let r = admin
         .post(
@@ -358,7 +358,7 @@ async fn checks_name_bad_parameters_missing_fields_and_placeholders() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn metadata_that_is_not_text_is_refused_not_a_server_error() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let id = create(&server, &admin, "Notes", "global", "bash").await;
     let r = admin
         .post(
@@ -401,7 +401,7 @@ async fn metadata_that_is_not_text_is_refused_not_a_server_error() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn technicians_edit_global_and_their_own_scripts_and_never_see_others() {
     let server = start_fresh().await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org_a = admin.create_org(&server, "Org A").await;
     let org_b = admin.create_org(&server, "Org B").await;
     let other = create(&server, &admin, "B only", &org_b.to_string(), "bash").await;
@@ -505,7 +505,7 @@ async fn missing_values_are_counted_at_the_level_a_script_reads() {
     let mut config = test_config(&fresh_database().await);
     config.script_checks = false;
     let server = start(config).await;
-    let admin = server.admin().await;
+    let admin = server.admin_sudo().await;
     let org = admin.create_org(&server, "Acme").await;
     let token = admin.enrollment_token(&server, org, "60", "1").await;
     let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
