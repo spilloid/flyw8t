@@ -193,6 +193,38 @@ pub fn cookie_name(state: &Shared) -> &'static str {
     }
 }
 
+/// Login CSRF (double submit): the sign-in page sets this cookie and puts the same value in the
+/// form, and a sign-in is accepted only when the two match. Another site can neither read the
+/// cookie nor set it (`__Host-` over HTTPS, SameSite=Strict), so it cannot sign a browser in to
+/// an account of its choosing. There is no session yet, so nothing is stored on the server.
+pub fn login_cookie_name(state: &Shared) -> &'static str {
+    if state.config.secure_cookies() {
+        "__Host-flyw8t_login"
+    } else {
+        "flyw8t_login"
+    }
+}
+
+/// How long a sign-in page can be left open before its form must be reloaded.
+pub const LOGIN_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+pub fn login_cookie_value<'a>(state: &Shared, headers: &'a HeaderMap) -> Option<&'a str> {
+    cookie_value(headers, login_cookie_name(state)).filter(|v| !v.is_empty())
+}
+
+pub fn set_login_cookie(state: &Shared, value: &str) -> String {
+    let secure = if state.config.secure_cookies() {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "{}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{secure}",
+        login_cookie_name(state),
+        LOGIN_TOKEN_TTL.as_secs()
+    )
+}
+
 fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(axum::http::header::COOKIE)
@@ -226,6 +258,13 @@ pub async fn session_principal(
     let Some((sid, csrf, sudo, uid, email, name, role, orgs)) = row else {
         return Ok(None);
     };
+    // For the session list; at most one write a minute per session.
+    sqlx::query(
+        "UPDATE sessions SET last_seen_at = now() WHERE id = $1 AND last_seen_at < now() - interval '1 minute'",
+    )
+    .bind(sid)
+    .execute(&state.db)
+    .await?;
     principal(
         (uid, email, name, role, orgs),
         Channel::Web,

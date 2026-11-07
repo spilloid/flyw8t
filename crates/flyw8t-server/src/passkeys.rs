@@ -16,7 +16,7 @@ use crate::web::{self, check_csrf, ctx, page, Form};
 use crate::Shared;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use flyw8t_protocol::webauthn::{self, b64url, from_b64url, Ceremony, Expected};
 use flyw8t_web::model::{PasskeyNewView, SudoView, WebAuthnCeremony};
@@ -442,6 +442,206 @@ pub async fn sudo(State(state): State<Shared>, WebUser(p): WebUser, body: Bytes)
         Ok(Redirect::to(&next).into_response())
     })
     .await
+}
+
+// ---------------------------------------------------------------------------------------
+// Sign-in
+//
+// Usernameless: the browser offers the passkeys it holds for this console, and the credential it answers with names the
+// person. A passkey that verifies its user (a PIN, a fingerprint or a device unlock) is two factors in one, so it signs
+// straight in to a full session, past the TOTP code. It does not start sudo mode: that stays a separate, deliberate
+// confirmation. The challenge is held against the browser's sign-in cookie, since there is no session yet.
+
+/// Sign-in pages one address may open in five minutes (each stores a challenge).
+const SIGN_IN_PAGES_PER_IP: u32 = 30;
+
+pub async fn sign_in_form(
+    State(state): State<Shared>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
+    headers: HeaderMap,
+) -> Response {
+    if let Ok(Some(_)) = auth::session_principal(&state, &headers).await {
+        return Redirect::to("/").into_response();
+    }
+    let token = auth::login_cookie_value(&state, &headers).map(String::from);
+    sign_in_page(&state, &ip, token, None, StatusCode::OK)
+        .await
+        .unwrap_or_else(|e| web::error_response(None, e))
+}
+
+/// The sign-in ceremony, under the browser's sign-in token (a new one when it has none, with its cookie).
+async fn sign_in_page(
+    state: &Shared,
+    ip: &str,
+    token: Option<String>,
+    error: Option<String>,
+    status: StatusCode,
+) -> AppResult<Response> {
+    let (_, rp_id) = rp(state)?;
+    if !state.limiter.allow(
+        &format!("passkey-sign-in:{ip}"),
+        SIGN_IN_PAGES_PER_IP,
+        Duration::from_secs(300),
+    ) {
+        return Err(AppError::RateLimited);
+    }
+    let (token, cookie) = match token {
+        Some(t) => (t, None),
+        None => {
+            let t = auth::random_secret(24);
+            let c = auth::set_login_cookie(state, &t);
+            (t, Some(c))
+        }
+    };
+    let mut challenge = vec![0u8; 32];
+    SystemRandom::new()
+        .fill(&mut challenge)
+        .map_err(|_| anyhow::anyhow!("no randomness"))?;
+    sqlx::query("DELETE FROM webauthn_sign_in_challenges WHERE expires_at < now()")
+        .execute(&state.db)
+        .await?;
+    sqlx::query(
+        "INSERT INTO webauthn_sign_in_challenges (login_hash, challenge, expires_at)
+         VALUES ($1, $2, now() + make_interval(secs => $3))
+         ON CONFLICT (login_hash) DO UPDATE SET challenge = excluded.challenge, expires_at = excluded.expires_at",
+    )
+    .bind(auth::digest(&token))
+    .bind(&challenge)
+    .bind(CEREMONY.as_secs_f64())
+    .execute(&state.db)
+    .await?;
+    let options = json!({
+        "mode": "get",
+        "publicKey": {
+            "challenge": b64url(&challenge),
+            "rpId": rp_id,
+            // Empty: the browser offers whichever of its passkeys belong to this console.
+            "allowCredentials": [],
+            "userVerification": "required",
+            "timeout": CEREMONY.as_millis() as u64,
+        }
+    });
+    let html = flyw8t_web::passkey_sign_in_page(
+        WebAuthnCeremony {
+            action: "/login/passkey".into(),
+            options: options.to_string(),
+            error,
+        },
+        &token,
+    );
+    let mut r = ceremony_page(html);
+    *r.status_mut() = status;
+    if let Some(c) = cookie {
+        r.headers_mut().insert(
+            header::SET_COOKIE,
+            c.parse().map_err(|_| anyhow::anyhow!("cookie header"))?,
+        );
+    }
+    Ok(r)
+}
+
+pub async fn sign_in(
+    State(state): State<Shared>,
+    crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let form = Form::parse(&body);
+    let result: AppResult<Response> = async {
+        // Login CSRF, as for the password form: the ceremony form carries the sign-in token as its `csrf`.
+        let token = auth::login_cookie_value(&state, &headers).map(String::from);
+        let presented = form.get("csrf").unwrap_or("");
+        let Some(token) = token.filter(|t| web::constant_time_eq(t.as_bytes(), presented.as_bytes())) else {
+            return sign_in_page(
+                &state,
+                &ip,
+                None,
+                Some("This sign-in page had expired, or did not come from this console. Try again.".into()),
+                StatusCode::FORBIDDEN,
+            )
+            .await;
+        };
+        if !state.limiter.allow(&format!("login-ip:{ip}"), 20, Duration::from_secs(300)) {
+            return Err(AppError::RateLimited);
+        }
+        let (origin, rp_id) = rp(&state)?;
+        let field = |k: &str| form.get(k).and_then(from_b64url).unwrap_or_default();
+        let credential = field("credential_id");
+        let mut tx = state.db.begin().await?;
+        // Spent by this answer, right or wrong.
+        let challenge: Option<(Vec<u8>, bool)> = sqlx::query_as(
+            "DELETE FROM webauthn_sign_in_challenges WHERE login_hash = $1 RETURNING challenge, expires_at > now()",
+        )
+        .bind(auth::digest(&token))
+        .fetch_optional(&mut *tx)
+        .await?;
+        let owner: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT c.user_id, u.email FROM webauthn_credentials c JOIN users u ON u.id = c.user_id WHERE c.credential_id = $1",
+        )
+        .bind(&credential)
+        .fetch_optional(&mut *tx)
+        .await?;
+        // The user's lock, as for every check of how they sign in, so a reset that removes this key either happens
+        // first (and the key is gone) or waits for this sign-in and then signs it out. A disabled account is refused.
+        let key: Option<(Uuid, Uuid, String, Vec<u8>, i64)> = match &owner {
+            Some((user, email)) if auth::lock_user_factor(&mut tx, *user).await.is_ok() => sqlx::query_as::<_, (Uuid, Vec<u8>, i64)>(
+                "SELECT id, public_key, sign_count FROM webauthn_credentials WHERE credential_id = $1 AND user_id = $2",
+            )
+            .bind(&credential)
+            .bind(user)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|(id, pk, n)| (id, *user, email.clone(), pk, n)),
+            _ => None,
+        };
+        let outcome = match (&challenge, &key) {
+            (None, _) | (Some((_, false)), _) => Err("That request expired. Try again.".to_string()),
+            (_, None) => Err("That passkey cannot sign in here.".to_string()),
+            (Some((challenge, true)), Some((_, _, _, public_key, last))) => webauthn::verify_assertion(
+                public_key,
+                &Expected { ceremony: Ceremony::Get, challenge, origin: &origin, rp_id: &rp_id },
+                &field("authenticator_data"),
+                &field("client_data_json"),
+                &field("signature"),
+            )
+            .map_err(|e| format!("Not signed in: {e}."))
+            .and_then(|a| counter_moved(*last, a.sign_count)),
+        };
+        let email = owner.as_ref().map(|o| o.1.clone()).unwrap_or_default();
+        let audit = Audit::anonymous("web", email, "user.login").ip(&ip);
+        let (count, id, user) = match (outcome, &key) {
+            (Ok(count), Some((id, user, ..))) => (count, *id, *user),
+            (outcome, _) => {
+                let msg = outcome.err().unwrap_or_else(|| "That passkey cannot sign in here.".into());
+                audit
+                    .denied()
+                    .detail(json!({ "method": "passkey", "reason": msg }))
+                    .record(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                return sign_in_page(&state, &ip, Some(token), Some(msg), StatusCode::UNAUTHORIZED).await;
+            }
+        };
+        sqlx::query("UPDATE webauthn_credentials SET sign_count = $2, last_used_at = now() WHERE id = $1")
+            .bind(id)
+            .bind(i64::from(count))
+            .execute(&mut *tx)
+            .await?;
+        let ua = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let cookie = auth::create_session(&state, &mut tx, user, &ip, ua, Stage::Full).await?;
+        audit
+            .target("user", user)
+            .detail(json!({ "method": "passkey", "passkey": id }))
+            .record(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response())
+    }
+    .await;
+    result.unwrap_or_else(|e| web::error_response(None, e))
 }
 
 /// An authenticator that keeps a counter must have moved it forward; one that went back may have been cloned. Synced

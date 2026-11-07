@@ -199,7 +199,8 @@ fn job_table(rows: Vec<JobRow>, now: OffsetDateTime, show_device: bool) -> impl 
 
 // ---------------------------------------------------------------------------------------
 
-pub fn login_page(error: Option<String>, no_admin: bool, csrf_ok_hint: Option<String>) -> String {
+/// The sign-in page. `login_token` is the value of the sign-in cookie set with it (login CSRF).
+pub fn login_page(error: Option<String>, no_admin: bool, login_token: &str) -> String {
     let note = no_admin.then(|| {
         view! {
             <p class="flash bad">
@@ -208,7 +209,7 @@ pub fn login_page(error: Option<String>, no_admin: bool, csrf_ok_hint: Option<St
         }
     });
     let err = error.map(|e| view! { <p class="flash bad" role="alert">{e}</p> });
-    let hint = csrf_ok_hint.map(|h| view! { <p class="muted">{h}</p> });
+    let login_token = login_token.to_string();
     render(view! {
         <html lang="en">
             {head("Sign in · flyw8t".into(), None, None)}
@@ -219,11 +220,30 @@ pub fn login_page(error: Option<String>, no_admin: bool, csrf_ok_hint: Option<St
                     {note}
                     {err}
                     <form method="post" action="/login" class="stack">
+                        <input type="hidden" name="login_csrf" value=login_token/>
                         <label>"Email"<input type="email" name="email" autocomplete="username" required=true autofocus=true/></label>
                         <label>"Password"<input type="password" name="password" autocomplete="current-password" required=true/></label>
                         <button type="submit">"Sign in"</button>
                     </form>
-                    {hint}
+                    <p><a href="/login/passkey">"Sign in with a passkey"</a></p>
+                </main>
+            </body>
+        </html>
+    })
+}
+
+/// Signing in with a passkey. `login_token` is the sign-in cookie's value; the ceremony form carries it as its CSRF token.
+pub fn passkey_sign_in_page(ceremony: WebAuthnCeremony, login_token: &str) -> String {
+    render(view! {
+        <html lang="en">
+            {head("Sign in with a passkey · flyw8t".into(), None, Some("/static/passkey.js"))}
+            <body class="login">
+                <main class="card narrow">
+                    <h1>"flyw8t"</h1>
+                    <p class="muted">"Your browser or security key shows the passkeys it holds for this console. Choose yours, then unlock it."</p>
+                    {ceremony_form(ceremony, login_token.to_string(), (), "Sign in with a passkey")}
+                    <p class="muted">"A security key added only for confirmations, without a passkey stored on it, cannot be offered here: sign in with your password."</p>
+                    <p><a href="/login">"Sign in with your password instead"</a></p>
                 </main>
             </body>
         </html>
@@ -1444,6 +1464,7 @@ pub fn admin_page(
                     <td data-label="Role">{u.role.clone()}{u.disabled.then_some(" (disabled)")}</td>
                     <td data-label="Organizations">{if u.role == "admin" { "all".to_string() } else { u.organizations.join(", ") }}</td>
                     <td data-label="Two-step">{mfa_cell(&u, &ctx.csrf)}</td>
+                    <td data-label="Sessions">{sessions_cell(&u, &ctx.csrf)}</td>
                 </tr>
             }
         })
@@ -1482,7 +1503,7 @@ pub fn admin_page(
         <section>
             <h2>"Users"</h2>
             <table class="list">
-                <thead><tr><th scope="col">"User"</th><th scope="col">"Role"</th><th scope="col">"Organizations"</th><th scope="col">"Two-step"</th></tr></thead>
+                <thead><tr><th scope="col">"User"</th><th scope="col">"Role"</th><th scope="col">"Organizations"</th><th scope="col">"Two-step"</th><th scope="col">"Sessions"</th></tr></thead>
                 <tbody>{user_rows}</tbody>
             </table>
             <form method="post" action="/admin/users" class="card stack">
@@ -2044,6 +2065,42 @@ pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
         }
         .into_any()
     };
+    let others = a.sessions.iter().filter(|s| !s.current).count();
+    let session_rows = a
+        .sessions
+        .into_iter()
+        .map(|s| {
+            let url = format!("/account/sessions/{}/revoke", s.id);
+            let label = if s.current { "Sign out" } else { "Sign out that session" };
+            let state = match (s.current, s.partial) {
+                (true, _) => view! { <span class="badge good">"This browser"</span> }.into_any(),
+                (false, true) => view! { <span class="badge bad" title="The password was accepted and the second step has not been finished. If this was not you, change your password.">"Password only"</span> }.into_any(),
+                (false, false) => view! { <span class="badge neutral">"Signed in"</span> }.into_any(),
+            };
+            view! {
+                <tr>
+                    <td data-label="Browser" title=s.user_agent.clone()>{browser_summary(&s.user_agent)}" "{state}</td>
+                    <td data-label="Address" class="mono">{s.client_ip}</td>
+                    <td data-label="Signed in">{time_cell(now, s.created_at)}</td>
+                    <td data-label="Last active">{time_cell(now, s.last_seen_at)}</td>
+                    <td>
+                        <form method="post" action=url class="inline-form">
+                            <input type="hidden" name="csrf" value=csrf.clone()/>
+                            <button type="submit" class="link">{label}</button>
+                        </form>
+                    </td>
+                </tr>
+            }
+        })
+        .collect::<Vec<_>>();
+    let revoke_others = (others > 0).then(|| {
+        view! {
+            <form method="post" action="/account/sessions/revoke-others" class="inline-form">
+                <input type="hidden" name="csrf" value=csrf.clone()/>
+                <button type="submit" class="bad">"Sign out everywhere else"</button>
+            </form>
+        }
+    });
     let body = view! {
         <h1>"Your account"</h1>
         <dl class="facts">
@@ -2059,8 +2116,50 @@ pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
             <h2>"Passkeys and security keys"</h2>
             {passkeys}
         </section>
+        <section>
+            <h2>"Where you are signed in"</h2>
+            <p class="muted">"Browsers holding a session of yours. One you do not recognise means someone has your password: sign it out, then change your password."</p>
+            <table class="list">
+                <thead><tr><th>"Browser"</th><th>"Address"</th><th>"Signed in"</th><th>"Last active"</th><th></th></tr></thead>
+                <tbody>{session_rows}</tbody>
+            </table>
+            {revoke_others}
+        </section>
     };
     shell("Your account", ctx, Nav::Account, None, body)
+}
+
+/// A short name for a user agent ("Edge on Windows"); the full string is shown on hover.
+pub fn browser_summary(ua: &str) -> String {
+    let browser = [
+        ("Edg/", "Edge"),
+        ("OPR/", "Opera"),
+        ("Firefox/", "Firefox"),
+        ("Chrome/", "Chrome"),
+        ("Safari/", "Safari"),
+    ]
+    .iter()
+    .find(|(k, _)| ua.contains(k))
+    .map(|(_, v)| *v);
+    let os = [
+        ("Windows", "Windows"),
+        ("iPhone", "iPhone"),
+        ("iPad", "iPad"),
+        ("Android", "Android"),
+        ("Mac OS X", "macOS"),
+        ("CrOS", "ChromeOS"),
+        ("Linux", "Linux"),
+    ]
+    .iter()
+    .find(|(k, _)| ua.contains(k))
+    .map(|(_, v)| *v);
+    match (browser, os) {
+        (Some(b), Some(o)) => format!("{b} on {o}"),
+        (Some(b), None) => b.to_string(),
+        (None, Some(o)) => format!("A browser on {o}"),
+        (None, None) if ua.is_empty() => "Unknown browser".to_string(),
+        (None, None) => ua.chars().take(40).collect(),
+    }
 }
 
 /// A WebAuthn ceremony as a form: `/static/passkey.js` runs it when the form is submitted, fills the hidden fields and
@@ -2157,6 +2256,21 @@ pub fn sudo_page(ctx: &PageCtx, v: SudoView) -> String {
         Some("/static/passkey.js"),
         body,
     )
+}
+
+fn sessions_cell(u: &UserRow, csrf: &str) -> impl IntoView {
+    if u.sessions == 0 {
+        return view! { <span class="muted">"none"</span> }.into_any();
+    }
+    let url = format!("/admin/users/{}/sign-out", u.id);
+    view! {
+        {u.sessions.to_string()}
+        <form method="post" action=url class="inline-form">
+            <input type="hidden" name="csrf" value=csrf.to_string()/>
+            <button type="submit" class="link" title="Ends every session of theirs and the support sessions they started">"Sign out everywhere"</button>
+        </form>
+    }
+    .into_any()
 }
 
 fn mfa_cell(u: &UserRow, csrf: &str) -> impl IntoView {

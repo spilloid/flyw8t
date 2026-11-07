@@ -3,7 +3,8 @@
 
 mod common;
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
 use common::*;
 use flyw8t_protocol::webauthn::{b64url, FLAG_UP};
 use flyw8t_server::config::Config;
@@ -522,5 +523,253 @@ async fn each_challenge_serves_only_its_own_ceremony_and_sudo_is_checked_when_th
         r.body
     );
     assert_eq!(passkeys_of(&server, ADMIN_EMAIL).await, 1);
+    server.stop().await;
+}
+
+// ---------------------------------------------------------------------------------------
+// Signing in with a passkey
+
+/// A browser opening the passkey sign-in page, with its sign-in cookie if it has one: the cookie it then holds, the
+/// token its form carries, and the challenge.
+async fn open_sign_in(server: &TestServer, cookie: Option<&str>) -> (String, String, Vec<u8>) {
+    let mut req = Request::get("/login/passkey");
+    if let Some(c) = cookie {
+        req = req.header(header::COOKIE, c);
+    }
+    let page = server.request(req.body(Body::empty()).unwrap()).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(page.body.contains("/static/passkey.js"));
+    let cookie = cookie
+        .map(String::from)
+        .or_else(|| page.cookie())
+        .expect("sign-in cookie");
+    let csrf = extract(&page.body, r#"name="csrf" value="([^"]+)""#).expect("token on the page");
+    (cookie, csrf, ceremony_challenge(&page.body))
+}
+
+async fn post_sign_in(
+    server: &TestServer,
+    cookie: &str,
+    csrf: &str,
+    key: &SoftKey,
+    answer: (Vec<u8>, Vec<u8>, Vec<u8>),
+) -> Response {
+    let (auth, client, sig) = answer;
+    let fields = [
+        ("csrf", csrf.to_string()),
+        ("credential_id", b64url(&key.id)),
+        ("authenticator_data", b64url(&auth)),
+        ("client_data_json", b64url(&client)),
+        ("signature", b64url(&sig)),
+    ];
+    let fields: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    server
+        .request(
+            Request::post("/login/passkey")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form(&fields)))
+                .unwrap(),
+        )
+        .await
+}
+
+/// Sign in with `key` from a fresh browser.
+async fn sign_in_with(server: &TestServer, key: &mut SoftKey) -> Response {
+    let (cookie, csrf, challenge) = open_sign_in(server, None).await;
+    let answer = key.assert(&challenge);
+    post_sign_in(server, &cookie, &csrf, key, answer).await
+}
+
+fn session_cookie(r: &Response) -> Option<String> {
+    r.headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
+        .find(|c| c.starts_with("flyw8t_session=") && !c.ends_with('='))
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL (FLYW8T_TEST_DATABASE_URL)"]
+async fn a_passkey_signs_in_past_the_code_but_not_into_sudo_mode() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let mut key = admin.sudo(&server, ADMIN_PASSWORD).await;
+    // Two-step verification on: a passkey that verifies its user stands for both factors.
+    sqlx::query("UPDATE users SET totp_secret = $2, totp_enabled_at = now() WHERE email = $1")
+        .bind(ADMIN_EMAIL)
+        .bind(totp::new_secret())
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let login = server
+        .request(Request::get("/login").body(Body::empty()).unwrap())
+        .await;
+    assert!(login.body.contains(r#"href="/login/passkey""#));
+
+    let r = sign_in_with(&server, &mut key).await;
+    assert_eq!(r.location(), "/", "{}", r.body);
+    let b = server.browser(session_cookie(&r).expect("a session")).await;
+    // A full session, with no sudo mode: guarded changes still ask for a confirmation.
+    assert_eq!(
+        create_user(&b, &server, TECH).await.location(),
+        "/sudo?next=%2Fadmin"
+    );
+    assert!(!user_exists(&server, TECH).await);
+    let (method,): (String,) = sqlx::query_as(
+        "SELECT detail->>'method' FROM audit_events WHERE action = 'user.login' AND outcome = 'success' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(method, "passkey");
+
+    // A key that did not verify its user (touched only) does not sign in.
+    key.flags = FLAG_UP;
+    let r = sign_in_with(&server, &mut key).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert!(session_cookie(&r).is_none());
+    server.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL (FLYW8T_TEST_DATABASE_URL)"]
+async fn a_sign_in_challenge_belongs_to_one_browser_and_is_answered_once() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let mut key = admin.sudo(&server, ADMIN_PASSWORD).await;
+
+    // Answered once: the same answer again finds no challenge.
+    let (cookie, csrf, challenge) = open_sign_in(&server, None).await;
+    let answer = key.assert(&challenge);
+    let first = post_sign_in(&server, &cookie, &csrf, &key, answer.clone()).await;
+    assert!(session_cookie(&first).is_some(), "{}", first.body);
+    let again = post_sign_in(&server, &cookie, &csrf, &key, answer).await;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+    assert!(again.body.contains("expired"), "{}", again.body);
+    assert!(session_cookie(&again).is_none());
+
+    // One browser's challenge answered from another (a phishing page relaying it) is refused. The other browser's page
+    // is opened last, so its challenge is the newest one the server holds.
+    let (cookie, csrf, _) = open_sign_in(&server, None).await;
+    let (_, _, theirs) = open_sign_in(&server, None).await;
+    let answer = key.assert(&theirs);
+    let r = post_sign_in(&server, &cookie, &csrf, &key, answer).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert!(session_cookie(&r).is_none());
+
+    // An expired challenge.
+    let (cookie, csrf, challenge) = open_sign_in(&server, None).await;
+    sqlx::query("UPDATE webauthn_sign_in_challenges SET expires_at = now() - interval '1 second'")
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let answer = key.assert(&challenge);
+    let r = post_sign_in(&server, &cookie, &csrf, &key, answer).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert!(r.body.contains("expired"), "{}", r.body);
+
+    // The form's token must be the cookie's: no cookie, or another page's token, is refused before anything is spent.
+    let (cookie, csrf, challenge) = open_sign_in(&server, None).await;
+    let (other_cookie, other_csrf, _) = open_sign_in(&server, None).await;
+    for (c, t) in [
+        ("flyw8t_login=", ""),
+        (cookie.as_str(), other_csrf.as_str()),
+        (other_cookie.as_str(), csrf.as_str()),
+    ] {
+        let answer = key.assert(&challenge);
+        let r = post_sign_in(&server, c, t, &key, answer).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{c} {t}");
+        assert!(session_cookie(&r).is_none());
+    }
+    let answer = key.assert(&challenge);
+    let r = post_sign_in(&server, &cookie, &csrf, &key, answer).await;
+    assert!(
+        session_cookie(&r).is_some(),
+        "the challenge was not spent by the refused posts: {}",
+        r.body
+    );
+
+    // Reopening the page keeps the browser's sign-in cookie (an open password form in another tab still works) and
+    // replaces the challenge.
+    let (cookie, csrf, old) = open_sign_in(&server, None).await;
+    let (same, _, new) = open_sign_in(&server, Some(&cookie)).await;
+    assert_eq!(same, cookie);
+    assert_ne!(old, new);
+    let answer = key.assert(&old);
+    assert_eq!(
+        post_sign_in(&server, &cookie, &csrf, &key, answer)
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL (FLYW8T_TEST_DATABASE_URL)"]
+async fn only_a_current_key_of_an_enabled_account_signs_in() {
+    let server = start_fresh().await;
+    let admin = server.admin_sudo().await;
+    assert_eq!(
+        create_user(&admin, &server, TECH).await.location(),
+        "/admin?m=user-created"
+    );
+    let tech = server.login(TECH, TECH_PASSWORD).await;
+    let mut key = tech.sudo(&server, TECH_PASSWORD).await;
+
+    // A key nobody registered.
+    let mut stranger = SoftKey::new(&server);
+    let r = sign_in_with(&server, &mut stranger).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert!(r.body.contains("cannot sign in here"), "{}", r.body);
+
+    // A registered key whose counter went backwards (a possible clone).
+    key.counter = 5;
+    assert!(session_cookie(&sign_in_with(&server, &mut key).await).is_some());
+    key.counter = 3;
+    let r = sign_in_with(&server, &mut key).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert!(r.body.contains("counter"), "{}", r.body);
+    key.counter = 10;
+    assert!(session_cookie(&sign_in_with(&server, &mut key).await).is_some());
+
+    // A disabled account.
+    let disable = |on: bool| {
+        let db = server.state.db.clone();
+        async move {
+            sqlx::query(
+                "UPDATE users SET disabled_at = CASE WHEN $2 THEN now() END WHERE email = $1",
+            )
+            .bind(TECH)
+            .bind(on)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+    };
+    disable(true).await;
+    assert_eq!(
+        sign_in_with(&server, &mut key).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    disable(false).await;
+    assert!(session_cookie(&sign_in_with(&server, &mut key).await).is_some());
+
+    // After an administrator's reset the key is gone.
+    let (id,): (Uuid,) = sqlx::query_as("SELECT id FROM users WHERE email = $1")
+        .bind(TECH)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    let r = admin
+        .post(&server, &format!("/admin/users/{id}/mfa/reset"), &[])
+        .await;
+    assert_eq!(r.location(), "/admin?m=mfa-reset");
+    assert_eq!(
+        sign_in_with(&server, &mut key).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(audit_count(&server, "user.login", "denied").await >= 4);
     server.stop().await;
 }

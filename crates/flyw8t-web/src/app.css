@@ -77,6 +77,8 @@ fieldset { border: 1px solid var(--line); border-radius: 6px; display: flex; fle
 .badge.busy { background: var(--busy-bg); color: var(--busy-fg); }
 .badge.neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
 .flash { padding: 0.6rem 0.8rem; border-radius: 8px; margin: 0 0 1rem; }
+/* The passkey status line takes no room until the ceremony says something. */
+#webauthn-status:empty { display: none; }
 .flash.ok { background: var(--good-bg); color: var(--good-fg); }
 .flash.bad { background: var(--bad-bg); color: var(--bad-fg); }
 

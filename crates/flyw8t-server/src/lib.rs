@@ -28,6 +28,7 @@ pub mod registry;
 pub mod remote_access;
 pub mod script_check;
 pub mod scripts;
+pub mod sessions;
 pub mod support;
 pub mod totp;
 pub mod web;
@@ -130,6 +131,10 @@ pub fn router(state: Shared) -> Router {
         .route("/login", get(web::login_form).post(web::login))
         .route("/logout", post(web::logout))
         .route("/login/mfa", get(mfa::challenge_form).post(mfa::challenge))
+        .route(
+            "/login/passkey",
+            get(passkeys::sign_in_form).post(passkeys::sign_in),
+        )
         .route("/account", get(mfa::account))
         .route("/account/mfa", get(mfa::setup_form).post(mfa::setup))
         .route("/account/mfa/recovery-codes", post(mfa::regenerate_codes))
@@ -137,6 +142,11 @@ pub fn router(state: Shared) -> Router {
         .route("/account/passkeys/new", get(passkeys::new_form))
         .route("/account/passkeys", post(passkeys::register))
         .route("/account/passkeys/{id}/remove", post(passkeys::remove))
+        .route("/account/sessions/{id}/revoke", post(sessions::revoke))
+        .route(
+            "/account/sessions/revoke-others",
+            post(sessions::revoke_others),
+        )
         .route("/sudo", get(passkeys::sudo_form).post(passkeys::sudo))
         .route("/", get(web::overview))
         .route("/devices", get(web::devices))
@@ -192,6 +202,7 @@ pub fn router(state: Shared) -> Router {
         .route("/admin", get(web::admin))
         .route("/admin/users", post(web::create_user))
         .route("/admin/users/{id}/mfa/reset", post(mfa::admin_reset))
+        .route("/admin/users/{id}/sign-out", post(sessions::admin_sign_out))
         .route("/admin/tokens", post(web::create_api_token))
         .route("/admin/tokens/{id}/revoke", post(web::revoke_api_token))
         .route(

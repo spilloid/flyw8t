@@ -52,7 +52,9 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 - **Control:** two-step verification (TOTP) required by default, with replay refusal, five wrong codes per partial session and ten per user per five minutes, single-use hashed recovery codes, and the session secret rotated when the second factor completes; Argon2id passwords (minimum 12 characters); login rate limits per IP and per email with a constant-time path for unknown users; sessions expire after 12 h and are revocable at sign-out; CSRF tokens on every form; every mutation audited with actor and credential.
 - **Evidence:** CSRF forgery test; audit assertions in `vertical_slice`; `tests/mfa.rs` (partial sessions shut out, replay refused, recovery codes single-use, attempts exhausted, admin reset), each mutation-checked.
 - **Control (sudo mode):** changes that widen what can run or who can sign in (custom field definitions, users, API tokens, second-factor resets, further passkeys) need a WebAuthn assertion with user verification made in the last 5 minutes on the same session, bound to the console's origin and a single-use challenge. A phished password and TOTP code are not enough for them.
-- **Residual:** TOTP is phishable in real time (a proxy that relays the code within 30 seconds); passkeys close this for sudo-mode changes, but **sign-in itself still accepts password + TOTP**, so a relayed sign-in reaches everything else. TOTP secrets are stored unencrypted in PostgreSQL, so a database reader can mint codes (they can also read everything else; an application-held key would narrow this). `FLYW8T_REQUIRE_MFA=false` lets users opt out. No OIDC yet. No session list or force-logout UI beyond the administrator's MFA reset.
+- **Control (passkey sign-in):** a passkey that verifies its user signs in as both factors. The challenge is held against the browser's sign-in cookie and spent by the first answer, and the assertion is bound to the console's origin, so a phishing site can neither relay the challenge to another browser nor get a usable answer for its own origin. It never grants sudo mode. Evidence: `a_passkey_signs_in_past_the_code_but_not_into_sudo_mode`, `a_sign_in_challenge_belongs_to_one_browser_and_is_answered_once`, `only_a_current_key_of_an_enabled_account_signs_in`.
+- **Control (sessions):** each person's account page lists their live sessions, partial ones (password accepted, second factor owed) marked "Password only", with the address, browser, sign-in time and last activity; any one, or every one but this browser, can be signed out. An administrator can sign a user out everywhere, which also ends the attended-support sessions they started. Signing out needs no sudo mode, so it is never slowed down. Evidence: `tests/sessions.rs`.
+- **Residual:** TOTP is phishable in real time (a proxy that relays the code within 30 seconds); passkeys close this for sudo-mode changes and for anyone who signs in with one, but **password + TOTP is still accepted for sign-in**, so a relayed sign-in reaches everything but sudo-mode changes. Requiring passkeys for sign-in (per user or server-wide) is not built. TOTP secrets are stored unencrypted in PostgreSQL, so a database reader can mint codes (they can also read everything else; an application-held key would narrow this). `FLYW8T_REQUIRE_MFA=false` lets users opt out. No OIDC yet.
 
 ### T7: Fleet-wide abuse
 - **Control:** there is no fleet-wide or multi-device operation; one job targets one device. Actions are read-only.
@@ -80,8 +82,8 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 ### T13: Browser-side attacks on the console
 - **Control:** CSP `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'`; no inline script; `X-Frame-Options: DENY`; `nosniff`; `Referrer-Policy: same-origin` (`no-referrer` would make browsers send `Origin: null` on the console's own form posts); flash messages chosen from fixed codes so a URL cannot inject text.
-- **Login CSRF:** state-changing requests whose `Origin` names another site are refused before routing (covers sign-in, which has no session token yet). Evidence: `cross_origin_posts_are_refused`.
-- **Residual:** a browser that sends no `Origin` on a cross-site POST would bypass the login check (current browsers send it).
+- **Login CSRF:** state-changing requests whose `Origin` names another site are refused before routing, and sign-in also needs a double-submit token: the sign-in page sets a `SameSite=Strict`, HttpOnly cookie (`__Host-` over HTTPS) and puts the same random value in the form, and a sign-in is accepted only when they match. Evidence: `cross_origin_posts_are_refused`, `a_sign_in_must_carry_the_token_its_page_set`.
+- **Residual:** over plain HTTP (loopback only) the token cookie has no `__Host-` prefix, so a page on another port of the same host could set it.
 
 ### T14: Denial of service
 - **Control:** bounded queues and message sizes; per-IP handshake, enrollment and login limits; an absolute 30 s handshake deadline that ping frames cannot extend; at most 100 messages per second per authenticated agent connection; at most 50 events per job for reports that change nothing; device-supplied text truncated when stored; a 256 KiB body limit on HTTP.
@@ -97,12 +99,12 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 ## Open items before production
 
-1. OIDC sign-in and WebAuthn. TOTP two-step verification is built and required by default (2026-10-29).
+1. OIDC sign-in. TOTP two-step verification is built and required by default (2026-10-29); passkeys for sudo mode (2026-11-04) and sign-in (2026-11-06).
 2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Done for attended support** (Codex gpt-5.6-sol, 2026-10-29: 13 findings, 12 fixed, 1 partly fixed); two-step verification reviewed (row 13) and both re-reviewed (row 15, 10 of 11 fixed); **the row 15 fixes are not yet reviewed.**
 3. Authenticode-signed agent and server binaries; signed update manifests before any auto-update.
 4. Pin the server identity at enrollment.
 5. Postgres row-level security as defense in depth for T2.
-6. A session list and forced logout.
+6. ~~A session list and forced logout~~ (built 2026-11-06).
 7. External penetration test.
 
 ## Attended support

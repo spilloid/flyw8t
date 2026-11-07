@@ -253,6 +253,8 @@ pub struct UserRow {
     pub mfa: bool,
     /// Passkeys and security keys registered.
     pub passkeys: i64,
+    /// Live sessions, partial ones included.
+    pub sessions: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -462,6 +464,21 @@ pub struct AccountView {
     pub passkeys: Vec<PasskeyRow>,
     /// Sudo mode lasts until then, when the session is in it.
     pub sudo_until: Option<OffsetDateTime>,
+    pub sessions: Vec<SessionRow>,
+}
+
+/// A live browser session of the person viewing the account page.
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub id: Uuid,
+    /// The session this page was loaded with.
+    pub current: bool,
+    /// The password was accepted and the second factor is still owed.
+    pub partial: bool,
+    pub created_at: OffsetDateTime,
+    pub last_seen_at: OffsetDateTime,
+    pub client_ip: String,
+    pub user_agent: String,
 }
 
 #[derive(Debug, Clone)]

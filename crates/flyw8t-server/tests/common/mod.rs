@@ -130,15 +130,34 @@ impl TestServer {
         }
     }
 
+    /// Open the sign-in page: its login CSRF cookie (`name=value`) and the token its form carries.
+    pub async fn login_token(&self) -> (String, String) {
+        let page = self
+            .request(Request::get("/login").body(Body::empty()).unwrap())
+            .await;
+        let cookie = page.cookie().expect("sign-in cookie");
+        let token = extract(&page.body, r#"name="login_csrf" value="([^"]+)""#)
+            .expect("login token on the sign-in page");
+        (cookie, token)
+    }
+
+    /// A sign-in form post, as the sign-in page would send it.
+    pub async fn login_request(&self, email: &str, password: &str) -> Request<Body> {
+        let (cookie, token) = self.login_token().await;
+        Request::post("/login")
+            .header(header::COOKIE, cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form(&[
+                ("login_csrf", token.as_str()),
+                ("email", email),
+                ("password", password),
+            ])))
+            .unwrap()
+    }
+
     pub async fn login(&self, email: &str, password: &str) -> Browser {
-        let body = form(&[("email", email), ("password", password)]);
         let resp = self
-            .request(
-                Request::post("/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
+            .request(self.login_request(email, password).await)
             .await;
         assert_eq!(
             resp.status,

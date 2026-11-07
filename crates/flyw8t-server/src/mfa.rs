@@ -205,15 +205,12 @@ pub async fn challenge(
                 .record(&mut *tx)
                 .await?;
             tx.commit().await?;
-            return Ok((
+            return Ok(web::login_page_response(
+                &state,
                 StatusCode::UNAUTHORIZED,
-                Html(flyw8t_web::login_page(
-                    Some("Too many incorrect codes. Sign in again.".into()),
-                    false,
-                    None,
-                )),
-            )
-                .into_response());
+                Some("Too many incorrect codes. Sign in again."),
+                false,
+            ));
         }
         let code = form.get("code").unwrap_or("");
         let Some(spent) = spend_factor(&mut tx, s.user_id, &secret, code, true).await? else {
@@ -451,6 +448,7 @@ async fn account_view(state: &Shared, user: Uuid, session: Option<Uuid>) -> AppR
             })
             .collect(),
         sudo_until,
+        sessions: crate::sessions::list(state, user, session).await?,
     })
 }
 

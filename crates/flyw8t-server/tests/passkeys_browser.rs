@@ -317,6 +317,50 @@ async fn a_browser_adds_a_passkey_and_confirms_sudo_mode_with_it() {
             .unwrap();
     assert!(!in_sudo);
 
+    // Sign out, then sign back in with the passkey alone: the browser offers the key it holds for this console.
+    cdp.call(
+        Some(&tab),
+        "WebAuthn.setUserVerified",
+        json!({ "authenticatorId": authenticator, "isUserVerified": true }),
+    )
+    .await;
+    cdp.eval(
+        &tab,
+        "document.querySelector('form[action=\"/logout\"]').submit(); true",
+    )
+    .await;
+    cdp.wait_for(
+        &tab,
+        "the sign-in page",
+        "location.pathname === '/login' && !!document.querySelector('a[href=\"/login/passkey\"]')",
+    )
+    .await;
+    cdp.eval(
+        &tab,
+        "document.querySelector('a[href=\"/login/passkey\"]').click(); true",
+    )
+    .await;
+    cdp.wait_for(
+        &tab,
+        "the passkey sign-in page",
+        "location.pathname === '/login/passkey' && !!document.querySelector('#webauthn button:enabled')",
+    )
+    .await;
+    cdp.submit(&tab).await;
+    cdp.wait_for(
+        &tab,
+        "the console, signed in with the passkey",
+        "location.pathname === '/' && !!document.querySelector('header.top')",
+    )
+    .await;
+    let method: String = sqlx::query_scalar(
+        "SELECT detail->>'method' FROM audit_events WHERE action = 'user.login' AND outcome = 'success' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(method, "passkey");
+
     let _ = child.kill().await;
     server.stop().await;
 }
