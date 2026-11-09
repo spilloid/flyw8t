@@ -90,13 +90,12 @@ fn main() -> Result<()> {
         .then(|| {
             let path = state_dir.join("logs").join("agent.log");
             flyw8t_agent::logfile::RotatingFile::open(&path, SERVICE_LOG_BYTES)
-                .map_err(|e| {
+                .inspect_err(|_e| {
                     #[cfg(windows)]
                     flyw8t_agent::winsec::event_log_warning(&format!(
-                        "flyw8t agent: cannot open its log {}: {e}. Running without a log.",
+                        "flyw8t agent: cannot open its log {}: {_e}. Running without a log.",
                         path.display()
                     ));
-                    e
                 })
                 .ok()
         })
