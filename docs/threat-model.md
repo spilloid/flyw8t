@@ -94,7 +94,8 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 | Threat | Control | Residual |
 |---|---|---|
-| Local user reads the device key | `service install` restricts the state directory to SYSTEM + Administrators | A local administrator can read it (by design). Running the agent in the foreground with a custom state dir does **not** restrict permissions. |
+| Local user reads the device key | `enroll` creates the state folders owned by Administrators and open only to SYSTEM + Administrators in the same call that creates them, before writing the key; an existing folder must already be exactly that (no junctions, links or other accounts' permissions) or `enroll` and `install` refuse | A local administrator can read it (by design). A custom `--state-dir` (foreground use only; the service refuses it) is not protected. |
+| Local user replaces the program the service runs, or plants a DLL beside the installer | The service runs a copy under Program Files (from the known-folder API), in a folder created owned by Administrators and writable only by SYSTEM + Administrators; the copy is read from a handle opened when the installer started; the agent links its VC runtime in and loads other DLLs from System32 only | Nothing yet proves the copied file is the image Windows started (an attacker who can swap the installer's folder between start and open could get their file installed). Closed when release binaries are signed and `install` verifies its own signature (open item 3). Checked on Windows 11 (dev-process row 36). |
 | Journal corrupted to force a re-run | Atomic writes; a corrupt entry is quarantined and logged | Deleting the journal (local admin) erases dedupe history. Re-delivery then re-runs the job, but only if the server still offers it, which only happens while it is `dispatched`. |
 | Timeout bypass by a hung child process | Child killed on timeout and cancel (kill-on-drop) | Grandchildren are not tracked; a Windows Job Object per child is on the roadmap. Current actions spawn no children. |
 
@@ -107,6 +108,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 5. Postgres row-level security as defense in depth for T2.
 6. ~~A session list and forced logout~~ (built 2026-11-06).
 7. External penetration test.
+8. ~~`enroll` should create and lock the state folder before it writes the device key~~ (done 2026-11-07, dev-process row 36).
 
 ## Attended support
 

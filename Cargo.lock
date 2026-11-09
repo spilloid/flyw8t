@@ -853,6 +853,7 @@ dependencies = [
  "uuid",
  "webpki-roots",
  "windows-service",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

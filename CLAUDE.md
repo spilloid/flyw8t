@@ -43,7 +43,7 @@ If one family is unavailable, substitute the other's matching tier and log it as
 Dated claims that no automated check covers (STD-003 rule 4):
 
 - **2026-10-29**: Docker Compose and the Dockerfile have never been run (no Docker on the development machine). CI builds the image; nobody has signed in to a Compose deployment.
-- **2026-10-29**: `flyw8t-agent service install` has never been run (needs an elevated shell). All agent tests run it in-process or in the foreground.
+- **2026-11-07**: `flyw8t-agent enroll` and `service install` have been run for real (Windows 11, elevated through Windows `sudo` in Inline mode; each elevated step is one UAC prompt the operator must click, so batch them in one script and ask first; dev-process row 36): refusals, uninstall from the installed copy, restart after a kill, owners and permissions, the log, DLL planting. **Not** checked yet: surviving a reboot, and the clean exit-1 path (revoked credential) now that restart-on-non-crash-failure is set. The file `install` copies is not authenticated against the running image until releases are signed.
 - **2026-10-29**: CI (`.github/workflows/ci.yml`) has never run; nothing has been pushed. The Linux job's assumptions (ping to TEST-NET-1 times out; `ip addr` exists; Chrome at `/usr/bin/google-chrome`) are unverified.
 - **2026-10-29**: `docs/spec/JobDelivery.tla` has not been model-checked with TLC.
 - **2026-10-29**: Attended support was exercised with headless Chrome's fake screen source on one machine. No NAT, STUN or TURN path, and no second physical machine, has been tried. The security code relies on `RTCDtlsTransport.getRemoteCertificates()`, verified only in Chrome; Firefox and Safari are untested.

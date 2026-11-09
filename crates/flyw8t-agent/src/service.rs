@@ -22,13 +22,79 @@ const DESCRIPTION: &str =
 
 static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Register the service to start automatically as LocalSystem, restarting on failure, and
-/// restrict the state directory (which holds the device key) to SYSTEM and Administrators.
-pub fn install(state_dir: &std::path::Path) -> Result<()> {
+/// Where the service's program lives: `flyw8t\flyw8t-agent.exe` under Windows' Program Files folder.
+pub fn install_path() -> Result<PathBuf> {
+    Ok(crate::winsec::program_files()?
+        .join("flyw8t")
+        .join("flyw8t-agent.exe"))
+}
+
+/// Register the service to start automatically as LocalSystem, restarting on failure.
+///
+/// The service runs a copy of this program in Program Files, never the file `install` was run from: that is often a
+/// download folder other accounts can write to, and whatever is there would run as SYSTEM. The copy is made from
+/// `source`, a handle to this program opened when it started, so the file cannot be swapped by name in between. The
+/// program folder is created owned by Administrators (Users may read and run it); an existing one must already be
+/// exactly that and hold nothing but the agent. The state folder (which holds the device key) is never repaired:
+/// it must be as `enroll` made it, or install refuses. Only the default state folder may be used: the folders above
+/// a custom one are not checked, and could be swapped under a service running as SYSTEM.
+pub fn install(state_dir: &std::path::Path, source: std::fs::File) -> Result<()> {
+    use crate::winsec::{check_tree, ensure_dir, READABLE};
+    let default = crate::config::default_state_dir()?;
+    anyhow::ensure!(
+        crate::config::is_default_state_dir(state_dir)?,
+        "the service uses only the default state folder, {}; enroll without --state-dir (got {})",
+        default.display(),
+        state_dir.display()
+    );
+    // Windows' own spelling from here on.
+    let state_dir = default.as_path();
     let manager =
         ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
             .context("opening the service manager (run as Administrator)")?;
-    let exe = std::env::current_exe()?;
+    match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(_) => anyhow::bail!(
+            "the {SERVICE_NAME} service is already installed; run `flyw8t-agent service uninstall` first"
+        ),
+        // Only "no such service" means it is absent; anything else (access denied, say) stops here.
+        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => {}
+        Err(e) => return Err(e).context("checking whether the service is already installed"),
+    }
+    // %ProgramData%\flyw8t\agent: the flyw8t folder above it must be ours too.
+    let state_root = state_dir.parent().context("state folder has no parent")?;
+    check_tree(state_root, false).with_context(|| {
+        format!(
+            "{} is not as `enroll` made it (owned by Administrators, open only to SYSTEM and Administrators, no links). \
+             Check what is in it, delete it, and enroll again",
+            state_root.display()
+        )
+    })?;
+
+    let exe = install_path()?;
+    let program_dir = exe.parent().context("install path has no folder")?;
+    anyhow::ensure!(
+        ensure_dir(program_dir, READABLE)?,
+        "run as Administrator: {} must be created owned by Administrators",
+        program_dir.display()
+    );
+    for entry in std::fs::read_dir(program_dir)? {
+        let name = entry?.file_name();
+        anyhow::ensure!(
+            name == "flyw8t-agent.exe",
+            "{} holds {:?}, which flyw8t did not put there. Check it, delete the folder, and install again",
+            program_dir.display(),
+            name
+        );
+    }
+    {
+        let mut src = source;
+        let mut dst =
+            std::fs::File::create(&exe).with_context(|| format!("writing {}", exe.display()))?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()?;
+    }
+    check_tree(program_dir, true)?;
+
     let info = ServiceInfo {
         name: SERVICE_NAME.into(),
         display_name: DISPLAY_NAME.into(),
@@ -65,13 +131,15 @@ pub fn install(state_dir: &std::path::Path) -> Result<()> {
             },
         ]),
     })?;
-    restrict_state_dir(state_dir)?;
+    // Also when the service stops itself with an error (exit code 1), not only when it crashes.
+    service.set_failure_actions_on_non_crash_failures(true)?;
     service
         .start::<OsString>(&[])
         .context("starting the service")?;
     Ok(())
 }
 
+/// Stop the service, wait until it has stopped, and remove it. The program and state folders are left in place.
 pub fn uninstall() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     let service = manager.open_service(
@@ -80,29 +148,16 @@ pub fn uninstall() -> Result<()> {
     )?;
     if service.query_status()?.current_state != ServiceState::Stopped {
         let _ = service.stop();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while service.query_status()?.current_state != ServiceState::Stopped {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "the service did not stop within 30 seconds"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
     service.delete()?;
-    Ok(())
-}
-
-/// Replace inherited permissions on the state directory with SYSTEM + Administrators only.
-fn restrict_state_dir(dir: &std::path::Path) -> Result<()> {
-    let status = std::process::Command::new("icacls")
-        .arg(dir)
-        .args([
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:(OI)(CI)F",
-            "/grant:r",
-            "*S-1-5-32-544:(OI)(CI)F",
-        ])
-        .status()
-        .context("running icacls")?;
-    anyhow::ensure!(
-        status.success(),
-        "icacls failed to restrict {}",
-        dir.display()
-    );
     Ok(())
 }
 
@@ -148,17 +203,19 @@ fn run_service() -> Result<()> {
         0,
     ))?;
 
-    let state_dir = STATE_DIR
-        .get()
-        .cloned()
-        .unwrap_or_else(crate::config::default_state_dir);
+    let state_dir = STATE_DIR.get().cloned();
     let result = tokio::runtime::Runtime::new()?.block_on(async {
+        let state_dir = match state_dir {
+            Some(d) => d,
+            None => crate::config::default_state_dir()?,
+        };
         let cfg = crate::AgentConfig::load(&state_dir)?;
         let agent = crate::Agent::new(cfg)?;
         agent.run(shutdown).await.map_err(anyhow::Error::from)
     });
     // A nonzero exit makes the SCM apply the restart actions; a revoked credential is
-    // reported the same way and will fail again on restart, visibly, in the event log.
+    // reported the same way and will fail again on restart, visibly, in the agent's log
+    // (`logs\agent.log` in the state directory). A crash shows in the System event log (7031).
     let code = if result.is_ok() { 0 } else { 1 };
     handle.set_service_status(status(
         ServiceState::Stopped,

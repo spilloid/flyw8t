@@ -52,15 +52,68 @@ enum ServiceCmd {
     Run,
 }
 
+/// Largest the service's log file grows before it is rotated (one older file is kept).
+const SERVICE_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with_ansi(false)
-        .init();
+    // Opened first, without delete sharing: from here on this program's file cannot be renamed or replaced, and
+    // `service install` copies what this handle reads, not whatever is at the path by then.
+    #[cfg(windows)]
+    let own_file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::env::current_exe().and_then(|p| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1) // FILE_SHARE_READ
+                .open(p)
+        })
+    };
     let cli = Cli::parse();
-    let state_dir = cli.state_dir.unwrap_or_else(config::default_state_dir);
+    let state_dir = match cli.state_dir {
+        Some(d) => d,
+        None => config::default_state_dir()?,
+    };
+    let filter =
+        || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    #[cfg(windows)]
+    let as_service = matches!(
+        cli.command,
+        Command::Service {
+            action: ServiceCmd::Run
+        }
+    );
+    #[cfg(not(windows))]
+    let as_service = false;
+    // A service has no console: log to `logs\agent.log` in the state directory, which only SYSTEM and Administrators
+    // can read. If that cannot be opened, run anyway rather than fail to start.
+    let log_file = as_service
+        .then(|| {
+            let path = state_dir.join("logs").join("agent.log");
+            flyw8t_agent::logfile::RotatingFile::open(&path, SERVICE_LOG_BYTES)
+                .map_err(|e| {
+                    #[cfg(windows)]
+                    flyw8t_agent::winsec::event_log_warning(&format!(
+                        "flyw8t agent: cannot open its log {}: {e}. Running without a log.",
+                        path.display()
+                    ));
+                    e
+                })
+                .ok()
+        })
+        .flatten();
+    if let Some(file) = log_file {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init();
+        tracing::info!(version = env!("CARGO_PKG_VERSION"), "service starting");
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_ansi(false)
+            .init();
+    }
 
     match cli.command {
         Command::Enroll {
@@ -80,6 +133,8 @@ fn main() -> Result<()> {
                 state_dir,
             };
             config::ws_url(&cfg.server_url)?;
+            #[cfg(windows)]
+            prepare_state_dir(&cfg.state_dir)?;
             let (id, org) = runtime()?.block_on(flyw8t_agent::enroll(cfg, &token))?;
             println!("Enrolled as device {id} in organization {org:?}.");
             Ok(())
@@ -112,10 +167,13 @@ fn main() -> Result<()> {
         Command::Service { action } => match action {
             ServiceCmd::Install => {
                 AgentConfig::load(&state_dir)?;
-                flyw8t_agent::service::install(&state_dir)?;
+                let source = own_file.context("opening this program to copy it")?;
+                flyw8t_agent::service::install(&state_dir, source)?;
                 println!(
-                    "Service {} installed and started.",
-                    flyw8t_agent::service::SERVICE_NAME
+                    "Service {} installed and started, running {}. Its log: {}",
+                    flyw8t_agent::service::SERVICE_NAME,
+                    flyw8t_agent::service::install_path()?.display(),
+                    state_dir.join("logs").join("agent.log").display()
                 );
                 Ok(())
             }
@@ -123,6 +181,37 @@ fn main() -> Result<()> {
             ServiceCmd::Run => flyw8t_agent::service::run_dispatcher(state_dir),
         },
     }
+}
+
+/// Before the device key exists, make its folder: created owned by Administrators and open only to SYSTEM and
+/// Administrators, in the same call, so the key is never readable by anyone else, even for a moment. An existing
+/// folder must already be exactly that. This needs an elevated shell. A custom `--state-dir` is for running in the
+/// foreground only: it is used as it is, unprotected (the service refuses it).
+#[cfg(windows)]
+fn prepare_state_dir(state_dir: &std::path::Path) -> Result<()> {
+    use flyw8t_agent::winsec::{ensure_dir, PRIVATE};
+    if !config::is_default_state_dir(state_dir)? {
+        eprintln!(
+            "warning: {} is a custom state folder: its permissions are left as they are, so the device key in it \
+             is not protected, and `service install` will not use it",
+            state_dir.display()
+        );
+        std::fs::create_dir_all(state_dir)?;
+        return Ok(());
+    }
+    // Use Windows' own spelling of the default folder from here on.
+    let state_dir = &config::default_state_dir()?;
+    for dir in [
+        state_dir.parent().context("state folder has no parent")?,
+        state_dir,
+    ] {
+        anyhow::ensure!(
+            ensure_dir(dir, PRIVATE)?,
+            "run enroll as Administrator: {} must be created owned by Administrators",
+            dir.display()
+        );
+    }
+    Ok(())
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
