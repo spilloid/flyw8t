@@ -79,7 +79,7 @@ The center of the product. Summary here; the contract is [job-lifecycle.md](job-
 ## Agent (implemented, Windows x64 first)
 
 - Single binary: `enroll`, `run` (foreground), `status`, `service install|uninstall|run`.
-- Windows service: automatic start, LocalSystem, restart-on-failure actions. `service install` restricts the state directory (which holds the private key) to SYSTEM and Administrators with `icacls`. **The service path has not been exercised on a real install yet** (needs an elevated session; see [acceptance-tests.md](acceptance-tests.md)).
+- Windows service: automatic start, LocalSystem, restart-on-failure actions (also for a non-crash failure). `enroll` creates the state folders (which hold the private key) owned by Administrators and open only to SYSTEM and Administrators, in the same call that creates them (`winsec.rs`); `service install` copies the agent to Program Files and registers that copy. Existing folders are checked and refused, never repaired. The service logs to `logs\agent.log` in the state folder. Run for real once on Windows 11 ([deployment.md](deployment.md), dev-process row 36); a reboot is not yet checked.
 - Bounded everywhere: 2 concurrent jobs, a 256-entry report buffer, 256 KiB per output stream, 1 MiB per message, 30 s connect and handshake deadlines, backoff from 1 s capped at 60 s with jitter.
 - Actions are compiled Rust. Child processes are fixed absolute paths (`%SystemRoot%\System32\…`) with argument vectors built from validated parameters, `CREATE_NO_WINDOW`, stdin closed, kill on timeout or cancel or drop. No shell anywhere.
 - Linux and macOS: the code compiles conditionally (`cfg(windows)` around the service), and collectors and actions have Linux paths, but nothing is packaged or tested there yet.

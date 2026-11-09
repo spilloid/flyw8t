@@ -59,12 +59,31 @@ impl AgentConfig {
     }
 }
 
-pub fn default_state_dir() -> PathBuf {
+/// Whether `dir` names the default state folder, however it is spelled: case, a `\\?\` prefix, `/` or a trailing
+/// separator do not make it a different (unprotected) folder.
+pub fn is_default_state_dir(dir: &Path) -> Result<bool> {
+    fn norm(p: &Path) -> String {
+        let s = p.to_string_lossy().replace('/', "\\");
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        s.trim_end_matches('\\').to_lowercase()
+    }
+    let default = default_state_dir()?;
     if cfg!(windows) {
-        let base = std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into());
-        PathBuf::from(base).join("flyw8t").join("agent")
+        Ok(norm(dir) == norm(&default))
     } else {
-        PathBuf::from("/var/lib/flyw8t-agent")
+        Ok(dir == default)
+    }
+}
+
+pub fn default_state_dir() -> Result<PathBuf> {
+    // Windows: from the known-folder API, not %ProgramData%, which whoever runs the agent controls.
+    #[cfg(windows)]
+    {
+        Ok(crate::winsec::program_data()?.join("flyw8t").join("agent"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(PathBuf::from("/var/lib/flyw8t-agent"))
     }
 }
 
@@ -127,6 +146,23 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn other_spellings_of_the_default_state_folder_are_the_default() {
+        let d = default_state_dir().unwrap();
+        let s = d.to_string_lossy().to_string();
+        for alias in [
+            s.to_uppercase(),
+            format!(r"\\?\{s}"),
+            format!(r"{s}\"),
+            s.replace('\\', "/"),
+        ] {
+            assert!(is_default_state_dir(Path::new(&alias)).unwrap(), "{alias}");
+        }
+        assert!(!is_default_state_dir(&d.join("x")).unwrap());
+        assert!(!is_default_state_dir(Path::new(r"C:\flyw8t\agent")).unwrap());
+    }
 
     #[test]
     fn plaintext_only_to_loopback() {

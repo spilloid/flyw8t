@@ -10,9 +10,12 @@ pub mod connection;
 pub mod executor;
 pub mod identity;
 pub mod journal;
+pub mod logfile;
 #[cfg(windows)]
 pub mod service;
 pub mod tls;
+#[cfg(windows)]
+pub mod winsec;
 
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 

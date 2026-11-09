@@ -57,13 +57,23 @@ On the endpoint, in an **elevated** PowerShell:
 ```powershell
 # In flyw8t: Organizations → <org> → Create enrollment token (shown once)
 .\flyw8t-agent.exe enroll --server https://rmm.example.com --token fw8e_…
-.\flyw8t-agent.exe service install      # automatic start, LocalSystem, restart on failure
+.\flyw8t-agent.exe service install      # copies itself to Program Files; automatic start, LocalSystem, restart on failure
 .\flyw8t-agent.exe status
 ```
 
-State lives in `%ProgramData%\flyw8t\agent` (`agent.json`, `device.key`, `journal\`). `service install` restricts it to SYSTEM and Administrators. To remove: `flyw8t-agent service uninstall`, then delete the directory, then revoke the device in the console.
+`enroll` creates `%ProgramData%\flyw8t` and `%ProgramData%\flyw8t\agent` owned by Administrators and open only to SYSTEM and Administrators, in the same Windows call that creates them, before it writes the device key. So it must run elevated. If either folder already exists, it must already be exactly that, with no junctions, links or other accounts' permissions; otherwise `enroll` refuses and says so. flyw8t never "repairs" a folder someone else made, because whoever made it may still hold a way back in.
 
-> The service install path has **not** been run yet (AT-06 manual check). Foreground `flyw8t-agent run` is what the tests exercise.
+`service install` copies the agent to `flyw8t\flyw8t-agent.exe` under Program Files, and the service runs that copy, never the file you ran. A download folder is usually writable by other accounts, and whatever sits there would run as SYSTEM. The program folder is created owned by Administrators: everyone may read and run it, and only SYSTEM and Administrators may change it. An existing program folder must already be like that and hold nothing but the agent. Install also refuses if the service is already installed, or if the state folders are not as `enroll` made them. Both locations come from Windows itself, not from `%ProgramFiles%` or `%ProgramData%`.
+
+The service uses only the default state folder. `--state-dir` is for running the agent in the foreground (`flyw8t-agent run`); such a folder is left with its usual permissions, so its key is not protected.
+
+The agent never loads `VCRUNTIME140.dll` (the VC runtime is linked in), and it loads its other DLLs from System32 only, so a DLL planted next to it in a download folder is ignored. Until release binaries are signed and `install` checks its own signature, run `install` from a folder only administrators can write to, such as the one the release was unpacked into as Administrator: nothing yet proves that the file being copied is the one Windows started.
+
+The service's log is `logs\agent.log` in the state folder; it grows to 10 MiB, then rotates to `agent.log.1`. If the log cannot be opened, the service says so in the Application event log (source `flyw8t-agent`) and runs without one. A crash shows in the System event log (Service Control Manager, event 7031), and Windows restarts the service after 10 s, then 60 s (checked: a killed agent was back and connected within about 12 s). Restarting after the service stops itself with an error (a revoked credential, say) is configured too, but Windows applies that setting only from its next restart, and it has not been tested.
+
+To upgrade: `flyw8t-agent service uninstall`, then `service install` from the new file. To remove: `flyw8t-agent service uninstall`, delete `%ProgramFiles%\flyw8t` and `%ProgramData%\flyw8t`, then retire the device in the console.
+
+> Run for real on Windows 11 (2026-11-07, dev-process row 36): install, refusals, uninstall, restart after a kill, owners and permissions, the log, and a DLL-planting test. A reboot was not checked.
 
 ## Backup and restore
 

@@ -17,7 +17,7 @@ Status as of 2026-10-29, on Windows 11 x64 with PostgreSQL 18.6:
 | AT-03 | Authenticate as an administrator | `vertical_slice` (bootstrap admin, sign-in) | Automated |
 | AT-04 | Create an organization | `vertical_slice` | Automated |
 | AT-05 | Generate a short-lived enrollment credential | `vertical_slice`, `enrollment_and_device_revocation` | Automated |
-| AT-06 | Enroll one Windows x64 endpoint | `vertical_slice` (agent library, same machine) | Automated, **in-process.** The installed Windows service path (`service install`) has not been run; it needs an elevated shell. |
+| AT-06 | Enroll one Windows x64 endpoint | `vertical_slice` (agent library, same machine) | Automated, **in-process**. The installed service was run by hand on Windows 11 (2026-11-07, dev-process row 36): it starts, restarts after a kill and reconnects, the program and state folders are locked, and the log is written. Reboot not yet checked. |
 | AT-07 | Authenticated agent connection | `vertical_slice`, `replayed_authentication_is_refused` | Automated |
 | AT-08 | Endpoint shown in device inventory | `vertical_slice` | Automated |
 | AT-09 | Hardware and OS information | `vertical_slice` (periodic inventory + `system.info` job) | Automated |
