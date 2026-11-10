@@ -1,6 +1,6 @@
 # ADR-0015: Script trust and running: a pinned, signed trust list; approvals and runs the server cannot forge
 
-**Status:** proposed (2026-11-10; revised after two Codex `gpt-6.1-sol` design reviews, dev-process rows 37 and 38) · refines [ADR-0014](ADR-0014-scripts-and-custom-fields.md) sections 3 and 7 (build steps 3 and 4) · holds the line of [threat model T10](../threat-model.md) · uses the job lifecycle of [ADR-0005](ADR-0005-job-lifecycle.md)
+**Status:** accepted (2026-11-10, by the operator; revised after two Codex `gpt-6.1-sol` design reviews, dev-process rows 37 and 38) · refines [ADR-0014](ADR-0014-scripts-and-custom-fields.md) sections 3 and 7 (build steps 3 and 4) · holds the line of [threat model T10](../threat-model.md) · uses the job lifecycle of [ADR-0005](ADR-0005-job-lifecycle.md)
 
 ## Context
 
