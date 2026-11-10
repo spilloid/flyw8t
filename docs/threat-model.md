@@ -70,7 +70,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 ### T10: Compromised server or database
 - **Reality:** a compromised server can command every agent within the catalog. Today that means read-only diagnostics to every endpoint and full knowledge of inventory. It **cannot** obtain device private keys (they never leave devices) or user passwords in plaintext (Argon2id), and it cannot execute arbitrary code on endpoints, because the agent enforces its own catalog.
-- **Control direction:** keep the agent's catalog the real boundary. When script execution arrives, scripts must be signed by a key the server does not hold, so a server compromise cannot become arbitrary fleet-wide execution.
+- **Control direction:** keep the agent's catalog the real boundary. When script execution arrives, scripts must be signed by a key the server does not hold, so a server compromise cannot become arbitrary fleet-wide execution. The design is [ADR-0015](decisions/ADR-0015-script-trust-and-running.md): a trust list pinned at enrollment that only its own admins can extend, revision approvals the agent verifies, and a fresh signature for every C2 and C3 run. Its section 9 lists what a compromised server can still do with approved scripts.
 
 ### T11: Secrets in logs, URLs and responses (STD-006b)
 - **Control:** tokens are shown once and stored hashed; API token responses are never re-displayed; reveal pages send `Cache-Control: no-store`; audit records hold credential *prefixes*; agent logs never include tokens or keys; the enrollment token is passed by flag or environment, never in a URL.
