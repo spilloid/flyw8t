@@ -352,7 +352,7 @@ impl TestAgent {
             device_id: None,
             state_dir: dir.path().to_path_buf(),
         };
-        let (device_id, _) = flyw8t_agent::enroll(cfg, token).await?;
+        let (device_id, _, _) = flyw8t_agent::enroll(cfg, token, None).await?;
         Ok(TestAgent { dir, device_id })
     }
 

@@ -46,6 +46,9 @@ pub enum ServerMsg {
         action: Action,
         timeout_secs: u32,
     },
+    /// Run an approved script (ADR-0015 section 7). Sent only to agents that listed `scripts.v1`. May be delivered
+    /// more than once; the agent deduplicates by `job_id` and checks everything in it before anything runs.
+    ScriptOffer(Box<ScriptOffer>),
     /// Stop a job if it has not finished. Also sent for job ids the agent may never have seen,
     /// so a late duplicate offer is not run.
     JobCancel { job_id: Uuid },
@@ -53,6 +56,47 @@ pub enum ServerMsg {
     /// re-sending it.
     ReportAck { job_id: Uuid },
 }
+
+/// One script run, with everything the agent needs to decide for itself whether it may run.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptOffer {
+    pub job_id: Uuid,
+    pub deployment_id: Uuid,
+    pub timeout_secs: u32,
+    pub revision: crate::script::Revision,
+    pub approvals: Vec<crate::trust::SignedApproval>,
+    /// Present for C2 and C3.
+    pub authorization: Option<crate::trust::SignedAuthorization>,
+    pub salt: crate::trust::Bytes,
+    #[serde(deserialize_with = "crate::trust::run::strict_map")]
+    pub values: std::collections::BTreeMap<String, String>,
+    /// Values of parameters declared `secret`. `Debug` shows their names only.
+    #[serde(deserialize_with = "crate::trust::run::strict_map")]
+    pub secrets: std::collections::BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for ScriptOffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptOffer")
+            .field("job_id", &self.job_id)
+            .field("script_id", &self.revision.script_id)
+            .field("revision", &self.revision.revision)
+            .field("values", &self.values)
+            .field(
+                "secrets",
+                &self
+                    .secrets
+                    .keys()
+                    .map(|k| (k, "[redacted]"))
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// The capability an agent lists to receive [`ScriptOffer`].
+pub const CAP_SCRIPTS: &str = "scripts.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,7 +137,9 @@ pub enum AgentMsg {
     },
     /// Ask for trust-list versions: before authenticating, the whole chain (enrollment, `trust pin`); after, the
     /// versions after `after`.
-    TrustRequest { after: Option<u64> },
+    TrustRequest {
+        after: Option<u64>,
+    },
     Heartbeat {
         agent_version: String,
         uptime_secs: u64,

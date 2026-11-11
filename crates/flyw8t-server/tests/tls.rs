@@ -36,7 +36,7 @@ async fn agent_enrolls_and_runs_jobs_over_native_tls() {
         device_id: None,
         state_dir: untrusting.path().into(),
     };
-    let err = flyw8t_agent::enroll(cfg, &token).await.unwrap_err();
+    let err = flyw8t_agent::enroll(cfg, &token, None).await.unwrap_err();
     assert!(
         format!("{err:#}").to_lowercase().contains("certificate"),
         "{err:#}"
@@ -50,7 +50,7 @@ async fn agent_enrolls_and_runs_jobs_over_native_tls() {
         device_id: None,
         state_dir: state.path().into(),
     };
-    let (device_id, _) = flyw8t_agent::enroll(cfg, &token).await.unwrap();
+    let (device_id, _, _) = flyw8t_agent::enroll(cfg, &token, None).await.unwrap();
     let agent = Agent::new(AgentConfig::load(state.path()).unwrap()).unwrap();
     let stop = CancellationToken::new();
     let (a, s) = (agent.clone(), stop.clone());

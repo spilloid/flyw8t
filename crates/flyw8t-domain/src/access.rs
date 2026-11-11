@@ -40,6 +40,9 @@ pub enum Permission {
     ViewScripts,
     /// Creating scripts and saving draft revisions, global ones included (ADR-0014). Drafts never run.
     EditScripts,
+    /// Starting a run of an approved script on a device (ADR-0015). What runs is decided by the approvals and run
+    /// signatures the agent checks, not by this permission.
+    RunScripts,
 }
 
 impl Role {
@@ -81,6 +84,7 @@ impl Role {
                     | EditFieldValues
                     | ViewScripts
                     | EditScripts
+                    | RunScripts
             ),
             Role::ReadOnly => matches!(p, ViewDevices),
         }
@@ -109,6 +113,7 @@ mod tests {
             Permission::EditFieldValues,
             Permission::ViewScripts,
             Permission::EditScripts,
+            Permission::RunScripts,
         ] {
             assert!(!Role::ReadOnly.allows(p), "{p:?}");
         }

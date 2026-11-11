@@ -27,10 +27,12 @@ pub mod ratelimit;
 pub mod registry;
 pub mod remote_access;
 pub mod script_check;
+pub mod script_runs;
 pub mod scripts;
 pub mod sessions;
 pub mod support;
 pub mod totp;
+pub mod trust;
 pub mod web;
 
 use anyhow::Context;
@@ -181,6 +183,39 @@ pub fn router(state: Shared) -> Router {
         .route(
             "/scripts/{id}/revisions/{number}/download",
             get(scripts::download),
+        )
+        .route(
+            "/scripts/{id}/revisions/{number}/approval-request.json",
+            get(trust::approval_request),
+        )
+        .route(
+            "/scripts/{id}/revisions/{number}/approvals",
+            post(trust::upload_approval),
+        )
+        .route(
+            "/devices/{id}/scripts",
+            get(script_runs::run_page).post(script_runs::start),
+        )
+        .route("/jobs/{id}/authorize", get(script_runs::authorize_page))
+        .route(
+            "/jobs/{id}/run-request.json",
+            get(script_runs::run_request_json),
+        )
+        .route(
+            "/jobs/{id}/authorization",
+            post(script_runs::upload_authorization),
+        )
+        .route("/admin/trust", get(trust::trust_page))
+        .route("/admin/trust/chain.json", get(trust::chain_json))
+        // A signed list version, form-encoded.
+        .route(
+            "/admin/trust/versions",
+            post(trust::upload_version)
+                .layer(axum::extract::DefaultBodyLimit::max(3 * 1024 * 1024)),
+        )
+        .route(
+            "/account/passkeys/{id}/signer.json",
+            get(trust::passkey_signer),
         )
         .route("/jobs", get(web::jobs_list))
         .route("/jobs/{id}", get(web::job))
