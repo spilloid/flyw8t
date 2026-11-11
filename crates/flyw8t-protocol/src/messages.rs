@@ -19,12 +19,24 @@ pub enum ServerMsg {
     Welcome {
         device_id: Uuid,
         heartbeat_secs: u32,
+        /// The device's organization, for `flyw8t-agent trust pin` to compare with the one given locally
+        /// (ADR-0015 section 3). Absent from servers before ADR-0015.
+        #[serde(default)]
+        organization_id: Option<Uuid>,
     },
     /// Enrollment succeeded. The agent persists `device_id` and its key, then reconnects
     /// and authenticates normally. The organization is decided by the token, never the agent.
     Enrolled {
         device_id: Uuid,
         organization: String,
+        /// The organization's id, which an agent enrolling with `--org` requires to match (ADR-0015 section 3).
+        #[serde(default)]
+        organization_id: Option<Uuid>,
+    },
+    /// Trust-list versions (ADR-0015 section 7): the whole chain for a request made before authenticating, or the
+    /// versions after the one the agent holds. The agent verifies every one; the server is only the courier.
+    TrustUpdate {
+        versions: Vec<crate::trust::SignedList>,
     },
     /// The server refuses this connection and will close it.
     Refused { code: RefusalCode, message: String },
@@ -74,7 +86,14 @@ pub enum AgentMsg {
         device_id: Uuid,
         signature: String,
         agent_version: String,
+        /// What this agent supports beyond the built-in catalog, such as `scripts.v1` (ADR-0015 section 7). The
+        /// server offers nothing an agent did not list.
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
+    /// Ask for trust-list versions: before authenticating, the whole chain (enrollment, `trust pin`); after, the
+    /// versions after `after`.
+    TrustRequest { after: Option<u64> },
     Heartbeat {
         agent_version: String,
         uptime_secs: u64,
