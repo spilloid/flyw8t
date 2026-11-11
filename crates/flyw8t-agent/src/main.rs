@@ -28,6 +28,18 @@ enum Command {
         /// PEM file of an extra CA to trust (for a private CA).
         #[arg(long)]
         ca_cert: Option<PathBuf>,
+        /// The deployment's trust fingerprint (sha256:…), from `flyw8t-sign genesis` on your own machine, never
+        /// copied from the console. Without it this agent runs built-in actions only and refuses every script.
+        #[arg(long, requires = "org")]
+        trust: Option<String>,
+        /// The organization id this device belongs in, also from your own notes. Required with --trust.
+        #[arg(long, requires = "trust")]
+        org: Option<uuid::Uuid>,
+    },
+    /// Pin, or show, what this agent trusts to run scripts (ADR-0015).
+    Trust {
+        #[command(subcommand)]
+        action: TrustCmd,
     },
     /// Run the agent in the foreground.
     Run,
@@ -39,6 +51,20 @@ enum Command {
         #[command(subcommand)]
         action: ServiceCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum TrustCmd {
+    /// Pin an agent enrolled before the trust list existed. Run as Administrator, with the service stopped.
+    Pin {
+        /// The deployment's trust fingerprint (sha256:…), from your own notes.
+        fingerprint: String,
+        /// The organization id this device belongs in.
+        #[arg(long)]
+        org: uuid::Uuid,
+    },
+    /// Show the fingerprint, version, head hash and organization this agent holds.
+    Status,
 }
 
 #[cfg(windows)]
@@ -119,7 +145,13 @@ fn main() -> Result<()> {
             server,
             token,
             ca_cert,
+            trust,
+            org,
         } => {
+            let pin = match (trust, org) {
+                (Some(t), Some(o)) => Some(flyw8t_agent::trust::Pin::parse(&t, o)?),
+                _ => None,
+            };
             let ca_cert_pem = ca_cert
                 .map(|p| {
                     std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))
@@ -134,8 +166,12 @@ fn main() -> Result<()> {
             config::ws_url(&cfg.server_url)?;
             #[cfg(windows)]
             prepare_state_dir(&cfg.state_dir)?;
-            let (id, org) = runtime()?.block_on(flyw8t_agent::enroll(cfg, &token))?;
+            let (id, org, pinned) = runtime()?.block_on(flyw8t_agent::enroll(cfg, &token, pin))?;
             println!("Enrolled as device {id} in organization {org:?}.");
+            match pinned {
+                Some(p) => print_trust(&p),
+                None => println!("Not pinned to a trust list: this agent will refuse every script until `flyw8t-agent trust pin`."),
+            }
             Ok(())
         }
         Command::Run => {
@@ -150,8 +186,33 @@ fn main() -> Result<()> {
                 agent.run(shutdown).await.map_err(anyhow::Error::from)
             })
         }
+        Command::Trust { action } => {
+            let cfg = AgentConfig::load(&state_dir)?;
+            match action {
+                TrustCmd::Pin { fingerprint, org } => {
+                    let pin = flyw8t_agent::trust::Pin::parse(&fingerprint, org)?;
+                    let p = runtime()?.block_on(flyw8t_agent::trust_pin(cfg, pin))?;
+                    println!("Pinned.");
+                    print_trust(&p);
+                }
+                TrustCmd::Status => match flyw8t_agent::trust::Trust::load(&cfg.state_dir)?.get() {
+                    Some(p) => print_trust(&p),
+                    None => println!("Not pinned: this agent refuses every script."),
+                },
+            }
+            Ok(())
+        }
         Command::Status => {
             let cfg = AgentConfig::load(&state_dir)?;
+            if let Ok(key) = flyw8t_agent::identity::DeviceKey::load(&cfg.key_path()) {
+                println!(
+                    "device key id: {}",
+                    flyw8t_protocol::trust::key_id(
+                        flyw8t_protocol::trust::KeyKind::Device,
+                        key.public_key()
+                    )
+                );
+            }
             println!("server:    {}", cfg.server_url);
             println!(
                 "device id: {}",
@@ -180,6 +241,15 @@ fn main() -> Result<()> {
             ServiceCmd::Run => flyw8t_agent::service::run_dispatcher(state_dir),
         },
     }
+}
+
+fn print_trust(p: &flyw8t_agent::trust::Pinned) {
+    println!("trust fingerprint: {}", p.fingerprint);
+    println!("organization:      {}", p.organization_id);
+    println!("deployment:        {}", p.head.list.deployment_id);
+    println!("trust version:     {}", p.head.list.version);
+    println!("head:              {}", p.head.hash);
+    println!("Compare the version and head with `flyw8t-sign show` on your signing machine.");
 }
 
 /// Before the device key exists, make its folder: created owned by Administrators and open only to SYSTEM and

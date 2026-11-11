@@ -45,6 +45,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 flyw8t-agent.workspace = true
 flyw8t-helper.workspace = true
 tokio-tungstenite.workspace = true

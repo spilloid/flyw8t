@@ -34,13 +34,24 @@ const MAX_ACKED: usize = 5000;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub job_id: Uuid,
-    /// `None` for a cancel tombstone: a job cancelled before this agent ever saw its offer.
+    /// `None` for a cancel tombstone: a job cancelled before this agent ever saw its offer, or for a script.
     pub action: Option<Action>,
+    /// The script a script job runs (ADR-0015). Never its values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<ScriptRef>,
     pub timeout_secs: u32,
     #[serde(with = "time::serde::rfc3339")]
     pub received_at: OffsetDateTime,
     pub state: EntryState,
     pub server_acked: bool,
+}
+
+/// Which revision a script job runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptRef {
+    pub script_id: Uuid,
+    pub revision: u64,
+    pub content_hash: flyw8t_protocol::trust::Hash,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,6 +187,32 @@ impl Journal {
         let entry = Entry {
             job_id,
             action: Some(action.clone()),
+            script: None,
+            timeout_secs,
+            received_at: OffsetDateTime::now_utc(),
+            state: EntryState::Accepted,
+            server_acked: false,
+        };
+        self.persist(&entry)?;
+        entries.insert(job_id, entry);
+        Ok(Accept::New)
+    }
+
+    /// Record a script offer. Returns `New` exactly once per job id, as `accept` does.
+    pub fn accept_script(
+        &self,
+        job_id: Uuid,
+        script: ScriptRef,
+        timeout_secs: u32,
+    ) -> Result<Accept> {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(existing) = entries.get(&job_id) {
+            return Ok(Accept::Known(Box::new(existing.clone())));
+        }
+        let entry = Entry {
+            job_id,
+            action: None,
+            script: Some(script),
             timeout_secs,
             received_at: OffsetDateTime::now_utc(),
             state: EntryState::Accepted,
@@ -216,6 +253,7 @@ impl Journal {
         let entry = Entry {
             job_id,
             action: None,
+            script: None,
             timeout_secs: 0,
             received_at: now,
             state: EntryState::Finished {

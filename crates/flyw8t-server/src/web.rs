@@ -104,7 +104,7 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "mfa-reset" => (true, "Two-step verification reset. That user was signed out everywhere and sets it up again at next sign-in."),
         "mfa-disabled" => (true, "Two-step verification turned off."),
         "codes-regenerated" => (true, "New recovery codes issued; the old ones no longer work."),
-        _ => return None,
+        other => return crate::trust::flash_for(other),
     };
     Some(Flash {
         ok,

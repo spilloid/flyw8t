@@ -11,13 +11,20 @@ pub mod executor;
 pub mod identity;
 pub mod journal;
 pub mod logfile;
+pub mod runner;
+pub mod script;
 #[cfg(windows)]
 pub mod service;
+pub mod spent;
 pub mod tls;
+pub mod trust;
 #[cfg(windows)]
 pub mod winsec;
 
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// What this agent supports beyond the built-in catalog (ADR-0015 section 7). Scripts arrive in build step 4.
+pub const CAPABILITIES: &[&str] = &[flyw8t_protocol::messages::CAP_SCRIPTS];
+
 pub use config::AgentConfig;
-pub use connection::{enroll, Agent, Fatal};
+pub use connection::{enroll, trust_pin, Agent, Fatal};

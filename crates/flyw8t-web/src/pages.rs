@@ -768,6 +768,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         <section class="card">
             <h2>"Run a diagnostic"</h2>
             {run_forms(ctx, d.row.id, connected, d.row.retired)}
+            <p><a href=format!("/devices/{}/scripts", d.row.id)>"Run an approved script →"</a></p>
         </section>
         <section>
             <h2>"Job history"</h2>
@@ -857,6 +858,10 @@ pub fn job_page(ctx: &PageCtx, j: JobDetail, can_cancel: bool) -> String {
             </form>
         }
     });
+    let sign = (j.row.action == "script.run" && j.row.state == ExecState::Created).then(|| {
+        let href = format!("/jobs/{}/authorize", j.row.id);
+        view! { <p class="card"><strong>"This run waits for a run signature: "</strong><a href=href>"sign and upload it"</a></p> }
+    });
     let cancel_note = j.cancel_requested_at.map(|t| {
         view! { <p class="flash bad">{format!("Cancellation requested {}. Waiting for the device to confirm.", fmt::timestamp(t))}</p> }
     });
@@ -903,6 +908,7 @@ pub fn job_page(ctx: &PageCtx, j: JobDetail, can_cancel: bool) -> String {
         <h1>{title.clone()}" "{badge(o.tone, o.label)}</h1>
         <p class="lead">{o.explanation}</p>
         {cancel_note}
+        {sign}
         {cancel}
         <div class="grid">
             <section class="card">
@@ -1498,7 +1504,7 @@ pub fn admin_page(
         .collect_view();
     let body = view! {
         <h1>"Administration"</h1>
-        <p><a href="/admin/fields">"Custom fields →"</a></p>
+        <p><a href="/admin/fields">"Custom fields →"</a>" · "<a href="/admin/trust">"Script trust →"</a></p>
         {revealed.map(revealed_box)}
         <section>
             <h2>"Users"</h2>
@@ -2640,9 +2646,11 @@ pub fn script_revision_page(
     problems: Vec<ScriptProblem>,
     missing: Vec<MissingRequired>,
     changes: Option<RevisionChanges>,
+    approvals: ApprovalsView,
 ) -> String {
     let id = s.id;
     let n = r.number;
+    let approvals_view = approvals_card(ctx, id, n, approvals);
     let unchanged = |rows: &[DiffRow]| rows.iter().all(|d| matches!(d, DiffRow::Folded(_)));
     let changes_view = changes.map(|c| {
         let (source, params) = (c.source, c.parameters);
@@ -2681,6 +2689,7 @@ pub fn script_revision_page(
             <dt>"File"</dt><dd><a href=download>"Download"</a></dd>
         </dl>
         {checks}
+        {approvals_view}
         {changes_view}
         <section class="card">
             <h2>"Script"</h2>
@@ -2689,6 +2698,237 @@ pub fn script_revision_page(
         </section>
     };
     shell(&title, ctx, Nav::Scripts, None, body)
+}
+
+fn approvals_card(ctx: &PageCtx, id: uuid::Uuid, n: i32, a: ApprovalsView) -> impl IntoView {
+    let request = format!("/scripts/{id}/revisions/{n}/approval-request.json");
+    let action = format!("/scripts/{id}/revisions/{n}/approvals");
+    let rows = a
+        .rows
+        .into_iter()
+        .map(|r| {
+            let state = if r.valid { "valid" } else { "no longer valid" };
+            view! {
+                <tr>
+                    <td>{r.person}</td>
+                    <td class="mono">{r.key_id}</td>
+                    <td><time datetime=fmt::iso(r.approved_at)>{fmt::timestamp(r.approved_at)}</time></td>
+                    <td>{state}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let body = if a.trusted {
+        view! {
+            <table class="list">
+                <thead><tr><th>"Approved by"</th><th>"Key"</th><th>"When"</th><th>"State"</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+            <p>"To approve with your offline key: download the "<a href=request>"approval request"</a>
+               ", review the script file itself, then run "<code>"flyw8t-sign approve --request approval-request.json --source <the file you reviewed> --out approval.json"</code>" and paste the result here."</p>
+            <form method="post" action=action>
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>"Signed approval"<textarea name="approval" rows="6" maxlength="65536" required></textarea></label>
+                <button type="submit">"Store approval"</button>
+            </form>
+        }
+        .into_any()
+    } else {
+        view! { <p>"No trust list yet: an administrator sets one up on the "<a href="/admin/trust">"Trust page"</a>"."</p> }.into_any()
+    };
+    view! {
+        <section class="card">
+            <h2>"Approvals"</h2>
+            <p class="muted">"An agent runs a revision only with a valid approval it checks itself. What this page shows is a convenience: the agent does not rely on it."</p>
+            {body}
+        </section>
+    }
+}
+
+/// Choosing an approved script to run on a device (ADR-0015 build step 4).
+pub fn run_script_page(
+    ctx: &PageCtx,
+    device: uuid::Uuid,
+    hostname: &str,
+    device_key: &str,
+    options: Vec<RunOption>,
+) -> String {
+    let action = format!("/devices/{device}/scripts");
+    let back = format!("/devices/{device}");
+    let forms = options
+        .into_iter()
+        .map(|o| {
+            let asks = o
+                .asks
+                .into_iter()
+                .map(|(name, prompt)| {
+                    let label = prompt.unwrap_or_else(|| name.clone());
+                    view! { <label>{label}<input type="text" name=format!("v_{name}") maxlength="4096"/></label> }
+                })
+                .collect_view();
+            let title = format!("{} · revision {} · {}", o.name, o.number, o.risk);
+            let signed = matches!(o.risk.as_str(), "C2" | "C3").then(|| {
+                view! { <p class="muted">"This class needs a run signature: after you start it, sign the run with flyw8t-sign and upload it."</p> }
+            });
+            let body = match o.blocked {
+                Some(why) => view! { <p class="muted">{format!("Cannot run here: {why}.")}</p> }.into_any(),
+                None => view! {
+                    <form method="post" action=action.clone()>
+                        <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                        <input type="hidden" name="script" value=o.script_id.to_string()/>
+                        <input type="hidden" name="number" value=o.number.to_string()/>
+                        {asks}
+                        <label>"Timeout (seconds)"<input type="number" name="timeout" min="1" max="3600" value="300"/></label>
+                        {signed}
+                        <button type="submit">"Start run"</button>
+                    </form>
+                }
+                .into_any(),
+            };
+            view! { <section class="card"><h2>{title}</h2>{body}</section> }
+        })
+        .collect_view();
+    let body = view! {
+        <p class="crumbs"><a href=back>{hostname.to_string()}</a>" / "</p>
+        <h1>"Run an approved script"</h1>
+        <dl class="facts card">
+            <dt>"Device key id"</dt><dd class="mono">{device_key.to_string()}</dd>
+        </dl>
+        <p class="muted">"Compare the key id with "<code>"flyw8t-agent status"</code>" on the device before adding it to "<code>"flyw8t-sign device add"</code>"."</p>
+        {forms}
+    };
+    shell("Run a script", ctx, Nav::Devices, None, body)
+}
+
+/// Signing a C2 or C3 run and uploading the signature.
+pub fn authorize_run_page(
+    ctx: &PageCtx,
+    job: uuid::Uuid,
+    risk: &str,
+    device_key: &str,
+    waiting: bool,
+    error: Option<String>,
+) -> String {
+    let request = format!("/jobs/{job}/run-request.json");
+    let action = format!("/jobs/{job}/authorization");
+    let back = format!("/jobs/{job}");
+    let error = error.map(|e| view! { <p class="flash bad">{format!("Refused: {e}")}</p> });
+    let form = if waiting {
+        view! {
+            <ol>
+                <li>"Download the "<a href=request>"run request"</a>"."</li>
+                <li><code>"flyw8t-sign authorize --key root.key --request run-request.json --out run-signature.json"</code>
+                    " on your own machine. It checks the revision, its approvals and the device ("<span class="mono">{device_key.to_string()}</span>") against what it holds itself, and shows what it signs."</li>
+                <li>"Paste run-signature.json here. "{format!("A {risk} signature is valid for a short time only.")}</li>
+            </ol>
+            <form method="post" action=action>
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>"Run signature"<textarea name="authorization" rows="6" maxlength="65536" required></textarea></label>
+                <button type="submit">"Upload and run"</button>
+            </form>
+        }
+        .into_any()
+    } else {
+        view! { <p>"This run is no longer waiting for a signature."</p> }.into_any()
+    };
+    let body = view! {
+        <p class="crumbs"><a href=back>"Job"</a>" / "</p>
+        <h1>"Sign this run"</h1>
+        {error}
+        <section class="card">{form}</section>
+    };
+    shell("Sign a run", ctx, Nav::Jobs, None, body)
+}
+
+/// The trust page (ADR-0015 build step 3).
+pub fn trust_page(
+    ctx: &PageCtx,
+    t: Option<TrustView>,
+    rp_id: String,
+    origin: String,
+    passkeys: Vec<(uuid::Uuid, String)>,
+) -> String {
+    let keys = passkeys
+        .into_iter()
+        .map(|(id, name)| {
+            let href = format!("/account/passkeys/{id}/signer.json");
+            view! { <li><a href=href>{name}</a></li> }
+        })
+        .collect_view();
+    let upload = |label: &'static str| {
+        view! {
+            <form method="post" action="/admin/trust/versions">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>{label}<textarea name="version" rows="8" maxlength="1048576" required></textarea></label>
+                <button type="submit">"Store version"</button>
+            </form>
+        }
+    };
+    let body = match t {
+        None => view! {
+            <h1>"Script trust"</h1>
+            <p>"No trust list yet. Scripts cannot run until there is one, and agents are pinned to it."</p>
+            <section class="card">
+                <h2>"Set it up"</h2>
+                <ol>
+                    <li>"On your own machine: "<code>"flyw8t-sign keygen --out root.key"</code>". Keep a second copy somewhere else."</li>
+                    <li>"Optionally, download a passkey of yours as a signer entry: "<ul>{keys}</ul></li>
+                    <li><code>{format!("flyw8t-sign draft-genesis --key root.key --person <you> --rp-id {rp_id} --origin {origin} [--signer passkey-signer.json] --out draft.json")}</code></li>
+                    <li><code>"flyw8t-sign genesis --key root.key --draft draft.json --out genesis.json"</code>". It prints the trust fingerprint: keep it in your own notes. Agents pin that copy, not this page."</li>
+                    <li>"Paste genesis.json here."</li>
+                </ol>
+                {upload("Signed first version")}
+            </section>
+        }
+        .into_any(),
+        Some(t) => {
+            let signers = t
+                .signers
+                .into_iter()
+                .map(|s| {
+                    view! {
+                        <tr><td>{s.person}</td><td>{s.kind}</td><td>{s.role}</td><td>{s.may_approve}</td><td class="mono">{s.key_id}</td></tr>
+                    }
+                })
+                .collect_view();
+            let list = |items: Vec<String>| {
+                if items.is_empty() {
+                    view! { <p class="muted">"None."</p> }.into_any()
+                } else {
+                    view! { <ul>{items.into_iter().map(|i| view! { <li class="mono">{i}</li> }).collect_view()}</ul> }.into_any()
+                }
+            };
+            view! {
+                <h1>"Script trust"</h1>
+                <p class="muted">"Everything on this page comes from this server. Under a compromised server none of it is proof: compare the fingerprint with your own notes, and versions with "<code>"flyw8t-sign show"</code>" and "<code>"flyw8t-agent trust status"</code>"."</p>
+                <dl class="facts card">
+                    <dt>"Fingerprint"</dt><dd class="mono">{t.fingerprint}</dd>
+                    <dt>"Deployment"</dt><dd class="mono">{t.deployment}</dd>
+                    <dt>"Version"</dt><dd>{t.version}</dd>
+                    <dt>"Head"</dt><dd class="mono">{t.head}</dd>
+                    <dt>"Relying party"</dt><dd>{t.rp_id}" · "{t.origins.join(", ")}</dd>
+                    <dt>"Threshold"</dt><dd>{format!("{} different list admins", t.threshold)}</dd>
+                    <dt>"Chain"</dt><dd><a href="/admin/trust/chain.json">"Download"</a>" for "<code>"flyw8t-sign trust import"</code>" or "<code>"trust update"</code></dd>
+                </dl>
+                <section class="card">
+                    <h2>"Signers"</h2>
+                    <table class="list">
+                        <thead><tr><th>"Person"</th><th>"Kind"</th><th>"Role"</th><th>"May approve up to"</th><th>"Key id"</th></tr></thead>
+                        <tbody>{signers}</tbody>
+                    </table>
+                    <h3>"Removed keys"</h3>{list(t.removed)}
+                    <h3>"Revoked revisions"</h3>{list(t.revoked)}
+                </section>
+                <section class="card">
+                    <h2>"Next version"</h2>
+                    <p>"Edit the head into the next version (version + 1, previous = the head above), sign it with "<code>"flyw8t-sign sign-list"</code>", and paste it here."</p>
+                    {upload("Signed next version")}
+                </section>
+            }
+            .into_any()
+        }
+    };
+    shell("Script trust", ctx, Nav::Admin, None, body)
 }
 
 #[cfg(test)]
