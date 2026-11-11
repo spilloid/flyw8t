@@ -205,6 +205,10 @@ fn statements_match_the_reference() {
     let rev = vector_revision();
     let root = Offline::seed(1);
     let a = RevisionApproval::of(DEP, &rev, 1_800_000_100, root.id());
+    assert_eq!(
+        hex::encode(a.encoded().as_bytes()),
+        vector("approval_encoding")
+    );
     assert_eq!(a.hash(), h("approval_hash"));
     let salt = [0x22; 32];
     let c = commitment(&salt, [("Reason", "ok"), ("Delay", "30")]).unwrap();
@@ -220,6 +224,10 @@ fn statements_match_the_reference() {
         expires_at: 1_800_001_100,
         signer: root.id(),
     };
+    assert_eq!(
+        hex::encode(run.encoded().unwrap().as_bytes()),
+        vector("run_encoding")
+    );
     assert_eq!(run.hash().unwrap(), h("run_hash"));
     // Ed25519 is deterministic: this signature is a literal vector too.
     let Signature::Offline { signature, .. } = root.sign(&a.hash()) else {
@@ -229,6 +237,53 @@ fn statements_match_the_reference() {
 }
 
 const OFFLINE_SIGNATURE_VECTOR: &str = include_str!("../../tests/vectors/offline_signature.txt");
+
+/// A passkey assertion made once with a software P-256 key and kept: ECDSA is randomized, so this fixture is what
+/// catches a change to how passkey signatures are verified.
+const PASSKEY_FIXTURE: &str = include_str!("../../tests/vectors/passkey_signature.json");
+
+#[test]
+fn a_fixed_passkey_signature_verifies_and_nothing_near_it_does() {
+    #[derive(serde::Deserialize)]
+    struct F {
+        public_key: Bytes,
+        credential_id: Bytes,
+        signature: Signature,
+    }
+    let f: F = serde_json::from_str(PASSKEY_FIXTURE).unwrap();
+    let mut l = vector_genesis();
+    l.signers[1].public_key = f.public_key.clone();
+    l.signers[1].credential_id = Some(f.credential_id.clone());
+    let statement = h("approval_hash");
+    assert!(sig::verify(&f.signature, &statement, &l).is_ok());
+    assert!(
+        sig::verify(&f.signature, &h("run_hash"), &l).is_err(),
+        "another statement"
+    );
+    let mut other = l.clone();
+    other.origins = vec!["https://other.example".into()];
+    assert!(
+        sig::verify(&f.signature, &statement, &other).is_err(),
+        "another origin"
+    );
+    let mut other = l.clone();
+    other.rp_id = "other.example".into();
+    assert!(
+        sig::verify(&f.signature, &statement, &other).is_err(),
+        "another relying party"
+    );
+}
+
+#[test]
+#[ignore = "run once to make tests/vectors/passkey_signature.json"]
+fn make_passkey_fixture() {
+    let pk = Passkey::new(b"fixture");
+    let sig = pk.sign(&h("approval_hash"));
+    println!(
+        "{}",
+        serde_json::json!({ "public_key": Bytes(pk.public()), "credential_id": Bytes(b"fixture".to_vec()), "signature": sig })
+    );
+}
 
 #[test]
 fn json_is_strict() {

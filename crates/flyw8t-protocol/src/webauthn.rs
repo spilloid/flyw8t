@@ -96,11 +96,26 @@ struct ClientData {
     kind: String,
     challenge: String,
     origin: String,
-    #[serde(rename = "crossOrigin", default)]
-    cross_origin: Option<bool>,
-    /// Set only for a ceremony inside a frame of another site. Its presence alone refuses the signature.
-    #[serde(rename = "topOrigin", default)]
-    top_origin: Option<serde::de::IgnoredAny>,
+    /// Absent or `false`; anything else, `null` included, refuses the signature.
+    #[serde(rename = "crossOrigin", default, deserialize_with = "present")]
+    cross_origin: Option<serde_json::Value>,
+    /// Set only for a ceremony inside a frame of another site. Its presence alone, even as `null`, refuses it.
+    #[serde(rename = "topOrigin", default, deserialize_with = "present")]
+    top_origin: Option<serde_json::Value>,
+}
+
+/// A field that is present, whatever its value: `null` is `Some(Null)`, not `None`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(d).map(Some)
+}
+
+impl ClientData {
+    fn framed(&self) -> bool {
+        !matches!(
+            self.cross_origin,
+            None | Some(serde_json::Value::Bool(false))
+        ) || self.top_origin.is_some()
+    }
 }
 
 /// Check `clientDataJSON`: the ceremony, the challenge and the origin, and that it was not made inside a frame of
@@ -116,7 +131,7 @@ pub fn check_client_data(json: &[u8], exp: &Expected) -> Result<(), Error> {
     if from_b64url(&c.challenge).as_deref() != Some(exp.challenge) {
         return Err(Error::WrongChallenge);
     }
-    if c.origin != exp.origin || c.cross_origin == Some(true) || c.top_origin.is_some() {
+    if c.origin != exp.origin || c.framed() {
         return Err(Error::WrongOrigin);
     }
     Ok(())
@@ -420,6 +435,23 @@ mod tests {
             .to_string()
             .into_bytes();
         assert_eq!(any(&top), Err(Error::WrongOrigin));
+        for nulls in [
+            r#""crossOrigin":null"#,
+            r#""topOrigin":null"#,
+            r#""crossOrigin":"false""#,
+            r#""crossOrigin":0"#,
+        ] {
+            let c = format!(
+                r#"{{"type":"webauthn.get","challenge":"{}","origin":"{ORIGIN}",{nulls}}}"#,
+                b64url(b"h")
+            );
+            assert_eq!(any(c.as_bytes()), Err(Error::WrongOrigin), "{nulls}");
+        }
+        let explicit_false = format!(
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"{ORIGIN}","crossOrigin":false}}"#,
+            b64url(b"h")
+        );
+        assert!(any(explicit_false.as_bytes()).is_ok());
         let twice = format!(
             r#"{{"type":"webauthn.get","challenge":"{}","origin":"https://evil.example","origin":"{ORIGIN}"}}"#,
             b64url(b"h")

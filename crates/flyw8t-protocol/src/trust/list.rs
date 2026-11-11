@@ -332,10 +332,11 @@ pub fn verify_genesis(signed: &SignedList, fingerprint: &Hash) -> Result<Verifie
     })
 }
 
-/// Verify one later version against the version held now. `held` is the holder's own head: the chain only ever
-/// grows from there.
-pub fn verify_next(held: &Verified, signed: &SignedList) -> Result<Verified, TrustError> {
-    let (prev, next) = (&held.list, &signed.list);
+/// Every rule a later version must meet that does not depend on its signatures: valid on its own, follows the
+/// held head, keeps the deployment, forgets no removal or revocation, drops keys only by removing them, and keeps
+/// each retained key's person and kind. `flyw8t-sign` checks this before it signs anything.
+pub fn check_transition(held: &Verified, next: &TrustList) -> Result<Hash, TrustError> {
+    let prev = &held.list;
     let v = next.version;
     next.check_alone()?;
     if Some(v) != prev.version.checked_add(1) {
@@ -349,13 +350,6 @@ pub fn verify_next(held: &Verified, signed: &SignedList) -> Result<Verified, Tru
     }
     if next.deployment_id != prev.deployment_id {
         return Err(TrustError::OtherDeployment(v));
-    }
-    let hash = next.hash()?;
-    // Verified under the previous version: its signers, people, threshold, relying party and origins.
-    let who = signers_of(signed, &hash, prev)?;
-    count_admins(v, &who, prev.threshold)?;
-    if prev.governance() != next.governance() && !who.iter().any(|s| s.role == Role::Root) {
-        return Err(TrustError::RootNeeded(v));
     }
     let superset = |a: &[Hash], b: &[Hash]| a.iter().all(|h| b.contains(h));
     if !superset(&prev.removed_keys, &next.removed_keys)
@@ -374,6 +368,25 @@ pub fn verify_next(held: &Verified, signed: &SignedList) -> Result<Verified, Tru
             }
             _ => {}
         }
+    }
+    next.hash()
+}
+
+/// Whether `next` changes who governs the list (list admins, roots or the threshold), which needs a root.
+pub fn changes_governance(prev: &TrustList, next: &TrustList) -> bool {
+    prev.governance() != next.governance()
+}
+
+/// Verify one later version against the version held now. `held` is the holder's own head: the chain only ever
+/// grows from there.
+pub fn verify_next(held: &Verified, signed: &SignedList) -> Result<Verified, TrustError> {
+    let (prev, next) = (&held.list, &signed.list);
+    let hash = check_transition(held, next)?;
+    // Verified under the previous version: its signers, people, threshold, relying party and origins.
+    let who = signers_of(signed, &hash, prev)?;
+    count_admins(next.version, &who, prev.threshold)?;
+    if changes_governance(prev, next) && !who.iter().any(|s| s.role == Role::Root) {
+        return Err(TrustError::RootNeeded(next.version));
     }
     Ok(Verified {
         list: next.clone(),

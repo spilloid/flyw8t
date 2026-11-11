@@ -61,7 +61,9 @@ print(json.dumps({
     "key_id_device": device.hex(),
     "genesis_encoding": genesis.hex(),
     "genesis_hash": sha(genesis).hex(),
+    "approval_encoding": approval.hex(),
     "approval_hash": sha(approval).hex(),
     "commitment": commit.hex(),
+    "run_encoding": run.hex(),
     "run_hash": sha(run).hex(),
 }, indent=2))

@@ -79,6 +79,193 @@ fn read<T: serde::de::DeserializeOwned>(p: &Path) -> T {
 }
 
 #[test]
+fn a_signer_never_signs_two_versions_with_one_number() {
+    let e = Env::new();
+    let (sa, sb) = (e.p("state-a"), e.p("state-b"));
+    let ok_in = |state: &Path, args: &[&str]| {
+        let (ok, t) = e.run_in(state, args);
+        assert!(ok, "{args:?}:\n{t}");
+        t
+    };
+    ok_in(&sa, &["keygen", "--out", &e.s("a.key")]);
+    ok_in(&sb, &["keygen", "--out", &e.s("b.key")]);
+    ok_in(
+        &sb,
+        &[
+            "export-signer",
+            "--key",
+            &e.s("b.key"),
+            "--person",
+            "Bea",
+            "--role",
+            "list_admin",
+            "--out",
+            &e.s("b.json"),
+        ],
+    );
+    ok_in(
+        &sa,
+        &[
+            "draft-genesis",
+            "--key",
+            &e.s("a.key"),
+            "--person",
+            "Al",
+            "--rp-id",
+            "rmm.example.com",
+            "--origin",
+            "https://rmm.example.com",
+            "--signer",
+            &e.s("b.json"),
+            "--out",
+            &e.s("draft.json"),
+        ],
+    );
+    // Two people must sign every version.
+    let mut draft: serde_json::Value = read(&e.p("draft.json"));
+    draft["threshold"] = 2.into();
+    std::fs::write(e.p("draft2.json"), draft.to_string()).unwrap();
+    let t = ok_in(
+        &sa,
+        &[
+            "genesis",
+            "--key",
+            &e.s("a.key"),
+            "--draft",
+            &e.s("draft2.json"),
+            "--out",
+            &e.s("g-a.json"),
+        ],
+    );
+    assert!(t.contains("more signatures are needed"), "{t}");
+    ok_in(
+        &sb,
+        &[
+            "genesis",
+            "--key",
+            &e.s("b.key"),
+            "--draft",
+            &e.s("g-a.json"),
+            "--out",
+            &e.s("g.json"),
+        ],
+    );
+    let g: SignedList = read(&e.p("g.json"));
+    let fp = g.list.hash().unwrap();
+    std::fs::write(
+        e.p("chain.json"),
+        serde_json::to_vec(&vec![g.clone()]).unwrap(),
+    )
+    .unwrap();
+    ok_in(
+        &sa,
+        &[
+            "trust",
+            "import",
+            "--fingerprint",
+            &fp.to_string(),
+            "--chain",
+            &e.s("chain.json"),
+        ],
+    );
+
+    let next = |f: &dyn Fn(&mut flyw8t_protocol::trust::TrustList), name: &str| {
+        let mut l = g.list.clone();
+        l.version = 2;
+        l.previous = Some(fp);
+        f(&mut l);
+        std::fs::write(e.p(name), serde_json::to_vec(&l).unwrap()).unwrap();
+    };
+    // A version that could never verify is refused before it uses up the signer's version 2.
+    next(
+        &|l| {
+            l.signers.retain(|s| s.person_name != "Bea");
+            l.threshold = 1;
+        },
+        "drop.json",
+    );
+    let (ok, t) = e.run_in(
+        &sa,
+        &[
+            "sign-list",
+            "--key",
+            &e.s("a.key"),
+            "--input",
+            &e.s("drop.json"),
+            "--out",
+            &e.s("x.json"),
+        ],
+    );
+    assert!(!ok && t.contains("without recording it as removed"), "{t}");
+    // A real version 2, signed by A only: not complete, but A's number 2 is now taken.
+    next(&|l| l.revoked_revisions.push(Hash([5; 32])), "v2.json");
+    let t = ok_in(
+        &sa,
+        &[
+            "sign-list",
+            "--key",
+            &e.s("a.key"),
+            "--input",
+            &e.s("v2.json"),
+            "--out",
+            &e.s("v2a.json"),
+        ],
+    );
+    assert!(t.contains("more signatures are needed"), "{t}");
+    next(&|l| l.revoked_revisions.push(Hash([6; 32])), "fork.json");
+    let (ok, t) = e.run_in(
+        &sa,
+        &[
+            "sign-list",
+            "--key",
+            &e.s("a.key"),
+            "--input",
+            &e.s("fork.json"),
+            "--out",
+            &e.s("f.json"),
+        ],
+    );
+    assert!(!ok && t.contains("already signed version 2"), "{t}");
+    // The same version again is fine (B's copy, say).
+    ok_in(
+        &sa,
+        &[
+            "sign-list",
+            "--key",
+            &e.s("a.key"),
+            "--input",
+            &e.s("v2.json"),
+            "--out",
+            &e.s("v2a-again.json"),
+        ],
+    );
+}
+
+#[test]
+fn request_text_cannot_drive_the_terminal() {
+    let e = Env::new();
+    e.ok(&["keygen", "--out", &e.s("k.key")]);
+    std::fs::write(
+        e.p("evil.json"),
+        r#"{"deployment_id":"\u001b]52;c;aGk=\u0007"}"#,
+    )
+    .unwrap();
+    let (ok, t) = e.run(&[
+        "approve",
+        "--key",
+        &e.s("k.key"),
+        "--request",
+        &e.s("evil.json"),
+        "--source",
+        &e.s("k.key"),
+        "--out",
+        &e.s("o.json"),
+    ]);
+    assert!(!ok);
+    assert!(!t.contains('\u{1b}') && !t.contains('\u{7}'), "{t:?}");
+}
+
+#[test]
 fn the_offline_flow_end_to_end() {
     let e = Env::new();
     e.ok(&["keygen", "--out", &e.s("root.key")]);

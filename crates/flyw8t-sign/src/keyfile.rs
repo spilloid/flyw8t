@@ -50,7 +50,12 @@ fn associated(f: &File) -> Vec<u8> {
 }
 
 fn stretch(pass: &str, kdf: &Kdf) -> Result<Zeroizing<[u8; 32]>> {
-    if kdf.alg != "argon2id" || kdf.m_kib < 19 * 1024 || kdf.t < 2 || kdf.p < 1 {
+    // Bounded both ways before anything is spent: the settings are checked only after the work is done.
+    if kdf.alg != "argon2id"
+        || !(19 * 1024..=1024 * 1024).contains(&kdf.m_kib)
+        || !(2..=16).contains(&kdf.t)
+        || !(1..=8).contains(&kdf.p)
+    {
         bail!("the key file asks for a key derivation this tool will not use");
     }
     let params = argon2::Params::new(kdf.m_kib, kdf.t, kdf.p, Some(32))
@@ -117,6 +122,9 @@ pub fn generate(pass: &str) -> Result<(OfflineKey, Vec<u8>)> {
 
 /// Open a key file with its passphrase.
 pub fn open(path: &Path, pass: &str) -> Result<OfflineKey> {
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 64 * 1024 {
+        bail!("{} is not a key file", path.display());
+    }
     let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let f: File = serde_json::from_slice(&raw).context("not a flyw8t-sign key file")?;
     if f.format != FORMAT {
@@ -252,6 +260,21 @@ mod tests {
         let p3 = dir.join("m.key");
         std::fs::write(&p3, serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(open(&p3, "correct horse").is_err());
+        // Extreme settings are refused before any work: this would ask for 4 TiB.
+        for (field, value) in [
+            ("m_kib", 4_294_967_295u64),
+            ("t", 4_294_967_295),
+            ("p", 1000),
+        ] {
+            let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            v["kdf"][field] = value.into();
+            let p4 = dir.join(format!("{field}.key"));
+            std::fs::write(&p4, serde_json::to_vec(&v).unwrap()).unwrap();
+            let started = std::time::Instant::now();
+            let err = open(&p4, "correct horse").err().unwrap().to_string();
+            assert!(err.contains("will not use"), "{field}: {err}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

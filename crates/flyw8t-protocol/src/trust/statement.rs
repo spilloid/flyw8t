@@ -43,6 +43,11 @@ pub struct RevisionApproval {
 
 impl RevisionApproval {
     pub fn hash(&self) -> Hash {
+        Hash(self.encoded().hash32())
+    }
+
+    /// The bytes the hash is taken over.
+    pub fn encoded(&self) -> Enc {
         let mut e = Enc::statement(DOMAIN_APPROVAL);
         e.uuid(&self.deployment_id)
             .uuid(&self.script_id)
@@ -55,7 +60,7 @@ impl RevisionApproval {
             })
             .time(self.approved_at)
             .hash(&self.signer.0);
-        Hash(e.hash32())
+        e
     }
 
     /// The approval a signer gives for `rev` in `deployment`.
@@ -110,6 +115,11 @@ pub struct RunAuthorization {
 
 impl RunAuthorization {
     pub fn hash(&self) -> Result<Hash, EncodeError> {
+        Ok(Hash(self.encoded()?.hash32()))
+    }
+
+    /// The bytes the hash is taken over.
+    pub fn encoded(&self) -> Result<Enc, EncodeError> {
         let mut e = Enc::statement(DOMAIN_RUN);
         e.uuid(&self.deployment_id).uuid(&self.job_id);
         e.list(&self.devices, |e, d| {
@@ -121,7 +131,7 @@ impl RunAuthorization {
             .time(self.issued_at)
             .time(self.expires_at)
             .hash(&self.signer.0);
-        Ok(Hash(e.hash32()))
+        Ok(e)
     }
 }
 

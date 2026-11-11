@@ -31,6 +31,20 @@ pub fn quoted(s: &str) -> String {
     out
 }
 
+/// Any text bound for a terminal (an error message, say) with control and invisible characters escaped, so text
+/// that came from a request cannot send terminal sequences or rewrite what was shown. Line breaks are kept.
+pub fn sanitized(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c != '\n' && (c.is_control() || is_invisible(c)) {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A block of text such as a script's source: each line numbered and escaped as [`quoted`] would, without the
 /// quotes, so a carriage return or escape sequence cannot rewrite an earlier line.
 pub fn block(s: &str) -> String {
@@ -47,6 +61,14 @@ pub fn block(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_cannot_drive_the_terminal() {
+        assert_eq!(
+            sanitized("bad \u{1b}]52;c;x\u{7} name\nnext\rX"),
+            "bad \\u{1b}]52;c;x\\u{7} name\nnext\\u{d}X"
+        );
+    }
 
     #[test]
     fn nothing_hides_or_rewrites_what_is_shown() {

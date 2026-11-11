@@ -7,9 +7,9 @@ mod state;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use flyw8t_protocol::display::{block, quoted};
+use flyw8t_protocol::display::{block, quoted, sanitized};
 use flyw8t_protocol::script::{normalize_source, parse_parameters, ParamSource, Revision};
-use flyw8t_protocol::trust::run::{check_approvals, check_values, RunRequest};
+use flyw8t_protocol::trust::run::{check_approvals, check_limits, check_values, RunRequest};
 use flyw8t_protocol::trust::sig::sign_offline;
 use flyw8t_protocol::trust::statement::window_cap;
 use flyw8t_protocol::trust::{
@@ -52,6 +52,20 @@ enum Cmd {
     Show {
         #[arg(long)]
         key: Option<PathBuf>,
+    },
+    /// Write this key as a signer entry, for someone drafting a list to add.
+    ExportSigner {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        person: String,
+        /// signer, list_admin or root.
+        #[arg(long, default_value = "signer")]
+        role: String,
+        #[arg(long, default_value = "C3")]
+        may_approve: String,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Draft a first trust list with this key as its root.
     DraftGenesis {
@@ -177,13 +191,29 @@ enum ListInput {
 
 fn main() {
     if let Err(e) = run(Cli::parse()) {
-        eprintln!("flyw8t-sign: {e:#}");
+        // Errors can quote a request's text: never let it reach the terminal raw.
+        eprintln!("flyw8t-sign: {}", sanitized(&format!("{e:#}")));
         std::process::exit(1);
     }
 }
 
+/// The largest file read: a full chain of large lists, or a request with a 256 KiB script and its approvals.
+const MAX_INPUT: u64 = 16 * 1024 * 1024;
+
 fn read_json<T: DeserializeOwned>(p: &Path) -> Result<T> {
-    let raw = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+    use std::io::Read;
+    let mut raw = Vec::new();
+    std::fs::File::open(p)
+        .with_context(|| format!("reading {}", p.display()))?
+        .take(MAX_INPUT + 1)
+        .read_to_end(&mut raw)?;
+    if raw.len() as u64 > MAX_INPUT {
+        bail!(
+            "{} is larger than {} MiB",
+            p.display(),
+            MAX_INPUT / 1024 / 1024
+        );
+    }
     serde_json::from_slice(&raw)
         .with_context(|| format!("{} is not what was expected", p.display()))
 }
@@ -362,13 +392,30 @@ fn show_revision(r: &Revision) -> String {
                 )
             }
             ParamSource::Constant(c) => format!("constant {}", quoted(c)),
-            ParamSource::Ask { .. } => "asked at run time".into(),
+            ParamSource::Ask { prompt: None } => "asked at run time".into(),
+            ParamSource::Ask { prompt: Some(q) } => {
+                format!("asked at run time, prompt {}", quoted(q))
+            }
         };
         out.push_str(&format!("  {} = {src}\n", quoted(&p.name)));
     }
+    out.push_str("Parameter declarations as signed:\n");
+    out.push_str(&block(&r.parameters));
     out.push_str("Source:\n");
     out.push_str(&block(&r.source));
     out
+}
+
+/// What this signature is bound to: shown before every confirmation.
+fn show_binding(c: &state::Chain, signer: &Signer) -> String {
+    format!(
+        "Deployment {} (pinned fingerprint {}, trust list version {})\nSigning as {} with key {}\n",
+        c.head.list.deployment_id,
+        c.fingerprint,
+        c.head.list.version,
+        quoted(&signer.person_name),
+        signer.key_id()
+    )
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -400,6 +447,29 @@ fn run(cli: Cli) -> Result<()> {
             for d in st.devices()? {
                 println!("device {} {}", quoted(&d.name), d.key_id);
             }
+        }
+        Cmd::ExportSigner {
+            key,
+            person,
+            role,
+            may_approve,
+            out,
+        } => {
+            let k = open_key(&key)?;
+            let s = Signer {
+                kind: SignerKind::Offline,
+                public_key: Bytes(k.public().to_vec()),
+                credential_id: None,
+                person_id: Uuid::new_v4(),
+                person_name: person,
+                may_approve: serde_json::from_value(serde_json::Value::String(may_approve))
+                    .context("--may-approve is none, C0, C1, C2 or C3")?,
+                scope: Scope::All,
+                role: serde_json::from_value(serde_json::Value::String(role))
+                    .context("--role is signer, list_admin or root")?,
+            };
+            write_json(&out, &s)?;
+            println!("{}", show_signer(&s));
         }
         Cmd::DraftGenesis {
             key,
@@ -462,8 +532,9 @@ fn run(cli: Cli) -> Result<()> {
                 bail!("this machine already holds deployment {}", l.deployment_id);
             }
             match l.signer(&k.id()) {
-                Some(me) if me.role == Role::Root => {}
-                _ => bail!("this key is not a root of the list"),
+                // Every root must sign a first version, and enough list admins to meet its threshold.
+                Some(me) if me.role.is_list_admin() => {}
+                _ => bail!("this key is not a list admin or root of the list"),
             }
             let hash = l.hash()?;
             println!("{}", show_list(l));
@@ -495,7 +566,6 @@ fn run(cli: Cli) -> Result<()> {
             };
             let c = st.require_chain(&s.list.deployment_id)?;
             let (held, next) = (&c.head.list, &s.list);
-            next.check_alone()?;
             if next.version != held.version + 1 || next.previous != Some(c.head.hash) {
                 bail!(
                     "this is version {} after {:?}; this machine holds version {} ({}). Run `trust update` first.",
@@ -505,12 +575,22 @@ fn run(cli: Cli) -> Result<()> {
                     c.head.hash
                 );
             }
-            match held.signer(&k.id()) {
-                Some(me) if me.role.is_list_admin() => {}
+            // Every rule that does not depend on signatures, before anything is recorded or signed: a version that
+            // could never verify must not use up this machine's signature for its number.
+            let hash = trust::list::check_transition(&c.head, next)?;
+            let me = match held.signer(&k.id()) {
+                Some(me) if me.role.is_list_admin() => me,
                 _ => bail!("this key is not a list admin of the version held"),
+            };
+            if trust::list::changes_governance(held, next) && me.role != Role::Root {
+                println!("This version changes list admins, roots or the threshold: a root of version {} must sign it too.", held.version);
             }
-            let hash = next.hash()?;
-            println!("{}\n{}", show_list(next), show_changes(held, next));
+            println!(
+                "{}{}\n{}",
+                show_binding(&c, me),
+                show_list(next),
+                show_changes(held, next)
+            );
             confirm(cli.yes, &format!("version {}", next.version))?;
             st.record_signing(&next.deployment_id, next.version, hash)?;
             s.signatures.retain(|x| x.key_id() != &k.id());
@@ -533,6 +613,7 @@ fn run(cli: Cli) -> Result<()> {
             let st = state()?;
             let k = open_key(&key)?;
             let req: ApprovalRequest = read_json(&request)?;
+            check_limits(&req.revision, 0, 0)?;
             let c = st.require_chain(&req.deployment_id)?;
             let reviewed =
                 std::fs::read(&source).with_context(|| format!("reading {}", source.display()))?;
@@ -570,7 +651,7 @@ fn run(cli: Cli) -> Result<()> {
                     bail!("this key's scope does not include organization {o}");
                 }
             }
-            println!("{}", show_revision(&rev));
+            println!("{}{}", show_binding(&c, me), show_revision(&rev));
             confirm(cli.yes, "this approval")?;
             let a = RevisionApproval::of(req.deployment_id, &rev, now(), k.id());
             let signed = SignedApproval {
@@ -590,6 +671,7 @@ fn run(cli: Cli) -> Result<()> {
             let st = state()?;
             let k = open_key(&key)?;
             let req: RunRequest = read_json(&request)?;
+            check_limits(&req.revision, req.approvals.len(), req.devices.len())?;
             let c = st.require_chain(&req.deployment_id)?;
             let head = &c.head.list;
             let rev = &req.revision;
@@ -645,7 +727,7 @@ fn run(cli: Cli) -> Result<()> {
                     cap / 60
                 );
             }
-            println!("{}", show_revision(rev));
+            println!("{}{}", show_binding(&c, me), show_revision(rev));
             println!("Approved by:");
             for a in &approvers {
                 println!("{}", show_signer(a));

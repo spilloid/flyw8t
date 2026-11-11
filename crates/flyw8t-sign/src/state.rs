@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 pub struct State {
     root: PathBuf,
+    /// Held for the life of the command: two commands never read and replace a checkpoint or chain at once.
+    _lock: std::fs::File,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -44,7 +46,15 @@ pub struct Chain {
 impl State {
     pub fn open(root: PathBuf) -> Result<State> {
         std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
-        Ok(State { root })
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("lock"))
+            .context("opening the state lock")?;
+        lock.lock()
+            .context("waiting for another flyw8t-sign to finish")?;
+        Ok(State { root, _lock: lock })
     }
 
     pub fn default_root() -> PathBuf {
@@ -194,6 +204,7 @@ impl State {
         }
         let dir = self.dir(deployment);
         std::fs::create_dir_all(&dir)?;
+        sync_dir(&self.root)?;
         write_atomic(
             &dir.join("signed.json"),
             &serde_json::to_vec_pretty(&Checkpoint { version, hash })?,
@@ -223,7 +234,22 @@ impl State {
     }
 }
 
+/// Flush a directory's entries (a new deployment folder). Windows has no directory flush; there `MoveFileEx` with
+/// write-through, used for every file, is what makes the checkpoint durable.
+fn sync_dir(_dir: &Path) -> Result<()> {
+    #[cfg(not(windows))]
+    std::fs::File::open(_dir)?.sync_all()?;
+    Ok(())
+}
+
+/// The largest state file read.
+const MAX_STATE_FILE: u64 = 64 * 1024 * 1024;
+
 fn read_opt(p: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::metadata(p) {
+        Ok(m) if m.len() > MAX_STATE_FILE => bail!("{} is larger than expected", p.display()),
+        _ => {}
+    }
     match std::fs::read(p) {
         Ok(b) => Ok(Some(b)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -231,7 +257,8 @@ fn read_opt(p: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-/// Write to a temporary file, flush it, and rename it over `p`.
+/// Write to a temporary file, flush it, and replace `p` with it durably: the replacement is on disk before this
+/// returns, so a checkpoint cannot be lost to a power cut after the signature it guards has left the machine.
 pub fn write_atomic(p: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let tmp = p.with_extension("tmp");
@@ -240,5 +267,34 @@ pub fn write_atomic(p: &Path, bytes: &[u8]) -> Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, p).with_context(|| format!("writing {}", p.display()))
+    replace(&tmp, p).with_context(|| format!("writing {}", p.display()))
+}
+
+#[cfg(windows)]
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let w = |p: &Path| p.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
+    let (a, b) = (w(from), w(to));
+    // SAFETY: two NUL-terminated paths. WRITE_THROUGH returns only once the rename is flushed.
+    if unsafe {
+        MoveFileExW(
+            a.as_ptr(),
+            b.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)?;
+    // The rename lives in the directory: flush it too.
+    std::fs::File::open(to.parent().unwrap_or(Path::new(".")))?.sync_all()
 }

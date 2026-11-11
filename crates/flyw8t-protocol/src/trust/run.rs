@@ -9,6 +9,50 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+/// The most approvals or devices one request may carry.
+pub const MAX_APPROVALS: usize = 64;
+pub const MAX_DEVICES: usize = 1000;
+
+/// A JSON object of strings with no name twice, compared ignoring ASCII case. Serde's own map keeps the last of
+/// two equal names silently.
+pub fn strict_map<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, String>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = BTreeMap<String, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an object of strings with no name twice")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut m: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((k, v)) = m.next_entry::<String, String>()? {
+                if out.keys().any(|x: &String| x.eq_ignore_ascii_case(&k)) {
+                    return Err(serde::de::Error::custom("a parameter name appears twice"));
+                }
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(V)
+}
+
+/// The size limits a revision and a request must keep before anything is verified or shown.
+pub fn check_limits(rev: &Revision, approvals: usize, devices: usize) -> Result<(), RunError> {
+    if rev.source.len() > crate::script::MAX_SOURCE
+        || rev.parameters.len() > crate::script::MAX_PARAMETERS
+        || approvals > MAX_APPROVALS
+        || devices > MAX_DEVICES
+    {
+        return Err(RunError::TooLarge);
+    }
+    Ok(())
+}
+
 /// Largest single value, and all values together.
 pub const MAX_VALUE: usize = 4 * 1024;
 pub const MAX_VALUES: usize = 64 * 1024;
@@ -21,7 +65,9 @@ pub struct RunRequest {
     pub job_id: Uuid,
     pub revision: Revision,
     pub approvals: Vec<SignedApproval>,
-    /// Plain values by parameter name. Secret parameters are not supported offline yet.
+    /// Plain values by parameter name. Secret parameters are not supported offline yet. A name given twice, even
+    /// in different case, refuses the whole request.
+    #[serde(deserialize_with = "strict_map")]
     pub values: BTreeMap<String, String>,
     pub salt: Bytes,
     pub devices: Vec<Hash>,
@@ -50,6 +96,8 @@ pub enum RunError {
     TooLong(String),
     #[error("the values are too long in all")]
     TooLongInAll,
+    #[error("the request is larger than allowed")]
+    TooLarge,
 }
 
 /// Step 2 and 3: the revision is not revoked, and at least one approval matches it in every field by a signer in
@@ -163,6 +211,30 @@ mod tests {
         v.iter()
             .map(|(a, b)| (a.to_string(), b.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_name_twice_in_the_json_refuses_the_request() {
+        #[derive(Deserialize)]
+        struct W {
+            #[serde(deserialize_with = "strict_map")]
+            v: BTreeMap<String, String>,
+        }
+        for bad in [
+            r#"{"v":{"Mode":"evil","Mode":"fast"}}"#,
+            r#"{"v":{"Mode":"evil","mode":"fast"}}"#,
+            r#"{"v":{"Mode":"evil","\u004dode":"fast"}}"#,
+            r#"{"v":{"A":1}}"#,
+        ] {
+            assert!(serde_json::from_str::<W>(bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            serde_json::from_str::<W>(r#"{"v":{"A":"1"}}"#)
+                .unwrap()
+                .v
+                .len(),
+            1
+        );
     }
 
     #[test]
