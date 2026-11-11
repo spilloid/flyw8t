@@ -1,0 +1,31 @@
+[package]
+name = "flyw8t-sign"
+description = "flyw8t offline signing tool: the trust root, list changes, revision approvals and run authorizations (ADR-0015)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "flyw8t-sign"
+path = "src/main.rs"
+
+[dependencies]
+flyw8t-protocol.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+ring.workspace = true
+hex.workspace = true
+argon2.workspace = true
+ed25519-dalek.workspace = true
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+rpassword = "7"
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

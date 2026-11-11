@@ -96,8 +96,26 @@ struct ClientData {
     kind: String,
     challenge: String,
     origin: String,
-    #[serde(rename = "crossOrigin", default)]
-    cross_origin: Option<bool>,
+    /// Absent or `false`; anything else, `null` included, refuses the signature.
+    #[serde(rename = "crossOrigin", default, deserialize_with = "present")]
+    cross_origin: Option<serde_json::Value>,
+    /// Set only for a ceremony inside a frame of another site. Its presence alone, even as `null`, refuses it.
+    #[serde(rename = "topOrigin", default, deserialize_with = "present")]
+    top_origin: Option<serde_json::Value>,
+}
+
+/// A field that is present, whatever its value: `null` is `Some(Null)`, not `None`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(d).map(Some)
+}
+
+impl ClientData {
+    fn framed(&self) -> bool {
+        !matches!(
+            self.cross_origin,
+            None | Some(serde_json::Value::Bool(false))
+        ) || self.top_origin.is_some()
+    }
 }
 
 /// Check `clientDataJSON`: the ceremony, the challenge and the origin, and that it was not made inside a frame of
@@ -113,7 +131,7 @@ pub fn check_client_data(json: &[u8], exp: &Expected) -> Result<(), Error> {
     if from_b64url(&c.challenge).as_deref() != Some(exp.challenge) {
         return Err(Error::WrongChallenge);
     }
-    if c.origin != exp.origin || c.cross_origin == Some(true) {
+    if c.origin != exp.origin || c.framed() {
         return Err(Error::WrongOrigin);
     }
     Ok(())
@@ -169,6 +187,40 @@ pub fn verify_assertion(
         .verify(&signed, signature)
         .map_err(|_| Error::BadSignature)?;
     Ok(auth)
+}
+
+/// Verify an assertion over `challenge` that may come from any of `origins` (a trust list's allowed origins,
+/// ADR-0015). Duplicate fields in `clientDataJSON` are refused by the parser, so each field read is the only one.
+pub fn verify_assertion_any_origin(
+    public_key: &[u8],
+    challenge: &[u8],
+    origins: &[String],
+    rp_id: &str,
+    authenticator_data: &[u8],
+    client_data_json: &[u8],
+    signature: &[u8],
+) -> Result<AuthenticatorData, Error> {
+    if client_data_json.len() > MAX_CLIENT_DATA {
+        return Err(Error::ClientData);
+    }
+    let c: ClientData = serde_json::from_slice(client_data_json).map_err(|_| Error::ClientData)?;
+    let origin = origins
+        .iter()
+        .find(|o| **o == c.origin)
+        .ok_or(Error::WrongOrigin)?;
+    let exp = Expected {
+        ceremony: Ceremony::Get,
+        challenge,
+        origin,
+        rp_id,
+    };
+    verify_assertion(
+        public_key,
+        &exp,
+        authenticator_data,
+        client_data_json,
+        signature,
+    )
 }
 
 /// The console's origin and relying party ID, from its public URL (`https://rmm.example.com:8443/x` gives
@@ -366,6 +418,49 @@ mod tests {
             Err(Error::BadSignature)
         );
         assert!(verify_assertion(&k.public(), &exp(b"nonce"), &a, &good_c, &sig).is_ok());
+    }
+
+    #[test]
+    fn frames_duplicates_and_other_origins_are_refused() {
+        let k = Key::new();
+        let a = auth_data(RP, FLAG_UP | FLAG_UV, 0);
+        let origins = vec!["https://other.example".to_string(), ORIGIN.to_string()];
+        let sign = |c: &[u8]| k.sign(&a, c);
+        let any = |c: &[u8]| {
+            verify_assertion_any_origin(&k.public(), b"h", &origins, RP, &a, c, &sign(c))
+        };
+        let good = client("webauthn.get", b"h", ORIGIN);
+        assert!(any(&good).is_ok());
+        let top = serde_json::json!({ "type": "webauthn.get", "challenge": b64url(b"h"), "origin": ORIGIN, "topOrigin": ORIGIN })
+            .to_string()
+            .into_bytes();
+        assert_eq!(any(&top), Err(Error::WrongOrigin));
+        for nulls in [
+            r#""crossOrigin":null"#,
+            r#""topOrigin":null"#,
+            r#""crossOrigin":"false""#,
+            r#""crossOrigin":0"#,
+        ] {
+            let c = format!(
+                r#"{{"type":"webauthn.get","challenge":"{}","origin":"{ORIGIN}",{nulls}}}"#,
+                b64url(b"h")
+            );
+            assert_eq!(any(c.as_bytes()), Err(Error::WrongOrigin), "{nulls}");
+        }
+        let explicit_false = format!(
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"{ORIGIN}","crossOrigin":false}}"#,
+            b64url(b"h")
+        );
+        assert!(any(explicit_false.as_bytes()).is_ok());
+        let twice = format!(
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"https://evil.example","origin":"{ORIGIN}"}}"#,
+            b64url(b"h")
+        );
+        assert_eq!(any(twice.as_bytes()), Err(Error::ClientData));
+        assert_eq!(
+            any(&client("webauthn.get", b"h", "https://evil.example")),
+            Err(Error::WrongOrigin)
+        );
     }
 
     #[test]

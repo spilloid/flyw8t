@@ -7,8 +7,11 @@
 
 pub mod auth;
 pub mod catalog;
+pub mod display;
 pub mod inventory;
 pub mod messages;
+pub mod script;
+pub mod trust;
 pub mod webauthn;
 
 /// Protocol major version. A server refuses an agent speaking a different major version
