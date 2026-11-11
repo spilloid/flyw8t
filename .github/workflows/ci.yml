@@ -45,6 +45,8 @@ jobs:
         with:
           node-version: 22
       - run: rustup show
+      - name: Trust vectors match the independent reference encoder (ADR-0015)
+        run: python3 -I docs/spec/trust_vectors.py | diff - crates/flyw8t-protocol/tests/vectors/trust.json
       - run: cargo clippy --workspace --all-targets --target $TARGET -- -D warnings
       - run: cargo test --workspace --target $TARGET -- --include-ignored --skip console_renders_cleanly_everywhere --nocapture
       - name: STD-008 UI capture (headless Chrome)

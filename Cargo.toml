@@ -7,6 +7,7 @@ members = [
     "crates/flyw8t-server",
     "crates/flyw8t-agent",
     "crates/flyw8t-helper",
+    "crates/flyw8t-sign",
 ]
 
 [workspace.package]
@@ -51,8 +52,16 @@ argon2 = { version = "0.5", features = ["std"] }
 leptos = { version = "0.8", default-features = false, features = ["ssr"] }
 sysinfo = "0.37"
 rcgen = "0.13"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "std"] }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Argon2 in a debug build takes seconds per key-file open; the flyw8t-sign tests open keys dozens of times.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
