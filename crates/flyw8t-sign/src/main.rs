@@ -59,6 +59,10 @@ enum Cmd {
         key: PathBuf,
         #[arg(long)]
         person: String,
+        /// The person's id, to export a second key of someone already listed. One person's keys must share it, or
+        /// they count as different people toward a threshold.
+        #[arg(long)]
+        person_id: Option<Uuid>,
         /// signer, list_admin or root.
         #[arg(long, default_value = "signer")]
         role: String,
@@ -74,6 +78,8 @@ enum Cmd {
         /// The root key's person, as shown to everyone who checks the list.
         #[arg(long)]
         person: String,
+        #[arg(long)]
+        person_id: Option<Uuid>,
         /// The highest class the root may approve and authorize itself.
         #[arg(long, default_value = "C3")]
         root_may_approve: String,
@@ -93,6 +99,9 @@ enum Cmd {
     Genesis {
         #[arg(long)]
         key: PathBuf,
+        /// Sign as a list admin that is not a root: someone else holds the root.
+        #[arg(long)]
+        as_list_admin: bool,
         /// A draft list, or a list already signed by others.
         #[arg(long)]
         draft: PathBuf,
@@ -451,6 +460,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::ExportSigner {
             key,
             person,
+            person_id,
             role,
             may_approve,
             out,
@@ -460,7 +470,7 @@ fn run(cli: Cli) -> Result<()> {
                 kind: SignerKind::Offline,
                 public_key: Bytes(k.public().to_vec()),
                 credential_id: None,
-                person_id: Uuid::new_v4(),
+                person_id: person_id.unwrap_or_else(Uuid::new_v4),
                 person_name: person,
                 may_approve: serde_json::from_value(serde_json::Value::String(may_approve))
                     .context("--may-approve is none, C0, C1, C2 or C3")?,
@@ -474,6 +484,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::DraftGenesis {
             key,
             person,
+            person_id,
             root_may_approve,
             rp_id,
             origins,
@@ -488,7 +499,7 @@ fn run(cli: Cli) -> Result<()> {
                 kind: SignerKind::Offline,
                 public_key: Bytes(k.public().to_vec()),
                 credential_id: None,
-                person_id: Uuid::new_v4(),
+                person_id: person_id.unwrap_or_else(Uuid::new_v4),
                 person_name: person,
                 may_approve: may,
                 scope: Scope::All,
@@ -513,7 +524,12 @@ fn run(cli: Cli) -> Result<()> {
             write_json(&out, &l)?;
             println!("{}Drafted {}", show_list(&l), out.display());
         }
-        Cmd::Genesis { key, draft, out } => {
+        Cmd::Genesis {
+            key,
+            as_list_admin,
+            draft,
+            out,
+        } => {
             let st = state()?;
             let k = open_key(&key)?;
             let mut s = match read_json::<ListInput>(&draft)? {
@@ -524,20 +540,33 @@ fn run(cli: Cli) -> Result<()> {
                 },
             };
             let l = &s.list;
-            l.check_alone()?;
-            if l.version != trust::list::GENESIS_VERSION || l.previous.is_some() {
-                bail!("this is not a first version");
-            }
+            // Every rule but the signatures, before anything is recorded: a first version that could never verify
+            // must not use up this machine's version 1 for the deployment.
+            let hash = trust::list::check_genesis(l)?;
             if st.chain(&l.deployment_id)?.is_some() {
                 bail!("this machine already holds deployment {}", l.deployment_id);
             }
             match l.signer(&k.id()) {
-                // Every root must sign a first version, and enough list admins to meet its threshold.
-                Some(me) if me.role.is_list_admin() => {}
+                Some(me) if me.role == Role::Root => {}
+                Some(me) if me.role.is_list_admin() && as_list_admin => {}
+                Some(me) if me.role.is_list_admin() => bail!(
+                    "this key is a list admin, not a root, of this list: someone else holds its root. If that is expected, sign with --as-list-admin"
+                ),
                 _ => bail!("this key is not a list admin or root of the list"),
             }
-            let hash = l.hash()?;
             println!("{}", show_list(l));
+            println!("Signing as key {}.", k.id());
+            let others: Vec<&Signer> = l
+                .signers
+                .iter()
+                .filter(|s| s.key_id() != k.id() && s.role.is_list_admin())
+                .collect();
+            if !others.is_empty() {
+                println!("These other keys will govern this list with you. Confirm each key id with its owner, not through the console:");
+                for s in others {
+                    println!("{}", show_signer(s));
+                }
+            }
             println!(
                 "Check every passkey entry's key id against the console's passkey page. Genesis trusts the server for those entries (ADR-0015)."
             );
@@ -551,7 +580,10 @@ fn run(cli: Cli) -> Result<()> {
                     st.import(hash, std::slice::from_ref(&s))?;
                     println!("\nSigned and complete. Trust fingerprint:\n  {hash}\nKeep it in your own notes and install scripts: it is what agents pin.");
                 }
-                Err(e) => println!("\nSigned; more signatures are needed: {e}"),
+                Err(e) if trust::list::needs_more_signatures(&e) => {
+                    println!("\nSigned; more signatures are needed: {e}")
+                }
+                Err(e) => bail!("signed, but the result does not verify: {e}"),
             }
         }
         Cmd::SignList { key, input, out } => {

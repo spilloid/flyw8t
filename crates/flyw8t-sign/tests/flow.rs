@@ -144,6 +144,7 @@ fn a_signer_never_signs_two_versions_with_one_number() {
             "genesis",
             "--key",
             &e.s("b.key"),
+            "--as-list-admin",
             "--draft",
             &e.s("g-a.json"),
             "--out",
@@ -283,6 +284,22 @@ fn the_offline_flow_end_to_end() {
         "--out",
         &e.s("draft.json"),
     ]);
+    // A first version that could never verify is refused before it uses up this machine's version 1.
+    let mut poisoned: serde_json::Value = read(&e.p("draft.json"));
+    poisoned["removed_keys"] = serde_json::json!([Hash([3; 32]).to_string()]);
+    std::fs::write(e.p("poisoned.json"), poisoned.to_string()).unwrap();
+    e.fails(
+        &[
+            "genesis",
+            "--key",
+            &e.s("root.key"),
+            "--draft",
+            &e.s("poisoned.json"),
+            "--out",
+            &e.s("p.json"),
+        ],
+        "no removed keys",
+    );
     let out = e.ok(&[
         "genesis",
         "--key",

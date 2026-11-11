@@ -32,11 +32,11 @@ pub fn quoted(s: &str) -> String {
 }
 
 /// Any text bound for a terminal (an error message, say) with control and invisible characters escaped, so text
-/// that came from a request cannot send terminal sequences or rewrite what was shown. Line breaks are kept.
+/// that came from a request cannot send terminal sequences, rewrite what was shown, or add lines of its own.
 pub fn sanitized(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c != '\n' && (c.is_control() || is_invisible(c)) {
+        if c.is_control() || is_invisible(c) {
             out.push_str(&format!("\\u{{{:x}}}", c as u32));
         } else {
             out.push(c);
@@ -66,7 +66,7 @@ mod tests {
     fn diagnostics_cannot_drive_the_terminal() {
         assert_eq!(
             sanitized("bad \u{1b}]52;c;x\u{7} name\nnext\rX"),
-            "bad \\u{1b}]52;c;x\\u{7} name\nnext\\u{d}X"
+            "bad \\u{1b}]52;c;x\\u{7} name\\u{a}next\\u{d}X"
         );
     }
 

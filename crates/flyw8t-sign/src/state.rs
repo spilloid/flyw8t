@@ -138,8 +138,25 @@ impl State {
                 head.list.deployment_id
             );
         }
+        self.check_against_checkpoint(&head.list.deployment_id, versions)?;
         self.save_chain(fingerprint, versions)?;
         Ok(head)
+    }
+
+    /// A chain this machine adopts must hold, at the number it last signed, exactly what it signed.
+    fn check_against_checkpoint(&self, deployment: &Uuid, versions: &[SignedList]) -> Result<()> {
+        if let Some(cp) = self.checkpoint(deployment)? {
+            if let Some(v) = versions.iter().find(|v| v.list.version == cp.version) {
+                if v.list.hash()? != cp.hash {
+                    bail!(
+                        "version {} differs from the one this machine signed ({}): the server is offering two versions with one number",
+                        cp.version,
+                        cp.hash
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Extend the held chain with `offered`, which may repeat versions already held: those must be identical.
@@ -297,4 +314,63 @@ fn replace(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)?;
     // The rename lives in the directory: flush it too.
     std::fs::File::open(to.parent().unwrap_or(Path::new(".")))?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flyw8t_protocol::trust::sig::sign_offline;
+    use flyw8t_protocol::trust::{Bytes, MayApprove, Role, Scope, Signer, SignerKind, TrustList};
+
+    fn genesis(key: &ed25519_dalek::SigningKey, dep: Uuid, made_at: u64) -> SignedList {
+        let list = TrustList {
+            deployment_id: dep,
+            version: 1,
+            previous: None,
+            rp_id: "rmm.example.com".into(),
+            origins: vec!["https://rmm.example.com".into()],
+            threshold: 1,
+            signers: vec![Signer {
+                kind: SignerKind::Offline,
+                public_key: Bytes(key.verifying_key().to_bytes().to_vec()),
+                credential_id: None,
+                person_id: Uuid::from_u128(1),
+                person_name: "Root".into(),
+                may_approve: MayApprove::C3,
+                scope: Scope::All,
+                role: Role::Root,
+            }],
+            removed_keys: vec![],
+            revoked_revisions: vec![],
+            made_at,
+        };
+        let h = list.hash().unwrap();
+        SignedList {
+            signatures: vec![sign_offline(key, &h)],
+            list,
+        }
+    }
+
+    #[test]
+    fn import_refuses_a_chain_other_than_the_one_this_machine_signed() {
+        let dir = std::env::temp_dir().join(format!("flyw8t-sign-state-{}", Uuid::new_v4()));
+        let st = State::open(dir.clone()).unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let dep = Uuid::from_u128(9);
+        let (mine, other) = (genesis(&key, dep, 1), genesis(&key, dep, 2));
+        st.record_signing(&dep, 1, mine.list.hash().unwrap())
+            .unwrap();
+        let err = st
+            .import(other.list.hash().unwrap(), std::slice::from_ref(&other))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("two versions with one number"),
+            "{err}"
+        );
+        assert!(st.chain(&dep).unwrap().is_none(), "nothing was pinned");
+        st.import(mine.list.hash().unwrap(), std::slice::from_ref(&mine))
+            .unwrap();
+        drop(st);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

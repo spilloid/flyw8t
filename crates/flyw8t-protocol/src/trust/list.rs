@@ -96,7 +96,7 @@ pub enum TrustError {
     Invalid(u64, String),
     #[error("the first version does not hash to the pinned fingerprint (it hashes to {0})")]
     WrongFingerprint(Hash),
-    #[error("the first version must be version 1 with no previous version")]
+    #[error("a first version must be version 1, with no previous version and no removed keys")]
     NotGenesis,
     #[error("version {got} does not follow version {held}")]
     NotNext { held: u64, got: u64 },
@@ -303,15 +303,29 @@ fn count_admins(version: u64, who: &[&Signer], need: u64) -> Result<(), TrustErr
 }
 
 /// Verify the first version against the pinned fingerprint.
-pub fn verify_genesis(signed: &SignedList, fingerprint: &Hash) -> Result<Verified, TrustError> {
-    let l = &signed.list;
+/// Every rule a first version must meet that does not depend on its signatures. `flyw8t-sign` checks this before
+/// it records or signs anything.
+pub fn check_genesis(l: &TrustList) -> Result<Hash, TrustError> {
     l.check_alone()?;
-    let hash = l.hash()?;
-    if hash != *fingerprint {
-        return Err(TrustError::WrongFingerprint(hash));
-    }
     if l.version != GENESIS_VERSION || l.previous.is_some() || !l.removed_keys.is_empty() {
         return Err(TrustError::NotGenesis);
+    }
+    l.hash()
+}
+
+/// Whether a version is refused only for want of signatures, which more signers can supply.
+pub fn needs_more_signatures(e: &TrustError) -> bool {
+    matches!(
+        e,
+        TrustError::Threshold { .. } | TrustError::GenesisRoots | TrustError::RootNeeded(_)
+    )
+}
+
+pub fn verify_genesis(signed: &SignedList, fingerprint: &Hash) -> Result<Verified, TrustError> {
+    let l = &signed.list;
+    let hash = check_genesis(l)?;
+    if hash != *fingerprint {
+        return Err(TrustError::WrongFingerprint(hash));
     }
     let who = signers_of(signed, &hash, l)?;
     count_admins(l.version, &who, l.threshold)?;

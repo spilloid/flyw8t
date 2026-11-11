@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+/// The most values one request may carry: far more than 16 KiB of declarations can declare.
+pub const MAX_NAMES: usize = 1024;
 /// The most approvals or devices one request may carry.
 pub const MAX_APPROVALS: usize = 64;
 pub const MAX_DEVICES: usize = 1000;
@@ -29,8 +31,12 @@ pub fn strict_map<'de, D: serde::Deserializer<'de>>(
             mut m: A,
         ) -> Result<Self::Value, A::Error> {
             let mut out = BTreeMap::new();
+            let mut lower = std::collections::BTreeSet::new();
             while let Some((k, v)) = m.next_entry::<String, String>()? {
-                if out.keys().any(|x: &String| x.eq_ignore_ascii_case(&k)) {
+                if out.len() >= MAX_NAMES {
+                    return Err(serde::de::Error::custom("too many parameters"));
+                }
+                if !lower.insert(k.to_ascii_lowercase()) {
                     return Err(serde::de::Error::custom("a parameter name appears twice"));
                 }
                 out.insert(k, v);
@@ -228,6 +234,14 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<W>(bad).is_err(), "{bad}");
         }
+        let many = (0..=MAX_NAMES)
+            .map(|i| format!("\"a{i}\":\"\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            serde_json::from_str::<W>(&format!("{{\"v\":{{{many}}}}}")).is_err(),
+            "too many names"
+        );
         assert_eq!(
             serde_json::from_str::<W>(r#"{"v":{"A":"1"}}"#)
                 .unwrap()
