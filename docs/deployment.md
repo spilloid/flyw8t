@@ -1,6 +1,6 @@
 # Deployment
 
-> **Status (2026-11-12):** no local Docker run has been demonstrated on this Windows development host. CI builds the image, validates Compose, and now has a smoke check for startup, password/TOTP sign-in, record creation and dump/restore into an empty database. Record its actual run result before claiming that evidence; an automated same-host database round-trip does not close the off-host recovery or physical Windows-agent deployment gates. The native server/database suites run separately against PostgreSQL.
+> **Status (2026-11-12):** packaged Compose startup, password/TOTP sign-in, record creation and dump/restore into an empty database passed at `a48f7e6` in [CI run 43171178365](https://github.com/spilloid/flyw8t/actions/runs/43171178365). Docker is unavailable on this Windows host. The automated same-host database round-trip leaves off-host recovery, key recovery and physical Windows-agent deployment gates open. Native server/database suites run separately against PostgreSQL.
 
 ## Server with Docker Compose
 

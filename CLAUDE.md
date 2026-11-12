@@ -42,7 +42,7 @@ If one family is unavailable, substitute the other's matching tier and log it as
 
 Dated claims that no automated check covers (STD-003 rule 4):
 
-- **2026-10-29**: Docker Compose and the Dockerfile have never been run (no Docker on the development machine). CI builds the image; nobody has signed in to a Compose deployment.
+- **2026-11-12**: Compose startup, real password/TOTP sign-in, organization creation and dump/restore into an empty database passed in CI at `a48f7e6` (run 43171178365). Docker is still unavailable on this Windows host. Physical Windows enrollment against that deployment, off-host recovery and encryption/root-key recovery remain open gates; the CI round-trip does not prove them.
 - **2026-11-07**: `flyw8t-agent enroll` and `service install` have been run for real (Windows 11, elevated through Windows `sudo` in Inline mode; each elevated step is one UAC prompt the operator must click, so batch them in one script and ask first; dev-process row 36): refusals, uninstall from the installed copy, restart after a kill, owners and permissions, the log, DLL planting. **Not** checked yet: surviving a reboot, and the clean exit-1 path (revoked credential) now that restart-on-non-crash-failure is set. The file `install` copies is not authenticated against the running image until releases are signed.
 - **2026-11-12**: Main CI ran successfully at `ff67d58` (GitHub run 43048263310, 2026-11-11). Earlier "CI has never run" notes were stale. New branches still need their own exact-ref results; a green main run does not validate unmerged script execution.
 - **2026-10-29**: `docs/spec/JobDelivery.tla` has not been model-checked with TLC.

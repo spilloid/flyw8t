@@ -12,7 +12,7 @@ Founding results were recorded on 2026-10-29 on Windows 11 x64 with PostgreSQL 1
 
 | ID | Milestone step | How | Status |
 |---|---|---|---|
-| AT-01 | Start PostgreSQL and the server with Docker Compose | `deploy/compose/`, `scripts/compose-smoke.mjs` | CI now exercises actual container startup, password/TOTP, record creation and empty-database restore. Attach a passing run before marking verified. Physical Windows enrollment and off-host restore remain separate release gates. |
+| AT-01 | Start PostgreSQL and the server with Docker Compose | `deploy/compose/`, `scripts/compose-smoke.mjs` | **Automated, verified 2026-11-12:** startup, password/TOTP, record creation and empty-database restore passed at `a48f7e6` ([run 43171178365](https://github.com/spilloid/flyw8t/actions/runs/43171178365)). Physical Windows enrollment and off-host/key recovery remain separate release gates. |
 | AT-02 | Serve the Rust web UI | `vertical_slice`, `ui_capture` | Automated |
 | AT-03 | Authenticate as an administrator | `vertical_slice` (bootstrap admin, sign-in) | Automated |
 | AT-04 | Create an organization | `vertical_slice` | Automated |

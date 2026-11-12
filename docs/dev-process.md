@@ -59,6 +59,8 @@ Environment: Windows 11, PostgreSQL 18.6 in a dedicated loopback-only disposable
 
 New validation mechanisms: Compose CI now has a real packaged-server/MFA/record/dump/empty-database-restore check with a unique disposable project; its first Docker result is still required. The Mac probe captures only its own window and sends tagged input only to its PID, writes observation reports without images/audio or real keystrokes, and never claims a release gate passed. macOS CI compiles and verifies its ad-hoc development signature only. The operator confirmed no Mac is available tonight; physical permission, session and unattended experiments remain open. Neither mechanism is an independent security review or an off-host recovery rehearsal.
 
+CI follow-up: all five jobs passed on implementation ref **a48f7e6**, [run 43171178365](https://github.com/spilloid/flyw8t/actions/runs/43171178365): Windows, Linux PostgreSQL/protocol/TLS/browser/UI, the actual packaged Compose startup/MFA/record/empty-database-restore round-trip, Mac probe compilation/ad-hoc signature verification, and standards. This is the first recorded Compose sign-in/restore evidence. Physical Mac permission/session testing, Windows enrollment against Compose, off-host/key recovery, power-loss/disk-exhaustion drills and independent adversarial review remain open. The observation probe's compile success does not pass G02-MAC.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
