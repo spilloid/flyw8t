@@ -81,6 +81,10 @@ shutdown.exe /r /t $Delay /c "flyw8t: signed C3 reboot"
 
 Declare it with parameters `Delay = "60"` and risk class C3.
 
+## Validation
+
+The real PowerShell integration suite is Windows-only and explicitly requires PostgreSQL. With a disposable database configured, run `cargo test -p flyw8t-server --test script_runs -- --ignored`. The default Windows CI run has no database and must skip it; Linux's `--include-ignored` must not enable this Windows-only suite. Successful compilation or skipping does not establish script execution coverage or security review.
+
 ## Not built yet
 
 - Passkey signing in the browser, for approvals and run signatures. Use `flyw8t-sign`.

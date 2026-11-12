@@ -1,6 +1,8 @@
 //! Running approved scripts end to end (ADR-0015 build step 4): a C0 revision runs once approved; a C3 revision
 //! waits for a run signature for that device, runs once it is uploaded, and the agent refuses what it cannot verify.
 
+#![cfg(windows)]
+
 mod common;
 
 use axum::http::StatusCode;
@@ -152,7 +154,7 @@ async fn output(server: &TestServer, job: Uuid) -> String {
 }
 
 #[tokio::test]
-#[cfg_attr(not(windows), ignore = "scripts run on Windows only in this version")]
+#[ignore = "needs PostgreSQL (FLYW8T_TEST_DATABASE_URL) and the Windows PowerShell runner"]
 async fn approved_scripts_run_and_c3_waits_for_a_signature_for_this_device() {
     let server = start_fresh().await;
     let admin = server.admin_sudo().await;

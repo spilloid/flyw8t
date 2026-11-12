@@ -5,7 +5,9 @@
 
 use flyw8t_protocol::messages::{CapturedStream, ExecOutcome, Finished};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(windows)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
