@@ -1,8 +1,8 @@
 //! Remote-access provider seam (ADR-0006).
 //!
-//! flyw8t does not implement remote desktop. A provider (MeshCentral first) maps a flyw8t
-//! device to its own node and produces a launch link. The RMM never depends on a provider
-//! being reachable, and a provider is never the source of device identity or tenancy.
+//! Optional external providers can map a flyw8t device to a launch link. The native
+//! attended/unattended engine is the accepted direction (ADR-0013); this seam is not
+//! that engine. A provider is never the source of device identity or tenancy.
 
 use uuid::Uuid;
 
@@ -18,7 +18,7 @@ pub struct NotConfigured;
 
 impl RemoteAccessProvider for NotConfigured {
     fn describe(&self, _device_id: Uuid) -> String {
-        "Not configured. A MeshCentral provider is planned (docs/decisions/ADR-0006).".into()
+        "Remote control is not available in this build.".into()
     }
 
     fn launch_url(&self, _device_id: Uuid) -> Option<String> {

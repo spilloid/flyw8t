@@ -8,6 +8,8 @@ Technicians need remote desktop. Building a remote-desktop stack is a multi-year
 
 ## Decision
 
+**Superseded in part by ADR-0013 and the operator's 2026-11-12 [release contract](../roadmap.md):** the provider seam remains optional, but MeshCentral-first and external-engine delivery are historical decisions. Native attended/unattended control on Windows and Mac is required for 1.0. The original rationale below is preserved as decision history, not a current integration commitment.
+
 1. `remote_access::RemoteAccessProvider` (server) is the seam: `describe(device)` and `launch_url(device)`. The default `NotConfigured` provider says so on the device page instead of showing a dead button.
 2. **MeshCentral is the first provider, and it is never authoritative.** flyw8t's device identity, organization and inventory come only from flyw8t's own agent and enrollment. A MeshCentral node is linked to a flyw8t device by an explicit mapping (`device_id ↔ node id`), created by an administrator or by a matching rule that an administrator confirms. It is never inferred silently.
 3. The RMM works with MeshCentral down: the provider reports "unavailable" and nothing else is affected.

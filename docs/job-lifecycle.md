@@ -89,6 +89,8 @@ If a device reports on a job recorded as `queued` (possible after restoring a da
 
 ## Behavior under failure
 
+The agent's journal fails closed if execution history is unreadable, mismatched, duplicated or quarantined by an older build. Startup preserves the evidence and refuses to connect; repeatedly restarting cannot make an old job look new. See [damaged journal recovery](deployment.md#damaged-agent-journal). In-memory updates are published only after persistence succeeds, so a failed start/result/ack write cannot masquerade as a durable update on retry. Real filesystem failure regressions cover these paths; actual disk exhaustion and power loss remain separate open drills.
+
 | Situation | Behavior | Test |
 |---|---|---|
 | **Agent disconnects** with jobs queued | Jobs stay `queued`; nothing claims they were sent. | `reconnect_and_duplicate_delivery_never_reexecutes` |

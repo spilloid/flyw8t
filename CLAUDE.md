@@ -16,7 +16,7 @@ Read [`docs/architecture.md`](docs/architecture.md), [`docs/job-lifecycle.md`](d
 - **Secrets are write-only:** stored hashed, shown once, never logged, never in URLs (except the single-use support invitation, which is spent on first use).
 - **Live is not cached.** Connection badges come only from the registry; device-reported data shows its age.
 - **Attended support never grants more than consented**, never relays signaling before consent, and never installs anything. Remote control (Phase C) is approved (ADR-0010) and needs its own, separate consent for input.
-- **Don't build general unattended remote desktop or port MeshAgent** (founding brief; ADR-0006). Attended, consent-first remote control is approved (ADR-0010, 2026-10-30) and keeps its guardrails.
+- **Build remote control on our shared engine**, not MeshCentral or a MeshAgent port (ADR-0012/0013). Operator-approved release scope (2026-11-12): Windows and macOS endpoints, native attended/unattended control, Windows UAC and sign-in screens at 1.0; Linux hosts the server/console. Android endpoints and mobile technician administration gate 1.5; iOS is conditional. Linux endpoints are outside 1.0. Follow the evidence gates in `docs/roadmap.md`; consent and endpoint policy remain mandatory.
 
 ## Routing (STD-001)
 
@@ -44,11 +44,11 @@ Dated claims that no automated check covers (STD-003 rule 4):
 
 - **2026-10-29**: Docker Compose and the Dockerfile have never been run (no Docker on the development machine). CI builds the image; nobody has signed in to a Compose deployment.
 - **2026-11-07**: `flyw8t-agent enroll` and `service install` have been run for real (Windows 11, elevated through Windows `sudo` in Inline mode; each elevated step is one UAC prompt the operator must click, so batch them in one script and ask first; dev-process row 36): refusals, uninstall from the installed copy, restart after a kill, owners and permissions, the log, DLL planting. **Not** checked yet: surviving a reboot, and the clean exit-1 path (revoked credential) now that restart-on-non-crash-failure is set. The file `install` copies is not authenticated against the running image until releases are signed.
-- **2026-10-29**: CI (`.github/workflows/ci.yml`) has never run; nothing has been pushed. The Linux job's assumptions (ping to TEST-NET-1 times out; `ip addr` exists; Chrome at `/usr/bin/google-chrome`) are unverified.
+- **2026-11-12**: Main CI ran successfully at `ff67d58` (GitHub run 43048263310, 2026-11-11). Earlier "CI has never run" notes were stale. New branches still need their own exact-ref results; a green main run does not validate unmerged script execution.
 - **2026-10-29**: `docs/spec/JobDelivery.tla` has not been model-checked with TLC.
 - **2026-10-29**: Attended support was exercised with headless Chrome's fake screen source on one machine. No NAT, STUN or TURN path, and no second physical machine, has been tried. The security code relies on `RTCDtlsTransport.getRemoteCertificates()`, verified only in Chrome; Firefox and Safari are untested.
 - **2026-10-30**: The round-4 fixes (dev-process row 16) have not been reviewed. Still open from row 15: two link posts racing in one browser can bind two support sessions.
-- **2026-10-29**: Windows journal-rename durability across power loss is assumed from NTFS journaling, not proven (review finding 10).
+- **2026-11-12**: Journal regressions inject temporary-file creation failures and a Windows rename sharing violation, checking unchanged memory/disk, repeat failure and recovery. Corrupt/mismatched/legacy-quarantined history now blocks startup and remains preserved. Actual disk exhaustion and Windows power-loss durability remain unproven (G02-DURABILITY); error injection does not close those drills.
 - **2026-10-30**: The protocol-suite flake (dev-process row 9) was identified and fixed; watch CI for any recurrence.
 - **2026-11-04**: Passkeys were exercised only with Chrome's DevTools virtual authenticator and a software key in the router tests. No hardware security key, Windows Hello, Touch ID, synced passkey, Firefox or Safari has been tried.
 - **2026-11-06**: Passkey sign-in (usernameless, `allowCredentials` empty) was exercised with the software key in the router tests and in Chrome with DevTools' virtual authenticator (a discoverable key). It needs a discoverable credential; whether a given security key or platform stored one at registration (`residentKey: "preferred"`) has not been checked on real hardware.

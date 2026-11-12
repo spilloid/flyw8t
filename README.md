@@ -6,7 +6,7 @@ flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP 
 
 > An operation either succeeds **with evidence**, fails **with an explanation**, or explicitly reports that its outcome is **unknown**. Never pretend otherwise.
 
-**Version 0.1.1, pre-release. Not production-ready.** No OIDC or WebAuthn yet (TOTP two-step verification is built and required by default), binaries are unsigned, and the latest round of security fixes (dev-process row 15) has not yet been reviewed. See [docs/threat-model.md](docs/threat-model.md#open-items-before-production).
+**Version 0.1.1, pre-release. Not production-ready.** TOTP two-step verification, passkey sign-in and sudo mode are implemented. OIDC, native remote control, signed installation/update verification and deployment/fleet recovery evidence remain release work. The published 0.1.1 artifacts predate much of the current source. See the [threat model](docs/threat-model.md#open-items-before-production) and the operator-approved [roadmap and release gates](docs/roadmap.md): Windows and macOS endpoints at 1.0; Android endpoints and mobile technician administration at 1.5.
 
 ## What works today
 

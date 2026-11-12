@@ -1,0 +1,12 @@
+.git
+target
+**/target
+.env
+**/.env
+*.pem
+**/*.pem
+*.key
+**/*.key
+agent-state
+deploy/compose/tls
+docs/img

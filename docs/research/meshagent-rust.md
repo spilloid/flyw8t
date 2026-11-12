@@ -1,6 +1,6 @@
 # Research: is a Rust, MeshAgent-compatible agent worthwhile?
 
-**Status:** research note, not a plan. **Recommendation: not now.** Revisit after flyw8t has a proven fleet and MeshCentral integration (roadmap 0.4).
+**Status:** historical research note, not a plan. The former MeshCentral integration milestone is superseded by ADR-0013 and the [2026-11-12 roadmap](../roadmap.md). flyw8t builds its own shared native engine; the original external-project research and alternatives below are retained as history.
 
 ## What MeshAgent is (checked 2026-10-29 against `Ylianst/MeshAgent`)
 
