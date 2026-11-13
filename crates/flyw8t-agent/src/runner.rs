@@ -5,7 +5,9 @@
 
 use flyw8t_protocol::messages::{CapturedStream, ExecOutcome, Finished};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(windows)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -16,6 +18,12 @@ use time::OffsetDateTime;
 pub const WRAPPER: &str = r#"
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Do not let first-use command discovery scan every installed module. The interpreter and
+# these manifests come from the Windows System folder, independently of ambient module paths.
+$systemModules = [IO.Path]::Combine($PSHOME, 'Modules')
+$env:PSModulePath = $systemModules + ';' + [IO.Path]::Combine($env:ProgramFiles, 'WindowsPowerShell', 'Modules')
+Microsoft.PowerShell.Core\Import-Module -Name ([IO.Path]::Combine($systemModules, 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
+Microsoft.PowerShell.Core\Import-Module -Name ([IO.Path]::Combine($systemModules, 'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Management.psd1')) -ErrorAction Stop
 $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
 function Read-Strings([string]$text) {
     $h = @{}
@@ -327,7 +335,7 @@ mod platform {
         let sys = system.display().to_string();
         let win = windows.display().to_string();
         let pf = program_files.display().to_string();
-        let vars = [
+        let mut vars = [
             ("ComSpec", format!("{sys}\\cmd.exe")),
             (
                 "PATH",
@@ -335,7 +343,7 @@ mod platform {
             ),
             (
                 "PSModulePath",
-                format!("{pf}\\WindowsPowerShell\\Modules;{sys}\\WindowsPowerShell\\v1.0\\Modules"),
+                format!("{sys}\\WindowsPowerShell\\v1.0\\Modules;{pf}\\WindowsPowerShell\\Modules"),
             ),
             ("ProgramFiles", pf.clone()),
             ("SystemDrive", win.chars().take(2).collect()),
@@ -346,6 +354,8 @@ mod platform {
             ("LOCALAPPDATA", d),
             ("windir", win),
         ];
+        // CreateProcessW requires a case-insensitively sorted environment block. Names here are ASCII.
+        vars.sort_unstable_by_key(|(name, _)| name.to_ascii_uppercase());
         let mut out: Vec<u16> = Vec::new();
         for (k, v) in vars {
             out.extend(OsStr::new(&format!("{k}={v}")).encode_wide());
@@ -373,7 +383,7 @@ mod platform {
         })
     }
 
-    fn active(job: HANDLE) -> u32 {
+    fn active(job: HANDLE) -> anyhow::Result<u32> {
         let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: a valid job handle and a buffer of the right size.
         let ok = unsafe {
@@ -386,9 +396,9 @@ mod platform {
             )
         };
         if ok == 0 {
-            0
+            last()
         } else {
-            info.ActiveProcesses
+            Ok(info.ActiveProcesses)
         }
     }
 
@@ -397,6 +407,16 @@ mod platform {
         stdin_bytes: &[u8],
         timeout: Duration,
         cancel: &AtomicBool,
+    ) -> anyhow::Result<Output> {
+        spawn_and_wait_with_query(dir, stdin_bytes, timeout, cancel, active)
+    }
+
+    fn spawn_and_wait_with_query(
+        dir: &Path,
+        stdin_bytes: &[u8],
+        timeout: Duration,
+        cancel: &AtomicBool,
+        mut query: impl FnMut(HANDLE) -> anyhow::Result<u32>,
     ) -> anyhow::Result<Output> {
         let system = crate::winsec::system_folder()?;
         let windows = crate::winsec::windows_folder()?;
@@ -516,44 +536,270 @@ mod platform {
 
         let out_reader = reader(out_parent.take());
         let err_reader = reader(err_parent.take());
-        {
+        // Feeding stdin must not block timeout/cancellation when the interpreter stalls before reading.
+        // SAFETY: the parent end of the stdin pipe, transferred to this File and closed by the writer.
+        let mut input = unsafe { std::fs::File::from_raw_handle(in_parent.take() as _) };
+        let stdin_bytes = stdin_bytes.to_vec();
+        let in_writer = std::thread::spawn(move || {
             use std::io::Write;
-            // SAFETY: the parent end of the stdin pipe, owned by this File and closed when it drops.
-            let mut f = unsafe { std::fs::File::from_raw_handle(in_parent.take() as _) };
-            let _ = f.write_all(stdin_bytes);
-        }
+            input.write_all(&stdin_bytes)
+        });
 
         // Complete when the job is empty, not when PowerShell exits: anything it started is waited for, under
         // the same timeout, and whatever is left at the timeout is terminated.
         let deadline = std::time::Instant::now() + timeout;
-        let end = loop {
-            if cancel.load(Ordering::SeqCst) {
-                unsafe { TerminateJobObject(job.0, 1) };
-                break Some(End::Cancelled);
+        let waited = (|| -> anyhow::Result<Option<End>> {
+            let end = loop {
+                if cancel.load(Ordering::SeqCst) {
+                    if unsafe { TerminateJobObject(job.0, 1) } == 0 {
+                        return last();
+                    }
+                    break Some(End::Cancelled);
+                }
+                if std::time::Instant::now() >= deadline {
+                    if unsafe { TerminateJobObject(job.0, 1) } == 0 {
+                        return last();
+                    }
+                    break Some(End::TimedOut);
+                }
+                if query(job.0)? == 0 {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            // Wait for the tree to be gone before reading the last output and cleaning up.
+            while query(job.0)? != 0 {
+                std::thread::sleep(Duration::from_millis(50));
             }
-            if std::time::Instant::now() >= deadline {
-                unsafe { TerminateJobObject(job.0, 1) };
-                break Some(End::TimedOut);
-            }
-            if active(job.0) == 0 {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        // Wait for the tree to be gone before reading the last output and cleaning up.
-        while active(job.0) != 0 {
-            std::thread::sleep(Duration::from_millis(50));
+            Ok(end)
+        })();
+        // On any tracking/termination error, kill-on-close still terminates the whole tree before joins.
+        drop(job);
+        if unsafe { WaitForSingleObject(process.0, 5000) } != WAIT_OBJECT_0 {
+            anyhow::bail!("could not confirm that the interpreter exited");
         }
-        let _ = unsafe { WaitForSingleObject(process.0, 5000) } == WAIT_OBJECT_0;
+        let input_result = in_writer.join();
+        let stdout = out_reader.join();
+        let stderr = err_reader.join();
+        let end = waited?;
         let mut code: u32 = 0;
-        unsafe { GetExitCodeProcess(process.0, &mut code) };
-        let stdout = out_reader.join().unwrap_or_default();
-        let stderr = err_reader.join().unwrap_or_default();
+        if unsafe { GetExitCodeProcess(process.0, &mut code) } == 0 {
+            return last();
+        }
+        // Terminated jobs may close stdin early; a normal exit must have consumed the complete input.
+        if end.is_none() {
+            input_result.map_err(|_| anyhow::anyhow!("stdin writer panicked"))??;
+        }
+        let stdout = stdout.map_err(|_| anyhow::anyhow!("stdout reader panicked"))?;
+        let stderr = stderr.map_err(|_| anyhow::anyhow!("stderr reader panicked"))?;
         Ok(Output {
             end: end.unwrap_or(End::Exited(code as i32)),
             stdout,
             stderr,
         })
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn environment_is_sorted_and_contains_only_the_allowlist() {
+            let env = environment(
+                Path::new(r"C:\state\run\fixture"),
+                Path::new(r"C:\Windows\System32"),
+                Path::new(r"C:\Windows"),
+                Path::new(r"C:\Program Files"),
+            );
+            assert!(env.ends_with(&[0, 0]));
+            let entries: Vec<_> = env
+                .split(|c| *c == 0)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| String::from_utf16(entry).unwrap())
+                .collect();
+            let names: Vec<_> = entries
+                .iter()
+                .map(|entry| entry.split_once('=').unwrap().0.to_ascii_lowercase())
+                .collect();
+            assert!(names.windows(2).all(|pair| pair[0] < pair[1]), "{names:?}");
+            assert_eq!(
+                names,
+                [
+                    "appdata",
+                    "comspec",
+                    "localappdata",
+                    "path",
+                    "programfiles",
+                    "psmodulepath",
+                    "systemdrive",
+                    "systemroot",
+                    "temp",
+                    "tmp",
+                    "windir"
+                ]
+            );
+            assert!(entries.contains(&r"TEMP=C:\state\run\fixture".to_string()));
+            assert!(entries.contains(&r"LOCALAPPDATA=C:\state\run\fixture".to_string()));
+        }
+
+        #[test]
+        fn timeout_applies_while_the_interpreter_does_not_read_stdin() {
+            let (send, recv) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let dir = tempfile::tempdir().unwrap();
+                create_new(
+                    &dir.path().join("wrapper.ps1"),
+                    b"[Threading.Thread]::Sleep(60000)\n",
+                )
+                .unwrap();
+                let started = std::time::Instant::now();
+                let result = spawn_and_wait(
+                    dir.path(),
+                    &vec![b'x'; 64 * 1024],
+                    Duration::from_secs(1),
+                    &AtomicBool::new(false),
+                );
+                send.send((result, started.elapsed())).ok();
+            });
+            // Bound the regression itself: the old synchronous write never reached its deadline.
+            let (result, elapsed) = recv
+                .recv_timeout(Duration::from_secs(8))
+                .expect("stdin must not block timeout handling");
+            assert!(matches!(result.unwrap().end, End::TimedOut));
+            assert!(elapsed < Duration::from_secs(8));
+        }
+
+        #[test]
+        fn cancellation_applies_while_the_interpreter_does_not_read_stdin() {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&cancel);
+            let (send, recv) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let dir = tempfile::tempdir().unwrap();
+                create_new(
+                    &dir.path().join("wrapper.ps1"),
+                    b"[Threading.Thread]::Sleep(60000)\n",
+                )
+                .unwrap();
+                let result = spawn_and_wait(
+                    dir.path(),
+                    &vec![b'x'; 64 * 1024],
+                    Duration::from_secs(60),
+                    &flag,
+                );
+                send.send(result).ok();
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            cancel.store(true, Ordering::SeqCst);
+            let output = recv
+                .recv_timeout(Duration::from_secs(8))
+                .expect("stdin must not block cancellation")
+                .unwrap();
+            assert!(matches!(output.end, End::Cancelled));
+        }
+
+        #[test]
+        fn a_job_query_error_is_not_an_empty_process_tree() {
+            // A real handle of the wrong type forces QueryInformationJobObject to fail.
+            // A null handle instead queries the calling process's current job, which may succeed.
+            let (child, _parent) = pipe(true).unwrap();
+            assert!(active(child.0).is_err());
+        }
+
+        #[test]
+        fn a_query_failure_terminates_the_live_process_tree() {
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+            let (send, recv) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let dir = tempfile::tempdir().unwrap();
+                let marker = dir.path().join("descendant.pid");
+                create_new(
+                    &dir.path().join("wrapper.ps1"),
+                    br#"
+$info = [Diagnostics.ProcessStartInfo]::new()
+$info.FileName = [IO.Path]::Combine($env:SystemRoot, 'System32', 'ping.exe')
+$info.Arguments = '-n 60 127.0.0.1'
+$info.UseShellExecute = $false
+$info.CreateNoWindow = $true
+$child = [Diagnostics.Process]::Start($info)
+[IO.File]::WriteAllText($PSScriptRoot + '\descendant.pid', [string]$child.Id)
+[Threading.Thread]::Sleep(60000)
+"#,
+                )
+                .unwrap();
+                let mut descendant = None;
+                let result = spawn_and_wait_with_query(
+                    dir.path(),
+                    b"{}",
+                    Duration::from_secs(10),
+                    &AtomicBool::new(false),
+                    |job| {
+                        if let Some(pid) = std::fs::read_to_string(&marker)
+                            .ok()
+                            .and_then(|text| text.parse::<u32>().ok())
+                        {
+                            // Retain a synchronization handle before injecting the error, avoiding PID-reuse ambiguity.
+                            let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+                            assert!(!handle.is_null());
+                            descendant = Some(Owned(handle));
+                            anyhow::bail!("injected job query failure");
+                        }
+                        active(job)
+                    },
+                );
+                let descendant =
+                    descendant.expect("the test must launch a descendant before injection");
+                let gone = unsafe { WaitForSingleObject(descendant.0, 1000) } == WAIT_OBJECT_0;
+                send.send((result, gone)).ok();
+            });
+            let (result, gone) = recv
+                .recv_timeout(Duration::from_secs(15))
+                .expect("tracking failure must not hang cleanup");
+            match result {
+                Err(error) => assert!(
+                    error.to_string().contains("injected job query failure"),
+                    "{error:#}"
+                ),
+                Ok(_) => panic!("a tracking failure must not report completion"),
+            }
+            assert!(
+                gone,
+                "the descendant must exit before the failed run returns"
+            );
+        }
+
+        #[test]
+        fn interpreter_starts_and_reads_stdin_to_eof() {
+            let dir = tempfile::tempdir().unwrap();
+            // Stage markers contain no script values or secrets and identify startup vs module loading vs EOF.
+            create_new(
+                &dir.path().join("wrapper.ps1"),
+                br#"
+[Console]::WriteLine('engine-ready')
+$bytes = [IO.MemoryStream]::new()
+[Console]::OpenStandardInput().CopyTo($bytes)
+[Console]::WriteLine('stdin-eof')
+exit 0
+"#,
+            )
+            .unwrap();
+            let output = spawn_and_wait(
+                dir.path(),
+                b"{}",
+                Duration::from_secs(60),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout.0);
+            assert!(
+                matches!(output.end, End::Exited(0)),
+                "stdout={stdout:?}, stderr={:?}",
+                String::from_utf8_lossy(&output.stderr.0)
+            );
+            assert!(
+                stdout.contains("engine-ready") && stdout.contains("stdin-eof"),
+                "{stdout:?}"
+            );
+        }
     }
 }
 
@@ -595,6 +841,64 @@ mod tests {
             },
             OffsetDateTime::now_utc(),
         )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_preserves_only_absolute_protected_module_paths() {
+        let f = run_ps("[Console]::WriteLine($env:PSModulePath)\n", &[], &[], 60);
+        assert_eq!(f.outcome, ExecOutcome::Exited { code: 0 }, "{f:?}");
+        let output = f.stdout.unwrap().data;
+        let paths: Vec<_> = output.trim().split(';').collect();
+        assert_eq!(paths.len(), 2, "{output:?}");
+        assert!(
+            paths.iter().all(|path| Path::new(path).is_absolute()),
+            "{output:?}"
+        );
+        let system = crate::winsec::system_folder().unwrap();
+        let program_files = crate::winsec::program_files().unwrap();
+        assert!(
+            paths.iter().any(|path| path.eq_ignore_ascii_case(
+                &system
+                    .join(r"WindowsPowerShell\v1.0\Modules")
+                    .to_string_lossy()
+            )),
+            "{output:?}"
+        );
+        assert!(
+            paths.iter().any(|path| path.eq_ignore_ascii_case(
+                &program_files
+                    .join(r"WindowsPowerShell\Modules")
+                    .to_string_lossy()
+            )),
+            "{output:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn all_64_kib_of_secret_values_reach_the_interpreter() {
+        let secrets: Vec<_> = (0..16)
+            .map(|i| (format!("Key{i}"), "x".repeat(4096)))
+            .collect();
+        let declarations = secrets
+            .iter()
+            .map(|(name, _)| format!("[string]${name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sum = secrets
+            .iter()
+            .map(|(name, _)| format!("${name}.Length"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let source = format!("param({declarations})\n[Console]::WriteLine(({sum}).ToString())\n");
+        let values: Vec<_> = secrets
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let f = run_ps(&source, &[], &values, 60);
+        assert_eq!(f.outcome, ExecOutcome::Exited { code: 0 }, "{f:?}");
+        assert_eq!(f.stdout.unwrap().data.trim(), "65536");
     }
 
     #[cfg(windows)]

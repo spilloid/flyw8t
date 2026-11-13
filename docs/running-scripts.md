@@ -81,6 +81,14 @@ shutdown.exe /r /t $Delay /c "flyw8t: signed C3 reboot"
 
 Declare it with parameters `Delay = "60"` and risk class C3.
 
+## Validation
+
+The trust-chain/approval integration suite requires PostgreSQL on either platform; the real PowerShell integration suite requires PostgreSQL and Windows. With a disposable database configured, run `cargo test -p flyw8t-server --test trust -- --ignored` and, on Windows, `cargo test -p flyw8t-server --test script_runs -- --ignored`. Default Windows CI has no database and must skip both database suites. Linux's `--include-ignored` must run the cross-platform trust suite while excluding the Windows-only script runner suite. Successful compilation or skipping does not establish execution coverage or security review.
+
+Windows CI also records a cold-start diagnostic (`scripts/diagnose-powershell-startup.ps1`): fresh synthetic subprocesses compare the original module order, System-only, System-first, and explicit Windows module imports. It runs after the real tests, including on failure, so the probe cannot warm up the interpreter to make those tests pass. Stage markers distinguish engine startup, first cmdlet/module loading and stdin EOF. Each subprocess gets a fresh application-data folder, but shared filesystem/security caches can warm between probes; ordered timings are observations, not controlled causal proof or release-gate results. The native tests still use real Job Objects and enforce the original execution deadlines. The wrapper resets its module search to the two absolute protected locations and imports its own Utility/Management dependencies by absolute Windows manifest path; approved scripts may explicitly import their reviewed dependencies. Stalled stdin must remain cancellable and bounded by the execution timeout.
+
+The full script execution implementation still requires independent security review. Known follow-ups include validating the owner/ACL of the run directory as required by ADR-0015, and preserving final evidence across a failed journal write plus disconnect. Passing startup tests does not close those gaps.
+
 ## Not built yet
 
 - Passkey signing in the browser, for approvals and run signatures. Use `flyw8t-sign`.

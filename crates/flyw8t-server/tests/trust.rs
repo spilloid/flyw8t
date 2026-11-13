@@ -87,6 +87,7 @@ fn agent_cfg(server: &TestServer, dir: &std::path::Path) -> AgentConfig {
 }
 
 #[tokio::test]
+#[ignore = "needs PostgreSQL (FLYW8T_TEST_DATABASE_URL)"]
 async fn the_server_keeps_only_versions_that_verify_and_agents_pin_and_follow_them() {
     let server = start_fresh().await;
     let admin = server.admin_sudo().await;
@@ -238,6 +239,7 @@ async fn the_server_keeps_only_versions_that_verify_and_agents_pin_and_follow_th
 }
 
 #[tokio::test]
+#[ignore = "needs PostgreSQL (FLYW8T_TEST_DATABASE_URL)"]
 async fn approvals_are_verified_before_they_are_stored() {
     let server = start_fresh().await;
     let admin = server.admin_sudo().await;
