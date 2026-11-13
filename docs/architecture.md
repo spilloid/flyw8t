@@ -44,6 +44,8 @@ No Redis, no queue broker, no Kubernetes requirement, no SaaS dependency. The on
 | `flyw8t-web` | Server-rendered Leptos views and their view models. Takes plain data, returns HTML; no database. | domain, protocol, leptos (ssr) |
 | `flyw8t-server` | Axum app: configuration, authentication, the agent gateway, job orchestration, read queries, web and API handlers, metrics. | all of the above, sqlx, axum |
 | `flyw8t-agent` | The endpoint agent: enrollment, identity, journal, executor, collectors, connection loop, Windows service. | protocol |
+| `flyw8t-helper` | Native attended-support pairing and consent. Capture/input are still release work. | protocol, TLS/WebSocket libraries |
+| `flyw8t-sign` | Offline script-trust statements, approvals and run authorization; the signing key stays outside the server. | protocol, cryptography, CLI |
 
 The founding brief suggested separate `storage` and `integrations` crates. They were folded into server modules ([ADR-0001](decisions/ADR-0001-workspace-shape.md)): storage is a thin layer of SQL next to the code that needs it, and the one integration seam (remote access) is a trait. Splitting them now would add indirection with no second user.
 
@@ -82,7 +84,7 @@ The center of the product. Summary here; the contract is [job-lifecycle.md](job-
 - Windows service: automatic start, LocalSystem, restart-on-failure actions (also for a non-crash failure). `enroll` creates the state folders (which hold the private key) owned by Administrators and open only to SYSTEM and Administrators, in the same call that creates them (`winsec.rs`); `service install` copies the agent to Program Files and registers that copy. Existing folders are checked and refused, never repaired. The service logs to `logs\agent.log` in the state folder. Run for real once on Windows 11 ([deployment.md](deployment.md), dev-process row 36); a reboot is not yet checked.
 - Bounded everywhere: 2 concurrent jobs, a 256-entry report buffer, 256 KiB per output stream, 1 MiB per message, 30 s connect and handshake deadlines, backoff from 1 s capped at 60 s with jitter.
 - Actions are compiled Rust. Child processes are fixed absolute paths (`%SystemRoot%\System32\…`) with argument vectors built from validated parameters, `CREATE_NO_WINDOW`, stdin closed, kill on timeout or cancel or drop. No shell anywhere.
-- Linux and macOS: the code compiles conditionally (`cfg(windows)` around the service), and collectors and actions have Linux paths, but nothing is packaged or tested there yet.
+- Endpoint support remains Windows-first today. Linux collector/action paths are exercised in CI but do not constitute a supported Linux endpoint release. The accepted [1.0 contract](roadmap.md) requires macOS alongside Windows, with Mac permission/session experiments starting at 0.2; Linux endpoint delivery is deferred. Mac packaging and native capture/input still need implementation and physical-machine evidence.
 
 ## Web console (implemented)
 
@@ -96,7 +98,7 @@ Validated by `tests/ui_capture.rs` (STD-008): 16 pages × 3 widths × 2 color sc
 
 ## Remote access (seam only)
 
-`remote_access::RemoteAccessProvider` with a `NotConfigured` default that says so on the device page. MeshCentral is the intended first provider and is deliberately **not** a source of device identity or tenancy ([ADR-0006](decisions/ADR-0006-remote-access-provider.md); research in [research/meshagent-rust.md](research/meshagent-rust.md)). The attended-support proposal (browser screen share with consent, temporary native helper) is in [attended-support.md](attended-support.md).
+`remote_access::RemoteAccessProvider` is an optional external-provider seam with a `NotConfigured` default that plainly reports that control is unavailable in this build. The MeshCentral-first plan is superseded: [ADR-0013](decisions/ADR-0013-unattended-access.md) requires our shared native engine for attended and unattended control. That engine is release work, not an implemented property of this trait. Providers never supply device identity or tenancy. Browser screen view and native helper pairing are described in [attended-support.md](attended-support.md).
 
 ## Observability (implemented, minimal)
 

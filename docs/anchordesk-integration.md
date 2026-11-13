@@ -58,4 +58,4 @@ Base: `https://<flyw8t>/api/v1`. Auth: `Authorization: Bearer fw8_…` (create i
 2. AnchorDesk polls; flyw8t has no webhook yet. Poll `GET /jobs/{id}` with backoff (2 s, then up to 30 s) until a final state or `outcome_unknown`.
 3. Ticket linkage: flyw8t does not store ticket references yet. The planned field is `jobs.external_ref` (free text, e.g. `anchordesk:ticket:1234`), set via an optional `external_ref` in the create body and shown on the job page.
 
-Nothing in this document has been run against a live AnchorDesk instance; the provider and runner do not exist yet (roadmap 0.4).
+Nothing in this document has been run against a live AnchorDesk instance; the provider and runner do not exist yet (integration workflows are now in roadmap 0.7).

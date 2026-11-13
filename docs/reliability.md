@@ -20,7 +20,7 @@
 
 Formal model: [`spec/JobDelivery.tla`](spec/JobDelivery.tla) states P1 to P4 in TLA+. **It has not been model-checked yet** (see [spec/README.md](spec/README.md)); the executed evidence above is what the claims rest on today.
 
-Not covered: concurrency inside the server process (row locks are relied on, not model-checked; `loom` is not applicable to code whose concurrency lives in PostgreSQL transactions). Disk-full on the agent is handled by design (a failed journal write declines or refuses to start the job) but is not fault-injected in a test yet.
+Not covered: concurrency inside the server process (row locks are relied on, not model-checked; `loom` is not applicable to code whose concurrency lives in PostgreSQL transactions). Journal regressions now inject real temporary-file creation failures for acceptance, start, result and acknowledgement, plus a Windows destination-sharing violation after the replacement file has been written and flushed. Failed writes never publish candidate state in memory; retries must write again. Corrupt, mismatched and legacy-quarantined entries block every startup and preserve their evidence. These checks do not simulate actual disk exhaustion or physical power loss, which remain open drills.
 
 ## 2. Availability
 
@@ -87,7 +87,9 @@ Until that has run for a meaningful period, flyw8t's availability is **unknown**
 | Database restore to an older state | e2e (job forced back to `queued` / `dispatched`) |
 | Hostile or malformed frames, oversized messages | protocol tests |
 | Process timeout and kill | executor tests (real `PING.EXE` to TEST-NET-1) |
-| Agent disk full / journal write failure | **not yet** (code path exists; no test) |
+| Journal write failure | Unit tests obstruct the temporary-file path during acceptance/start/result/ack; Windows test denies destination replacement after writing/flushing the temporary file. Assert unchanged state, repeated failure and successful recovery. |
+| Corrupt or mismatched journal / legacy quarantine | Unit tests require startup refusal with the evidence preserved, including repeated attempts. See [deployment.md](deployment.md#damaged-agent-journal). |
+| Actual agent disk exhaustion | **not yet.** Filesystem-error injection above is not a full-disk drill. |
 | Power loss between a journal rename and the disk | **not yet.** Unix fsyncs the directory after rename. Windows relies on NTFS journaling; `MoveFileEx(MOVEFILE_WRITE_THROUGH)` (an isolated `unsafe` call) is the planned fix. Raised by the cross-family review as plausible, not demonstrated. |
 | Two agent processes on one state directory | unit test (OS lock) |
 | Message floods and duplicate-report floods | protocol test |

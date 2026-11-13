@@ -16,7 +16,7 @@
 //! previous version intact.
 
 use crate::config::write_atomic;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use flyw8t_protocol::messages::{ExecOutcome, Finished, JobPhase, JobReport};
 use flyw8t_protocol::Action;
 use serde::{Deserialize, Serialize};
@@ -92,27 +92,41 @@ pub struct Journal {
 
 impl Journal {
     /// Open the journal, resolving anything a previous process left unfinished.
+    /// Unreadable or mismatched entries (including older agents' quarantines) prevent
+    /// startup: forgetting a job could make a repeated offer execute it a second time.
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut entries = HashMap::new();
         for item in std::fs::read_dir(dir)? {
             let path = item?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            let extension = path.extension().and_then(|e| e.to_str());
+            if extension.is_some_and(|e| e.eq_ignore_ascii_case("corrupt")) {
+                bail!(
+                    "journal contains quarantined execution history at {}; refusing to start; preserve the state directory and follow docs/deployment.md#damaged-agent-journal",
+                    path.display()
+                );
+            }
+            if !extension.is_some_and(|e| e.eq_ignore_ascii_case("json")) {
                 continue;
             }
-            match std::fs::read(&path)
+            let entry: Entry = std::fs::read(&path)
                 .map_err(anyhow::Error::from)
-                .and_then(|b| serde_json::from_slice::<Entry>(&b).map_err(Into::into))
-            {
-                Ok(entry) => {
-                    entries.insert(entry.job_id, entry);
-                }
-                Err(e) => {
-                    // Atomic replacement makes this unexpected. Keep the file for inspection.
-                    tracing::error!(path = %path.display(), error = %e, "unreadable journal entry; quarantining");
-                    let _ = std::fs::rename(&path, path.with_extension("corrupt"));
-                }
+                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+                .with_context(|| format!(
+                    "unreadable journal entry at {}; refusing to start; preserve the state directory and follow docs/deployment.md#damaged-agent-journal",
+                    path.display()
+                ))?;
+            let file_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            if file_id != Some(entry.job_id) || entries.contains_key(&entry.job_id) {
+                bail!(
+                    "journal entry at {} has a mismatched or duplicate job id; refusing to start; preserve the state directory and follow docs/deployment.md#damaged-agent-journal",
+                    path.display()
+                );
             }
+            entries.insert(entry.job_id, entry);
         }
         let journal = Self {
             dir: dir.to_path_buf(),
@@ -268,10 +282,11 @@ impl Journal {
         let entry = entries
             .get_mut(&job_id)
             .with_context(|| format!("job {job_id} is not in the journal"))?;
-        let before = entry.clone();
-        f(entry);
-        if *entry != before {
-            self.persist(entry)?;
+        let mut candidate = entry.clone();
+        f(&mut candidate);
+        if candidate != *entry {
+            self.persist(&candidate)?;
+            *entry = candidate;
         }
         Ok(())
     }
@@ -466,19 +481,236 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_entries_are_quarantined_not_fatal() {
+    fn corrupt_completed_entries_stop_every_reopen_without_discarding_evidence() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(format!("{}.json", Uuid::new_v4())),
-            b"{not json",
-        )
-        .unwrap();
+        let id = Uuid::new_v4();
+        {
+            let j = Journal::open(dir.path()).unwrap();
+            j.accept(id, &Action::NetIpconfig, 30).unwrap();
+            j.mark_started(id, OffsetDateTime::now_utc()).unwrap();
+            j.finish(id, done(ExecOutcome::Exited { code: 0 })).unwrap();
+        }
+        let path = dir.path().join(format!("{id}.json"));
+        std::fs::write(&path, b"{not json").unwrap();
+        for _ in 0..2 {
+            assert!(
+                Journal::open(dir.path()).is_err(),
+                "lost execution history must prevent starting the agent"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+        }
+    }
+
+    #[test]
+    fn legacy_quarantined_entries_also_stop_every_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{}.corrupt", Uuid::new_v4()));
+        std::fs::write(&path, b"old quarantined evidence").unwrap();
+        for _ in 0..2 {
+            assert!(
+                Journal::open(dir.path()).is_err(),
+                "an older agent's quarantine must not hide execution history"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"old quarantined evidence");
+        }
+    }
+
+    #[test]
+    fn changing_extension_case_cannot_hide_damaged_history() {
+        for extension in ["JSON", "CORRUPT"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("{}.{}", Uuid::new_v4(), extension));
+            std::fs::write(&path, b"damaged history").unwrap();
+            for _ in 0..2 {
+                assert!(Journal::open(dir.path()).is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), b"damaged history");
+            }
+        }
+    }
+
+    #[test]
+    fn an_entry_must_match_the_job_id_in_its_file_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
         let j = Journal::open(dir.path()).unwrap();
-        assert!(j.unreported().is_empty());
-        assert!(std::fs::read_dir(dir.path()).unwrap().any(|e| e
-            .unwrap()
-            .path()
-            .extension()
-            .is_some_and(|x| x == "corrupt")));
+        j.accept(id, &Action::NetIpconfig, 30).unwrap();
+        let original = j.path(id);
+        let wrong = j.path(Uuid::new_v4());
+        drop(j);
+        std::fs::rename(&original, &wrong).unwrap();
+        assert!(Journal::open(dir.path()).is_err());
+        assert!(wrong.exists(), "mismatched evidence is preserved");
+    }
+
+    #[test]
+    fn two_files_cannot_supply_different_history_for_the_same_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let j = Journal::open(dir.path()).unwrap();
+        j.accept(id, &Action::NetIpconfig, 30).unwrap();
+        let original = j.path(id);
+        let duplicate = dir.path().join(format!("{}.json", id.simple()));
+        let mut second = j.get(id).unwrap();
+        second.state = EntryState::Started {
+            at: second.received_at,
+        };
+        std::fs::write(&duplicate, serde_json::to_vec(&second).unwrap()).unwrap();
+        drop(j);
+        for _ in 0..2 {
+            assert!(
+                Journal::open(dir.path()).is_err(),
+                "directory order must not decide which history is trusted"
+            );
+            assert!(original.exists() && duplicate.exists());
+        }
+    }
+
+    // A directory at the atomic writer's temporary-file path forces a real filesystem
+    // failure on every platform, without depending on privileges or filling the host disk.
+    fn block_writes(j: &Journal, id: Uuid) -> PathBuf {
+        let blocked = j.path(id).with_extension("tmp");
+        std::fs::create_dir(&blocked).unwrap();
+        blocked
+    }
+
+    fn assert_unchanged(j: &Journal, before: &Entry) {
+        assert_eq!(
+            j.get(before.job_id).unwrap(),
+            *before,
+            "failed writes must not publish a new in-memory state"
+        );
+        let stored: Entry =
+            serde_json::from_slice(&std::fs::read(j.path(before.job_id)).unwrap()).unwrap();
+        assert_eq!(stored, *before, "the previous on-disk state is intact");
+    }
+
+    #[test]
+    fn failed_acceptance_never_acknowledges_a_job_and_can_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(dir.path()).unwrap();
+        let id = Uuid::new_v4();
+        let blocked = block_writes(&j, id);
+        for _ in 0..2 {
+            assert!(j.accept(id, &Action::NetIpconfig, 30).is_err());
+            assert!(j.get(id).is_none());
+            assert!(j.unreported().is_empty());
+        }
+        std::fs::remove_dir(blocked).unwrap();
+        assert_eq!(j.accept(id, &Action::NetIpconfig, 30).unwrap(), Accept::New);
+    }
+
+    #[test]
+    fn failed_start_never_publishes_started_or_succeeds_without_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(dir.path()).unwrap();
+        let id = Uuid::new_v4();
+        j.accept(id, &Action::NetIpconfig, 30).unwrap();
+        let before = j.get(id).unwrap();
+        let at = OffsetDateTime::now_utc();
+        let blocked = block_writes(&j, id);
+        for _ in 0..2 {
+            assert!(j.mark_started(id, at).is_err());
+            assert_unchanged(&j, &before);
+        }
+        std::fs::remove_dir(blocked).unwrap();
+        j.mark_started(id, at).unwrap();
+        drop(j);
+        let reopened = Journal::open(dir.path()).unwrap();
+        let EntryState::Finished { report } = reopened.get(id).unwrap().state else {
+            panic!()
+        };
+        assert!(matches!(report.outcome, ExecOutcome::Interrupted { .. }));
+        assert!(matches!(
+            reopened.accept(id, &Action::NetIpconfig, 30).unwrap(),
+            Accept::Known(_)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_rename_after_writing_keeps_the_previous_state() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(dir.path()).unwrap();
+        let id = Uuid::new_v4();
+        j.accept(id, &Action::NetIpconfig, 30).unwrap();
+        let before = j.get(id).unwrap();
+        // Permit reads, but deny replacement of the destination. The temporary file is
+        // still written and flushed, so this exercises a later failure than block_writes.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ, without FILE_SHARE_DELETE
+            .open(j.path(id))
+            .unwrap();
+        let at = OffsetDateTime::now_utc();
+        for _ in 0..2 {
+            assert!(j.mark_started(id, at).is_err());
+            assert_unchanged(&j, &before);
+            assert!(j.path(id).with_extension("tmp").is_file());
+        }
+        drop(held);
+        j.mark_started(id, at).unwrap();
+        drop(j);
+        let reopened = Journal::open(dir.path()).unwrap();
+        let EntryState::Finished { report } = reopened.get(id).unwrap().state else {
+            panic!()
+        };
+        assert!(matches!(report.outcome, ExecOutcome::Interrupted { .. }));
+    }
+
+    #[test]
+    fn failed_finish_keeps_the_prior_state_until_the_result_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(dir.path()).unwrap();
+        let id = Uuid::new_v4();
+        j.accept(id, &Action::NetIpconfig, 30).unwrap();
+        j.mark_started(id, OffsetDateTime::now_utc()).unwrap();
+        let before = j.get(id).unwrap();
+        let result = done(ExecOutcome::Exited { code: 0 });
+        let blocked = block_writes(&j, id);
+        for _ in 0..2 {
+            assert!(j.finish(id, result.clone()).is_err());
+            assert_unchanged(&j, &before);
+        }
+        std::fs::remove_dir(blocked).unwrap();
+        j.finish(id, result).unwrap();
+        drop(j);
+        let reopened = Journal::open(dir.path()).unwrap();
+        assert!(matches!(
+            reopened.unreported()[0].phase,
+            JobPhase::Finished(_)
+        ));
+    }
+
+    #[test]
+    fn failed_ack_keeps_the_result_and_its_output_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(dir.path()).unwrap();
+        let id = Uuid::new_v4();
+        j.accept(id, &Action::NetIpconfig, 30).unwrap();
+        let mut result = done(ExecOutcome::Exited { code: 0 });
+        result.stdout = Some(flyw8t_protocol::messages::CapturedStream {
+            data: "evidence".into(),
+            total_bytes: 8,
+            truncated: false,
+        });
+        j.finish(id, result).unwrap();
+        let before = j.get(id).unwrap();
+        let blocked = block_writes(&j, id);
+        for _ in 0..2 {
+            assert!(j.mark_acked(id).is_err());
+            assert_unchanged(&j, &before);
+            assert_eq!(j.unreported(), vec![before.report()]);
+        }
+        std::fs::remove_dir(blocked).unwrap();
+        j.mark_acked(id).unwrap();
+        drop(j);
+        let reopened = Journal::open(dir.path()).unwrap();
+        assert!(reopened.unreported().is_empty());
+        let EntryState::Finished { report } = reopened.get(id).unwrap().state else {
+            panic!()
+        };
+        assert!(report.stdout.is_none());
     }
 }

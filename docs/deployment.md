@@ -1,6 +1,6 @@
 # Deployment
 
-> **Status:** the Compose stack and Dockerfile are written but **have not been run yet** (no Docker on the development machine; AT-01). CI builds the image. The server itself, native TLS, and every database path are tested against PostgreSQL 18 directly.
+> **Status (2026-11-12):** packaged Compose startup, password/TOTP sign-in, record creation and dump/restore into an empty database passed at `a48f7e6` in [CI run 43171178365](https://github.com/spilloid/flyw8t/actions/runs/43171178365). Docker is unavailable on this Windows host. The automated same-host database round-trip leaves off-host recovery, key recovery and physical Windows-agent deployment gates open. Native server/database suites run separately against PostgreSQL.
 
 ## Server with Docker Compose
 
@@ -75,9 +75,22 @@ To upgrade: `flyw8t-agent service uninstall`, then `service install` from the ne
 
 > Run for real on Windows 11 (2026-11-07, dev-process row 36): install, refusals, uninstall, restart after a kill, owners and permissions, the log, and a DLL-planting test. A reboot was not checked.
 
+## Damaged agent journal
+
+The agent refuses to start if a journal entry cannot be read/decoded, its job id does not match its file name, two files name the same job, or a legacy `.corrupt` quarantine exists. It preserves the files. Earlier builds quarantined unreadable entries and then forgot their jobs, allowing a repeated offer to be accepted as new. Restarting must not bypass this protection.
+
+1. Stop the service and preserve the whole state directory with its existing restricted permissions. The startup error identifies the offending file. Investigate the disk/filesystem before attempting recovery.
+2. Do not delete the entry, clear the journal or restore an older journal backup to get the agent online: that can erase proof that work ran. Recover the same identity only if its complete execution history can be established.
+3. If that history cannot be recovered, retain the evidence, retire/revoke the old device in the console and enroll a **new device identity** into a fresh protected state directory. The new identity does not inherit the old device's jobs. Follow the normal enrollment and service installation procedure; do not weaken directory permissions to reuse damaged state.
+4. Preserve unknown outcomes on the old device. A technician reviews effects before explicitly issuing any replacement work. Recovery never automatically retries an old operation.
+
+Ordinary temporary-file and rename failures leave the previous journal state in memory and on disk; a retry must perform the write again. These tested I/O failures do not establish behavior under physical power loss or actual disk exhaustion (see [reliability.md](reliability.md)).
+
 ## Backup and restore
 
-Everything that matters is in PostgreSQL. Agents keep their own journal and re-send unacknowledged results after a restore, so a restore loses nothing they still hold. Jobs created after the backup are gone, and the job-lifecycle rules make any device report about a job the restored database does not know a no-op that is audited, not an error.
+Application records are in PostgreSQL; a recoverable deployment also needs its configuration, `FLYW8T_FIELD_KEY` (when secret fields are used), TLS material and the separate signer/root-key recovery plan. Keep these protected and backed up off-host. Losing the field key makes the encrypted values unreadable even with a good database dump. Signing keys stay outside the server and have their own protected backup, never bundled into a server image.
+
+Agents retain their own journals and re-send unacknowledged results after a server-database restore. Jobs created after the database backup are gone; reports about an unknown job are audited no-ops. This reconciliation does not recover missing jobs, prove a zero RPO, or permit rolling back an agent's journal.
 
 **Backup** (daily at minimum; copy off-host):
 
@@ -95,7 +108,9 @@ docker compose exec -T db pg_restore -U flyw8t -d flyw8t --no-owner < flyw8t-YYY
 docker compose up -d server
 ```
 
-Restore has **not been rehearsed** yet; doing so is a 0.2 exit criterion. Restore into a scratch stack and sign in before trusting a backup.
+Off-host restore into an empty stack has **not been rehearsed** yet; doing so is a 0.2 exit criterion. Restore into a scratch stack and sign in before trusting a backup.
+
+The repeatable CI check is `node scripts/compose-smoke.mjs` from the repository root (Node 22+, Docker Compose). It creates a uniquely named project with throwaway credentials and a loopback port, sets up TOTP through the console, creates an organization, dumps the database, stops that server, restores into a newly created empty database, and verifies the restored account/factor and organization without bootstrap credentials. It removes only its own project/volumes on exit. Its fixed Compose subnet must be free. This is integration evidence, not a substitute for off-host backups, encryption-key recovery, an actual host-loss drill or Windows service testing.
 
 The append-only triggers on `job_events` and `audit_events` are restored with the schema, and `pg_restore` inserts rows rather than updating, so the triggers do not block a restore.
 

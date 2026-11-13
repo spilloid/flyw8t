@@ -4,6 +4,8 @@
 
 ## Context
 
+**Release-scope amendment, accepted by the operator 2026-11-12:** [roadmap and gates](../roadmap.md) require Windows and macOS endpoints with native attended/unattended control for 1.0, including Windows UAC and sign-in screens. Linux endpoints move outside 1.0; Linux hosts the server/console. Android endpoints and mobile technician administration gate 1.5; iOS is conditional. This supersedes the original platform delivery order below, while retaining the shared-engine, endpoint-policy and consent decisions. Mac feasibility work starts in 0.2 rather than waiting for the Windows engine to be finished.
+
 The operator: flyw8t should be a *useful, reliable* agent that a technician can see online and connect to, and take control of. That means Windows, macOS and Linux (X11 and Wayland) desktops first, with iOS and Android much later. On direction: "the direction of this tool changed. We are building from scratch. We're doing Rust. We're making it the best, so it becomes the new standard."
 
 ## Decision

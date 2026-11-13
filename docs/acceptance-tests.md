@@ -8,11 +8,11 @@ export FLYW8T_TEST_DATABASE_URL=postgres://flyw8t:devpass@127.0.0.1:55432/postgr
 cargo test --workspace -- --include-ignored
 ```
 
-Status as of 2026-10-29, on Windows 11 x64 with PostgreSQL 18.6:
+Founding results were recorded on 2026-10-29 on Windows 11 x64 with PostgreSQL 18.6; later rows include dated amendments. The current release contract and gates are in [roadmap.md](roadmap.md).
 
 | ID | Milestone step | How | Status |
 |---|---|---|---|
-| AT-01 | Start PostgreSQL and the server with Docker Compose | `deploy/compose/` | **Not verified.** No Docker on the development machine; the Compose file and Dockerfile are written but have never run. CI builds the image. |
+| AT-01 | Start PostgreSQL and the server with Docker Compose | `deploy/compose/`, `scripts/compose-smoke.mjs` | **Automated, verified 2026-11-12:** startup, password/TOTP, record creation and empty-database restore passed at `a48f7e6` ([run 43171178365](https://github.com/spilloid/flyw8t/actions/runs/43171178365)). Physical Windows enrollment and off-host/key recovery remain separate release gates. |
 | AT-02 | Serve the Rust web UI | `vertical_slice`, `ui_capture` | Automated |
 | AT-03 | Authenticate as an administrator | `vertical_slice` (bootstrap admin, sign-in) | Automated |
 | AT-04 | Create an organization | `vertical_slice` | Automated |

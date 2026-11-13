@@ -59,7 +59,7 @@ jobs:
           if-no-files-found: ignore
 
   image:
-    name: Server container image builds
+    name: Server container build, sign-in and restore
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -67,6 +67,18 @@ jobs:
       - name: Compose file is valid
         working-directory: deploy/compose
         run: FLYW8T_DB_PASSWORD=x docker compose config --quiet
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Compose startup, MFA sign-in and restore into an empty database
+        run: node scripts/compose-smoke.mjs
+
+  mac-probe:
+    name: Mac feasibility probe compiles (no runtime gate)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash scripts/mac-feasibility.sh --build-only
 
   standards:
     name: Company standards (STD-002, STD-003, STD-007)

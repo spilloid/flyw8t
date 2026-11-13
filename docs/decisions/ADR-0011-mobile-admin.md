@@ -4,6 +4,8 @@
 
 ## Context
 
+**Release-scope amendment, accepted 2026-11-12:** [the roadmap](../roadmap.md#11-to-15-mobile) makes both Android endpoints and mobile technician administration mandatory at 1.5. iOS remains conditional on its own demonstrated capability contract. This adds mobile endpoint support to the administration goal; it does not claim that the installed web manifest already supplies either complete workflow. Existing distribution/account cost decisions are still made when that implementation step arrives.
+
 The operator wants "a great mobile admin client". Technicians are paged away from their desks. From a phone they need to see what is wrong, act within their scope (run a diagnostic, cancel a job, start or end a support session), and trust what they see, with the same honesty as the desktop console. Live is labelled live, cached data shows its age, and an outcome that is unknown is shown as unknown.
 
 Today:
