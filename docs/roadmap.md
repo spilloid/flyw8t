@@ -1,6 +1,6 @@
 # Roadmap and release gates
 
-**Accepted by the operator: 2026-11-12.** These milestones are evidence gates, not dates or claims that their code exists. The build stays **0.1.1 pre-release** until a release is cut. Accepting this plan does not pass any gate.
+**Accepted by the operator: 2026-11-12.** These milestones are evidence gates, not dates or claims that their code exists. The build stays a **0.1.x pre-release** (0.1.2 at this writing) until a release is cut. Accepting this plan does not pass any gate.
 
 ## Product contract
 

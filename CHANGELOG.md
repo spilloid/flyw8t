@@ -2,7 +2,23 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
-## Unreleased
+## 0.1.2 — 2026-11-14 (pre-release)
+
+A console refresh, the first published server image, and everything merged since 0.1.1. **Not production-ready:** the 0.2.0 gates in `docs/roadmap.md` are open (off-host restore, install-time signature checks, the unified threat model, independent review). Script approval and running (ADR-0015 steps 3 and 4) are not in this release.
+
+### Console
+- A new frame. On a wide screen the navigation is a column on the left, grouped as Fleet, Work and Control, with who is signed in and the server's version beneath it; on a tablet or phone it is the bar across the top as before. A "Skip to content" link comes first for keyboards. Still no script: one header element, laid out by the stylesheet.
+- The overview says what needs a person. **Devices needing attention** lists active devices that have never connected, have not been heard from for 7 days or more, report a fixed disk at 90% or more, or are connected but have had no inventory received for 2 days (by the server's clock, not the device's), most concerns first, with a count tile that links to the full list. **Agent versions** shows what the fleet runs beside the server's own version. Until a device is enrolled, the overview shows the three steps to enroll the first one, in place of empty tables. All of it is scoped to the caller's organizations like every other read.
+- The device list shows each device's fullest fixed disk and its memory as a figure with a bar (green below 75%, amber to 90%, red above), and says how old that report is. Removable disks are left out. The Device, Connection and Fullest disk headings sort the list, as does an **Order** box in the filter form for screens too narrow to show headings (`sort=seen`, longest silent first; `sort=disk`, fullest first), and a **Needs attention** box filters it (`attention=1`). The list still shows at most 2,000 devices and now says when it has been cut; the connection and attention filters and both orders are worked out over up to 50,000 devices first, so a match far down the alphabet is not missed. Beyond that the overview says its figures are partial and gives no all-clear. These figures are what the device last reported, never live, and a report that cannot be read shows a dash, not an error.
+- The device page opens with that report at a glance (system, each fixed disk, memory, uptime, and its age), lists inventory disks with bars, and puts running a diagnostic and the job history ahead of the editing form. Revoking the credential and retiring the device sit together at the foot of the page, closed until opened.
+- A new enrollment token is shown with the three commands to run on the device, the token and this server's address (as a quoted PowerShell literal) already in them, and a link to the release downloads.
+- Administration has tabs (Users and API tokens, Custom fields); adding a user is closed until opened; forms keep to a readable width.
+- Buttons have a hierarchy: one filled primary action, outlined secondary actions, and red for destructive ones. In the dark theme, filled buttons were white text on pale blue or pale pink (about 2:1); they now use their own darker fills.
+- `/api/v1/devices` and `/api/v1/devices/{id}` gain `health` (`collected_at`, `received_at`, memory, uptime and `fullest_disk`), or `null` when the device has sent no readable inventory. Additive.
+
+### Deployment
+- Tagged releases publish the server image as `ghcr.io/spilloid/flyw8t-server:<version>`, built from the same `deploy/compose/Dockerfile` CI builds and signs in to on every pull request. The release notes carry its digest. The image is not signed: pin it by digest.
+- The deployment guide says which paths an authenticating proxy in front of the console must let through (the agent socket, and the attended-support pages a participant opens), and which to keep inside (`/metrics`).
 
 ### Release planning
 - Operator-approved roadmap to 1.0.0: Windows and macOS endpoints, a Linux-hosted console, native attended/unattended control including Windows UAC and sign-in screens; feature-complete 0.8 and pilot-proven 0.9 gates. Android endpoints and mobile technician administration gate 1.5; iOS is conditional. Linux endpoints are outside 1.0. Recovery instructions now include keys/configuration and distinguish server-database restore from unsafe agent-journal rollback.

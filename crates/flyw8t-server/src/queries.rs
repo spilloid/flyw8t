@@ -46,17 +46,62 @@ type DeviceTuple = (
     Option<OffsetDateTime>,
     Option<OffsetDateTime>,
     Option<OffsetDateTime>,
+    Option<Value>,
 );
+
+/// The parts of an inventory report the device list shows. Read leniently: a snapshot that does not fit (an older
+/// agent, or a device sending nonsense) gives no health figures; it never fails the page.
+#[derive(serde::Deserialize)]
+struct HealthWire {
+    #[serde(with = "time::serde::rfc3339")]
+    collected_at: OffsetDateTime,
+    /// The server's own receipt time, not the device's claim.
+    #[serde(with = "time::serde::rfc3339")]
+    received_at: OffsetDateTime,
+    hardware: flyw8t_protocol::inventory::Hardware,
+    disks: Vec<flyw8t_protocol::inventory::Disk>,
+    uptime_secs: u64,
+}
+
+fn device_health(v: Option<Value>) -> Option<DeviceHealth> {
+    let w: HealthWire = serde_json::from_value(v?).ok()?;
+    let fullest_disk = w
+        .disks
+        .into_iter()
+        .filter(|d| !d.removable && d.total_bytes > 0)
+        .map(|d| DiskUse {
+            mount_point: d.mount_point,
+            total_bytes: d.total_bytes,
+            available_bytes: d.available_bytes,
+        })
+        // The fullest by share used; between equals, the one with the least room left.
+        .max_by(|a, b| {
+            a.used_percent()
+                .cmp(&b.used_percent())
+                .then(b.available_bytes.cmp(&a.available_bytes))
+        });
+    Some(DeviceHealth {
+        collected_at: w.collected_at,
+        received_at: w.received_at,
+        memory_total_bytes: w.hardware.memory_total_bytes,
+        memory_available_bytes: w.hardware.memory_available_bytes,
+        uptime_secs: w.uptime_secs,
+        fullest_disk,
+    })
+}
 
 const DEVICE_SELECT: &str = "
     SELECT d.id, d.hostname, d.display_name,
            coalesce((SELECT array_agg(t.tag ORDER BY t.tag) FROM device_tags t WHERE t.device_id = d.id), '{}'),
-           o.id, o.name, s.name, inv.os, d.agent_version, d.last_seen_at, d.last_connected_at, d.retired_at
+           o.id, o.name, s.name, inv.os, d.agent_version, d.last_seen_at, d.last_connected_at, d.retired_at,
+           inv.health
       FROM devices d
       JOIN organizations o ON o.id = d.organization_id
       LEFT JOIN sites s ON s.id = d.site_id
       LEFT JOIN LATERAL (
-          SELECT coalesce(i.data->'os'->>'long_version', i.data->'os'->>'name', i.data->'os'->>'family') AS os
+          SELECT coalesce(i.data->'os'->>'long_version', i.data->'os'->>'name', i.data->'os'->>'family') AS os,
+                 jsonb_build_object('collected_at', i.data->'collected_at', 'received_at', i.received_at, 'hardware', i.data->'hardware',
+                                    'disks', i.data->'disks', 'uptime_secs', i.data->'uptime_secs') AS health
             FROM inventory_snapshots i WHERE i.device_id = d.id ORDER BY i.received_at DESC LIMIT 1
       ) inv ON true";
 
@@ -74,6 +119,7 @@ fn device_row(state: &Shared, t: DeviceTuple) -> DeviceRow {
         last_seen,
         last_connected,
         retired,
+        health,
     ) = t;
     DeviceRow {
         id,
@@ -89,6 +135,7 @@ fn device_row(state: &Shared, t: DeviceTuple) -> DeviceRow {
         agent_version,
         connection: connection(state, id, last_seen, last_connected),
         retired: retired.is_some(),
+        health: device_health(health),
     }
 }
 
@@ -96,6 +143,25 @@ pub async fn devices(
     state: &Shared,
     p: &Principal,
     f: &DeviceFilter,
+) -> sqlx::Result<Vec<DeviceRow>> {
+    // The connection and attention filters and both orders are applied here, not in SQL (connection state is the
+    // registry's). With any of them, read past one page first, so a device far down the alphabet is not missed.
+    let scan = if f.connection.is_empty() && !f.attention && f.sort.is_empty() {
+        DEVICE_PAGE_LIMIT
+    } else {
+        DEVICE_SCAN_LIMIT
+    };
+    let mut rows = scan_devices(state, p, f, scan).await?;
+    rows.truncate(DEVICE_PAGE_LIMIT);
+    Ok(rows)
+}
+
+/// The devices matching `f`, filtered and ordered, from the first `scan` by name that SQL selects.
+async fn scan_devices(
+    state: &Shared,
+    p: &Principal,
+    f: &DeviceFilter,
+    scan: usize,
 ) -> sqlx::Result<Vec<DeviceRow>> {
     let (all, orgs) = p.scope();
     let q = (!f.q.trim().is_empty()).then(|| like_pattern(&f.q));
@@ -107,7 +173,7 @@ pub async fn devices(
             AND ($4::uuid IS NULL OR d.organization_id = $4)
             AND ($5::text IS NULL OR EXISTS (SELECT 1 FROM device_tags t WHERE t.device_id = d.id AND t.tag = $5))
             AND CASE $6 WHEN 'all' THEN true WHEN 'retired' THEN d.retired_at IS NOT NULL ELSE d.retired_at IS NULL END
-          ORDER BY lower(coalesce(d.display_name, d.hostname)), d.id LIMIT 2000"
+          ORDER BY lower(coalesce(d.display_name, d.hostname)), d.id LIMIT $7"
     ))
     .bind(all)
     .bind(&orgs)
@@ -115,9 +181,11 @@ pub async fn devices(
     .bind(f.organization)
     .bind((!f.tag.is_empty()).then_some(f.tag.as_str()))
     .bind(f.status.as_str())
+    .bind(scan as i64)
     .fetch_all(&state.db)
     .await?;
-    Ok(rows
+    let now = OffsetDateTime::now_utc();
+    let mut rows: Vec<DeviceRow> = rows
         .into_iter()
         .map(|t| device_row(state, t))
         .filter(|d| match f.connection.as_str() {
@@ -125,7 +193,29 @@ pub async fn devices(
             "offline" => !matches!(d.connection, Connection::Connected { .. }),
             _ => true,
         })
-        .collect())
+        .filter(|d| !f.attention || !d.concerns(now).is_empty())
+        .collect();
+    // Both orders are stable, so devices that tie stay in name order.
+    match f.sort.as_str() {
+        // Longest silent first: never connected, then the oldest last message, then the connected.
+        "seen" => rows.sort_by_key(|d| match &d.connection {
+            Connection::NeverConnected | Connection::Disconnected { last_seen: None } => (0, 0),
+            Connection::Disconnected { last_seen: Some(t) } => (1, t.unix_timestamp()),
+            Connection::Connected { .. } => (2, 0),
+        }),
+        // Fullest disk first; devices with no disk figures last.
+        "disk" => rows.sort_by_key(|d| {
+            std::cmp::Reverse(
+                d.health
+                    .as_ref()
+                    .and_then(|h| h.fullest_disk.as_ref())
+                    .map(|disk| disk.used_percent() as i16)
+                    .unwrap_or(-1),
+            )
+        }),
+        _ => {}
+    }
+    Ok(rows)
 }
 
 /// One device's list row, if the caller can see it.
@@ -439,8 +529,37 @@ pub async fn overview(state: &Shared, p: &Principal) -> sqlx::Result<Overview> {
     .bind(&orgs)
     .fetch_one(&state.db)
     .await?;
-    let since = OffsetDateTime::now_utc() - time::Duration::hours(24);
+    let now = OffsetDateTime::now_utc();
+    let since = now - time::Duration::hours(24);
+    // Device concerns come from the same rows, in the same scope, as the device list.
+    let active = scan_devices(state, p, &DeviceFilter::default(), DEVICE_SCAN_LIMIT).await?;
+    let devices_truncated = (active.len() as i64) < ids.len() as i64;
+    let mut concerned: Vec<DeviceAttention> = active
+        .into_iter()
+        .filter_map(|device| {
+            let concerns = device.concerns(now);
+            (!concerns.is_empty()).then_some(DeviceAttention { device, concerns })
+        })
+        .collect();
+    let device_attention_total = concerned.len() as i64;
+    // Most concerns first; the list is already in name order and the sort is stable.
+    concerned.sort_by_key(|a| std::cmp::Reverse(a.concerns.len()));
+    concerned.truncate(Overview::DEVICE_ATTENTION_LIMIT);
+    let agent_versions: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT agent_version, count(*) FROM devices
+          WHERE retired_at IS NULL AND ($1 OR organization_id = ANY($2))
+          GROUP BY agent_version ORDER BY count(*) DESC, agent_version NULLS LAST LIMIT 6",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .fetch_all(&state.db)
+    .await?;
     Ok(Overview {
+        organizations: org_refs(state, p).await?,
+        device_attention: concerned,
+        device_attention_total,
+        agent_versions,
+        devices_truncated,
         devices_total: ids.len() as i64,
         devices_connected: connected as i64,
         jobs_in_flight: in_flight,

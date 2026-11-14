@@ -58,6 +58,21 @@ pub(crate) fn check_csrf(p: &Principal, form: &Form) -> AppResult<()> {
     }
 }
 
+/// `s` as a PowerShell single-quoted string: nothing inside is expanded, and a quote is written twice. The curly
+/// quotes PowerShell also reads as single quotes are doubled too.
+pub(crate) fn powershell_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
 pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
     PageCtx {
         user_name: p.display_name.clone(),
@@ -73,6 +88,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
         can_retire: p.can(Permission::RetireDevices),
         can_view_scripts: p.can(Permission::ViewScripts),
         flash,
+        version: env!("CARGO_PKG_VERSION"),
     }
 }
 
@@ -337,6 +353,8 @@ pub struct DeviceQs {
     connection: Option<String>,
     tag: Option<String>,
     status: Option<String>,
+    sort: Option<String>,
+    attention: Option<String>,
     m: Option<String>,
 }
 
@@ -353,6 +371,12 @@ pub async fn devices(
             connection: qs.connection.unwrap_or_default(),
             tag: qs.tag.unwrap_or_default().chars().take(40).collect(),
             status: qs.status.unwrap_or_default(),
+            // Anything but the two known orders is name order.
+            sort: qs
+                .sort
+                .filter(|s| matches!(s.as_str(), "seen" | "disk"))
+                .unwrap_or_default(),
+            attention: qs.attention.as_deref() == Some("1"),
         };
         let rows = queries::devices(&state, &p, &filter).await?;
         let orgs = queries::org_refs(&state, &p).await?;
@@ -737,9 +761,15 @@ pub async fn create_enrollment_token(
         let revealed = RevealedSecret {
             label: format!("Enrollment token for {}", org.name),
             hint: format!(
-                "On the Windows device, as Administrator: flyw8t-agent enroll --server {} --token <token>, then flyw8t-agent service install. Valid for {ttl_minutes} minutes and {max_uses} device(s).",
-                state.config.public_url
+                "Valid for {ttl_minutes} minutes and {max_uses} device(s). Whoever holds it can enroll a device into {} until then; revoke it below if it goes astray.",
+                org.name
             ),
+            // The token is the server's own (letters, digits, `_` and `-`). The URL is the operator's setting and
+            // goes in as a PowerShell single-quoted literal, where nothing is expanded.
+            commands: Some(format!(
+                ".\\flyw8t-agent.exe enroll --server {} --token {secret}\n.\\flyw8t-agent.exe service install\n.\\flyw8t-agent.exe status",
+                powershell_literal(&state.config.public_url)
+            )),
             secret,
         };
         let tokens = queries::enrollment_tokens(&state, id).await?;
@@ -916,6 +946,7 @@ pub async fn create_api_token(
             label: format!("API token \"{name}\""),
             secret,
             hint: format!("Send as Authorization: Bearer <token> to {}/api/v1/. It acts as you, limited to: {}.", state.config.public_url, scopes.join(", ")),
+            commands: None,
         };
         admin_view(&state, &p, None, Some(revealed)).await
     })
@@ -948,4 +979,28 @@ pub async fn revoke_api_token(
         to("/admin?m=token-revoked")
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::powershell_literal;
+
+    #[test]
+    fn a_powershell_literal_expands_nothing_and_cannot_be_closed_early() {
+        assert_eq!(
+            powershell_literal("https://rmm.example"),
+            "'https://rmm.example'"
+        );
+        // Inside single quotes `$(...)` and backticks are plain text.
+        assert_eq!(
+            powershell_literal("https://x/$(Stop-Computer)`n"),
+            "'https://x/$(Stop-Computer)`n'"
+        );
+        // Every character PowerShell reads as a single quote is doubled.
+        assert_eq!(powershell_literal("a'; calc; '"), "'a''; calc; '''");
+        assert_eq!(
+            powershell_literal("a\u{2019}b\u{2018}c"),
+            "'a\u{2019}\u{2019}b\u{2018}\u{2018}c'"
+        );
+    }
 }
