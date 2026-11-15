@@ -14,7 +14,9 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use flyw8t_domain::job::ExecState;
 use flyw8t_domain::{Permission, Role};
 use flyw8t_protocol::Action;
-use flyw8t_web::model::{DeviceFilter, Flash, PageCtx, RevealedSecret};
+use flyw8t_web::model::{
+    AuditFilter, AuditPage, AuditRow, DeviceFilter, FamilyLink, Flash, PageCtx, RevealedSecret,
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::future::Future;
@@ -73,6 +75,9 @@ pub(crate) fn powershell_literal(s: &str) -> String {
     out
 }
 
+/// The operator's other products, for the frame. Set once, when the server starts (`FLYW8T_FAMILY_LINKS`).
+pub static FAMILY: std::sync::OnceLock<Vec<FamilyLink>> = std::sync::OnceLock::new();
+
 pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
     PageCtx {
         user_name: p.display_name.clone(),
@@ -89,6 +94,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
         can_view_scripts: p.can(Permission::ViewScripts),
         flash,
         version: env!("CARGO_PKG_VERSION"),
+        family: FAMILY.get().cloned().unwrap_or_default(),
     }
 }
 
@@ -100,6 +106,12 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "site-added" => (true, "Site added."),
         "token-revoked" => (true, "Token revoked."),
         "user-created" => (true, "User created."),
+        "user-updated" => (true, "User updated."),
+        "user-disabled" => (true, "Account disabled: they are signed out everywhere and their tokens are revoked."),
+        "user-enabled" => (true, "Account enabled."),
+        "password-changed" => (true, "Password changed. Every other browser was signed out."),
+        "org-renamed" => (true, "Organization renamed."),
+        "site-renamed" => (true, "Site renamed."),
         "passkey-added" => (true, "Passkey added."),
         "passkey-removed" => (true, "Passkey removed."),
         "session-revoked" => (true, "That session is signed out."),
@@ -258,7 +270,7 @@ pub async fn login(
         }
     };
     let audit = Audit::anonymous("web", email.clone(), "user.login").ip(&ip);
-    let Some((user_id, _, _, _)) = user.filter(|_| ok) else {
+    let Some((user_id, verified_hash, _, _)) = user.filter(|_| ok) else {
         let _ = audit.denied().record(&state.db).await;
         return fail(
             StatusCode::UNAUTHORIZED,
@@ -275,12 +287,21 @@ pub async fn login(
         // in another request either happens first (and is seen here) or revokes this session
         // when it commits. The password alone reaches the console only when MFA is neither
         // set up nor required.
+        // The same lock says whether the password just checked is still the account's and the account still
+        // enabled: an administrator's disable or password replacement holds this row, so a sign-in that was
+        // already past the password check waits for it and is then refused.
         let mut tx = state.db.begin().await?;
-        let (has_totp,): (bool,) =
-            sqlx::query_as("SELECT totp_secret IS NOT NULL FROM users WHERE id = $1 FOR SHARE")
-                .bind(user_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let (has_totp, still_good): (bool, bool) = sqlx::query_as(
+            "SELECT totp_secret IS NOT NULL, disabled_at IS NULL AND password_hash = $2
+               FROM users WHERE id = $1 FOR SHARE",
+        )
+        .bind(user_id)
+        .bind(&verified_hash)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !still_good {
+            return Err(AppError::Unauthorized);
+        }
         let stage = if has_totp {
             Stage::Mfa
         } else if state.config.require_mfa {
@@ -310,6 +331,18 @@ pub async fn login(
                 Stage::Full => "/",
             };
             ([(header::SET_COOKIE, cookie)], Redirect::to(next)).into_response()
+        }
+        Err(AppError::Unauthorized) => {
+            let _ = Audit::anonymous("web", email.clone(), "user.login")
+                .ip(&ip)
+                .denied()
+                .record(&state.db)
+                .await;
+            fail(
+                StatusCode::UNAUTHORIZED,
+                "Email or password is incorrect.",
+                false,
+            )
         }
         Err(e) => error_response(None, e),
     }
@@ -467,10 +500,15 @@ pub async fn revoke_device(
     .await
 }
 
+/// The jobs list goes back this many pages (a million jobs); narrow it with the filters to reach older ones.
+const MAX_JOBS_PAGE: u32 = 10_000;
+
 #[derive(Deserialize, Default)]
 pub struct JobsQs {
     state: Option<String>,
     batch: Option<Uuid>,
+    action: Option<String>,
+    page: Option<u32>,
 }
 
 pub async fn jobs_list(
@@ -480,17 +518,30 @@ pub async fn jobs_list(
 ) -> Response {
     page(&p, async {
         let st = qs.state.as_deref().and_then(ExecState::parse);
-        let rows = queries::jobs(
+        // Only a catalog action narrows the list; anything else is no filter.
+        let action = qs
+            .action
+            .as_deref()
+            .and_then(flyw8t_protocol::catalog::info)
+            .map(|a| a.name.to_string());
+        let page_number = qs.page.unwrap_or(1).clamp(1, MAX_JOBS_PAGE);
+        let size = flyw8t_web::JOBS_PAGE_SIZE;
+        // One more than a page, to know whether an older page exists.
+        let mut rows = queries::jobs(
             &state,
             &p,
             &JobQuery {
                 state: st,
                 batch: qs.batch,
-                limit: 500,
+                limit: size + 1,
+                action: action.clone(),
+                offset: i64::from(page_number - 1) * size,
                 ..Default::default()
             },
         )
         .await?;
+        let more = rows.len() as i64 > size && page_number < MAX_JOBS_PAGE;
+        rows.truncate(size as usize);
         let batch = match qs.batch {
             Some(b) => Some(
                 queries::batch(&state, &p, b)
@@ -499,7 +550,17 @@ pub async fn jobs_list(
             ),
             None => None,
         };
-        html(flyw8t_web::jobs_page(&ctx(&p, None), rows, st, batch))
+        html(flyw8t_web::jobs_page(
+            &ctx(&p, None),
+            rows,
+            flyw8t_web::JobsView {
+                state: st,
+                action: action.unwrap_or_default(),
+                batch,
+                page: page_number,
+                more,
+            },
+        ))
     })
     .await
 }
@@ -554,7 +615,7 @@ pub async fn organizations(
     .await
 }
 
-fn clean_name(raw: Option<&str>) -> AppResult<String> {
+pub(crate) fn clean_name(raw: Option<&str>) -> AppResult<String> {
     let name = raw.unwrap_or("").trim();
     if name.is_empty() || name.chars().count() > 200 {
         return Err(AppError::BadRequest(
@@ -659,6 +720,10 @@ pub async fn site(
         .fetch_all(&state.db)
         .await?;
         let fields = crate::fields::resolve(&state, &p, org_id, Some(id), None).await?;
+        let (network_assets,): (i64,) = sqlx::query_as("SELECT count(*) FROM network_assets WHERE site_id=$1 AND organization_id=$2")
+            .bind(id).bind(org_id).fetch_one(&state.db).await?;
+        let (network_collectors,): (i64,) = sqlx::query_as("SELECT count(*) FROM network_collectors WHERE site_id=$1 AND organization_id=$2 AND revoked_at IS NULL")
+            .bind(id).bind(org_id).fetch_one(&state.db).await?;
         html(flyw8t_web::site_page(
             &ctx(&p, flash(m.m.as_deref())),
             flyw8t_web::model::SitePage {
@@ -672,6 +737,8 @@ pub async fn site(
                     .into_iter()
                     .map(|(id, name)| flyw8t_web::model::OrgRef { id, name })
                     .collect(),
+                network_assets,
+                network_collectors,
             },
             fields,
         ))
@@ -712,6 +779,100 @@ pub async fn add_site(
     .await
 }
 
+/// Rename an organization. Its id, and everything that points at it, stays.
+pub async fn rename_org(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(id): Path<Uuid>,
+    body: Bytes,
+) -> Response {
+    page(&p, async {
+        let form = Form::parse(&body);
+        check_csrf(&p, &form)?;
+        p.require(Permission::ManageOrganizations)?;
+        visible_org(&state, &p, id).await?;
+        let name = clean_name(form.get("name"))?;
+        let mut tx = state.db.begin().await?;
+        // Read under the lock that changes it, so the audit's "from" is the name this change replaced.
+        let (old,): (String,) =
+            sqlx::query_as("SELECT name FROM organizations WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if name != old {
+            sqlx::query("UPDATE organizations SET name = $2 WHERE id = $1")
+                .bind(id)
+                .bind(&name)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| match &e {
+                    sqlx::Error::Database(d) if d.is_unique_violation() => {
+                        AppError::Conflict("An organization with that name exists.".into())
+                    }
+                    _ => e.into(),
+                })?;
+            Audit::user(&p, "organization.rename")
+                .org(id)
+                .target("organization", id)
+                .detail(json!({ "from": old, "to": name }))
+                .record(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        to(format!("/organizations/{id}?m=org-renamed"))
+    })
+    .await
+}
+
+/// Rename a site, within the caller's organizations.
+pub async fn rename_site(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(id): Path<Uuid>,
+    body: Bytes,
+) -> Response {
+    page(&p, async {
+        let form = Form::parse(&body);
+        check_csrf(&p, &form)?;
+        p.require(Permission::ManageOrganizations)?;
+        let name = clean_name(form.get("name"))?;
+        let (all, orgs) = p.scope();
+        let mut tx = state.db.begin().await?;
+        let row: Option<(String, Uuid)> = sqlx::query_as(
+            "SELECT name, organization_id FROM sites
+              WHERE id = $1 AND ($2 OR organization_id = ANY($3)) FOR UPDATE",
+        )
+        .bind(id)
+        .bind(all)
+        .bind(&orgs)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (old, org) = row.ok_or(AppError::NotFound)?;
+        if name != old {
+            sqlx::query("UPDATE sites SET name = $2 WHERE id = $1")
+                .bind(id)
+                .bind(&name)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| match &e {
+                    sqlx::Error::Database(d) if d.is_unique_violation() => {
+                        AppError::Conflict("That site exists.".into())
+                    }
+                    _ => e.into(),
+                })?;
+            Audit::user(&p, "site.rename")
+                .org(org)
+                .target("site", id)
+                .detail(json!({ "from": old, "to": name }))
+                .record(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        to(format!("/sites/{id}?m=site-renamed"))
+    })
+    .await
+}
+
 pub async fn create_enrollment_token(
     State(state): State<Shared>,
     WebUser(p): WebUser,
@@ -739,6 +900,7 @@ pub async fn create_enrollment_token(
         }
         let secret = format!("{}{}", auth::ENROLL_PREFIX, auth::random_secret(32));
         let mut tx = state.db.begin().await?;
+        auth::recheck_actor(&mut tx, &p, Some(id), false).await?;
         let (token_id,): (Uuid,) = sqlx::query_as(
             "INSERT INTO enrollment_tokens (organization_id, site_id, token_hash, created_by, expires_at, max_uses)
              VALUES ($1, $2, $3, $4, now() + make_interval(mins => $5), $6) RETURNING id",
@@ -810,13 +972,223 @@ pub async fn revoke_enrollment_token(
 // ---------------------------------------------------------------------------------------
 // Audit and administration (admins only)
 
-pub async fn audit(State(state): State<Shared>, WebUser(p): WebUser) -> Response {
+/// The audit page's query string. Everything is text: an empty box in the filter form is no filter.
+#[derive(Deserialize, Default)]
+pub struct AuditQs {
+    actor: Option<String>,
+    action: Option<String>,
+    outcome: Option<String>,
+    org: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    before: Option<String>,
+}
+
+/// `YYYY-MM-DD`, as a date input sends it.
+fn parse_day(s: &str) -> Option<time::Date> {
+    let mut parts = s.split('-');
+    let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return None;
+    }
+    let month = time::Month::try_from(m.parse::<u8>().ok()?).ok()?;
+    time::Date::from_calendar_date(y.parse().ok()?, month, d.parse().ok()?).ok()
+}
+
+fn audit_filter(qs: AuditQs) -> AppResult<AuditFilter> {
+    fn given(v: Option<String>) -> Option<String> {
+        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+    let bad =
+        |what: &str| AppError::BadRequest(format!("That {what} is not one this page offers."));
+    let text = |v: Option<String>, max: usize| -> String {
+        given(v).unwrap_or_default().chars().take(max).collect()
+    };
+    let day = |v: Option<String>| -> AppResult<Option<time::Date>> {
+        given(v)
+            .map(|s| parse_day(&s).ok_or_else(|| bad("date")))
+            .transpose()
+    };
+    Ok(AuditFilter {
+        actor: text(qs.actor, 200),
+        action: text(qs.action, 100),
+        outcome: given(qs.outcome)
+            .map(|o| {
+                if matches!(o.as_str(), "success" | "denied" | "failed") {
+                    Ok(o)
+                } else {
+                    Err(bad("result"))
+                }
+            })
+            .transpose()?,
+        organization: given(qs.org)
+            .map(|o| o.parse().map_err(|_| bad("organization")))
+            .transpose()?,
+        from: day(qs.from)?,
+        to: day(qs.to)?,
+        before: given(qs.before)
+            .map(|b| b.parse::<i64>().map_err(|_| bad("page")))
+            .transpose()?,
+    })
+}
+
+pub async fn audit(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Query(qs): Query<AuditQs>,
+) -> Response {
     page(&p, async {
         p.require(Permission::ViewAudit)?;
+        let filter = audit_filter(qs)?;
+        let size = queries::AUDIT_PAGE_SIZE;
+        // One more than a page, to know whether older events exist.
+        let mut rows = queries::audit(&state, &p, &filter, size + 1).await?;
+        let older = (rows.len() as i64 > size).then(|| {
+            rows.truncate(size as usize);
+            rows.last().map(|r| r.id)
+        });
         html(flyw8t_web::audit_page(
             &ctx(&p, None),
-            queries::audit(&state).await?,
+            AuditPage {
+                rows,
+                filter,
+                older: older.flatten(),
+                organizations: queries::org_refs(&state, &p).await?,
+            },
         ))
+    })
+    .await
+}
+
+/// One CSV cell: always quoted, quotes doubled. A cell a spreadsheet would read as a formula gets a leading
+/// apostrophe, so text someone put into the audit log (a device name, an email) is never run when the file is opened.
+fn csv_cell(s: &str) -> String {
+    let guard = s.trim_start().starts_with([
+        '=', '+', '-', '@', '\u{FF1D}', '\u{FF0B}', '\u{FF0D}', '\u{FF20}',
+    ]) || s.starts_with(['\t', '\r', '\n']);
+    format!(
+        "\"{}{}\"",
+        if guard { "'" } else { "" },
+        s.replace('"', "\"\"")
+    )
+}
+
+const AUDIT_CSV_HEADER: &str =
+    "id,at,actor,channel,credential,client_ip,action,target_type,target_id,outcome,organization,detail\r\n";
+
+/// The most an export may weigh. Events are short; this is a ceiling for a log someone has stuffed.
+const AUDIT_EXPORT_BYTES: usize = 32 * 1024 * 1024;
+
+fn audit_csv_line(r: &AuditRow) -> String {
+    let mut out = String::new();
+    {
+        let cells = [
+            r.id.to_string(),
+            flyw8t_web::fmt::iso(r.at),
+            r.actor_label.clone(),
+            r.channel.clone(),
+            r.credential.clone().unwrap_or_default(),
+            r.client_ip.clone().unwrap_or_default(),
+            r.action.clone(),
+            r.target_type.clone().unwrap_or_default(),
+            r.target_id.map(|t| t.to_string()).unwrap_or_default(),
+            r.outcome.clone(),
+            r.organization.clone().unwrap_or_default(),
+            r.detail.to_string(),
+        ];
+        let line: Vec<String> = cells.iter().map(|c| csv_cell(c)).collect();
+        out.push_str(&line.join(","));
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// Add `line` to `text` unless that would take it past `max_bytes`; says whether it was added.
+fn push_within(text: &mut String, line: &str, max_bytes: usize) -> bool {
+    if text.len() + line.len() > max_bytes {
+        return false;
+    }
+    text.push_str(line);
+    true
+}
+
+/// The export's text, how many events it holds, and whether matching events were left out. Read a page at a time, so
+/// the server never holds more than one page of events beside the file it is building.
+async fn audit_csv_text(
+    state: &Shared,
+    p: &Principal,
+    filter: &AuditFilter,
+    max_events: i64,
+    max_bytes: usize,
+) -> AppResult<(String, i64, bool)> {
+    const CHUNK: i64 = 500;
+    let mut filter = filter.clone();
+    filter.before = None;
+    let mut text = String::from(AUDIT_CSV_HEADER);
+    let mut events = 0;
+    loop {
+        let rows = queries::audit(state, p, &filter, CHUNK).await?;
+        for r in &rows {
+            if events == max_events || !push_within(&mut text, &audit_csv_line(r), max_bytes) {
+                return Ok((text, events, true));
+            }
+            events += 1;
+        }
+        match rows.last() {
+            Some(last) if rows.len() as i64 == CHUNK => filter.before = Some(last.id),
+            _ => return Ok((text, events, false)),
+        }
+    }
+}
+
+/// The audit log as a file, with the page's filters: newest first, at most `AUDIT_EXPORT_LIMIT` events. Taking a
+/// copy of the log is itself recorded.
+pub async fn audit_csv(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Query(qs): Query<AuditQs>,
+) -> Response {
+    page(&p, async {
+        p.require(Permission::ViewAudit)?;
+        let filter = audit_filter(qs)?;
+        let (text, events, truncated) = audit_csv_text(
+            &state,
+            &p,
+            &filter,
+            queries::AUDIT_EXPORT_LIMIT,
+            AUDIT_EXPORT_BYTES,
+        )
+        .await?;
+        Audit::user(&p, "audit.export")
+            .detail(json!({
+                "filters": flyw8t_web::audit_query(&filter),
+                "events": events,
+                "truncated": truncated,
+            }))
+            .record(&state.db)
+            .await?;
+        let now = OffsetDateTime::now_utc();
+        let name = format!(
+            "flyw8t-audit-{:04}{:02}{:02}-{:02}{:02}{:02}.csv",
+            now.year(),
+            u8::from(now.month()),
+            now.day(),
+            now.hour(),
+            now.minute(),
+            now.second()
+        );
+        Ok((
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{name}\""),
+                ),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            text,
+        )
+            .into_response())
     })
     .await
 }
@@ -877,6 +1249,8 @@ pub async fn create_user(
         let orgs: Vec<Uuid> = form.all("org").into_iter().filter_map(|o| o.parse().ok()).collect();
         let hash = auth::hash_password(password)?;
         let mut tx = state.db.begin().await?;
+        // Whoever creates an account must, as of now, still be an enabled administrator in sudo mode.
+        auth::recheck_actor(&mut tx, &p, None, true).await?;
         let (uid,): (Uuid,) = sqlx::query_as("INSERT INTO users (email, display_name, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id")
             .bind(&email)
             .bind(&name)
@@ -929,6 +1303,8 @@ pub async fn create_api_token(
         let body = auth::random_secret(32);
         let secret = format!("{}{body}", auth::TOKEN_PREFIX);
         let prefix: String = body.chars().take(8).collect();
+        let mut tx = state.db.begin().await?;
+        auth::recheck_actor(&mut tx, &p, None, true).await?;
         let (tid,): (Uuid,) = sqlx::query_as(
             "INSERT INTO api_tokens (user_id, name, prefix, token_hash, scopes, expires_at)
              VALUES ($1, $2, $3, $4, $5, now() + make_interval(days => $6)) RETURNING id",
@@ -939,9 +1315,10 @@ pub async fn create_api_token(
         .bind(auth::digest(&secret))
         .bind(&scopes)
         .bind(days)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *tx)
         .await?;
-        Audit::user(&p, "api_token.create").target("api_token", tid).detail(json!({ "name": name, "scopes": scopes, "days": days })).record(&state.db).await?;
+        Audit::user(&p, "api_token.create").target("api_token", tid).detail(json!({ "name": name, "scopes": scopes, "days": days })).record(&mut *tx).await?;
+        tx.commit().await?;
         let revealed = RevealedSecret {
             label: format!("API token \"{name}\""),
             secret,
@@ -983,7 +1360,63 @@ pub async fn revoke_api_token(
 
 #[cfg(test)]
 mod tests {
-    use super::powershell_literal;
+    use super::{csv_cell, parse_day, powershell_literal, push_within};
+
+    #[test]
+    fn a_csv_cell_is_quoted_and_never_a_formula() {
+        assert_eq!(csv_cell("plain"), "\"plain\"");
+        assert_eq!(csv_cell("a,b\nc"), "\"a,b\nc\"");
+        assert_eq!(csv_cell("say \"hi\""), "\"say \"\"hi\"\"\"");
+        for formula in [
+            "=1+1",
+            "+1",
+            "-1",
+            "@SUM(A1)",
+            "\t=1",
+            "\r=1",
+            "\n=1+1",
+            "  =1+1",
+            "\u{FF1D}1+1",
+            "\u{FF0B}1",
+            "\u{FF0D}1",
+            "\u{FF20}SUM(A1)",
+            "\tplain",
+        ] {
+            assert_eq!(csv_cell(formula), format!("\"'{formula}\""), "{formula:?}");
+        }
+        // Only the first character matters: these are text to a spreadsheet already.
+        assert_eq!(csv_cell("a=b"), "\"a=b\"");
+        assert_eq!(csv_cell(""), "\"\"");
+    }
+
+    #[test]
+    fn an_export_never_passes_its_byte_budget() {
+        let mut text = String::from("12345");
+        assert!(push_within(&mut text, "678", 8), "exactly the budget fits");
+        assert_eq!(text, "12345678");
+        assert!(!push_within(&mut text, "9", 8), "one byte more does not");
+        assert_eq!(text, "12345678", "a refused line leaves the text as it was");
+        assert!(push_within(&mut text, "", 8));
+    }
+
+    #[test]
+    fn a_day_is_four_two_two_digits_and_a_real_date() {
+        assert_eq!(
+            parse_day("2026-11-15"),
+            Some(time::Date::from_calendar_date(2026, time::Month::November, 15).unwrap())
+        );
+        for bad in [
+            "2026-02-30",
+            "2026-13-01",
+            "26-11-15",
+            "2026-11-15-1",
+            "2026/11/15",
+            "",
+            "2026-1-5",
+        ] {
+            assert_eq!(parse_day(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn a_powershell_literal_expands_nothing_and_cannot_be_closed_early() {

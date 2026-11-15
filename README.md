@@ -6,7 +6,7 @@ flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP 
 
 > An operation either succeeds **with evidence**, fails **with an explanation**, or explicitly reports that its outcome is **unknown**. Never pretend otherwise.
 
-**Version 0.1.2, pre-release. Not production-ready.** TOTP two-step verification, passkey sign-in and sudo mode are implemented. OIDC, native remote control, signed installation/update verification and deployment/fleet recovery evidence remain release work. The published 0.1.1 artifacts predate much of the current source. See the [threat model](docs/threat-model.md#open-items-before-production) and the operator-approved [roadmap and release gates](docs/roadmap.md): Windows and macOS endpoints at 1.0; Android endpoints and mobile technician administration at 1.5.
+**Version 0.1.3, pre-release. Not production-ready.** TOTP two-step verification, passkey sign-in and sudo mode are implemented. OIDC, native remote control, signed installation/update verification and deployment/fleet recovery evidence remain release work. The published 0.1.1 artifacts predate much of the current source. See the [threat model](docs/threat-model.md#open-items-before-production) and the operator-approved [roadmap and release gates](docs/roadmap.md): Windows and macOS endpoints at 1.0; Android endpoints and mobile technician administration at 1.5.
 
 ## What works today
 
@@ -17,6 +17,15 @@ flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP 
 - **Attended support:** send a code, the person consents in their browser, and you see the tab or screen they choose, with no install. Screen view only; no control.
 - **JSON API** with scoped bearer tokens and idempotency keys, for integrations such as AnchorDesk.
 - **Self-hosted:** one binary plus PostgreSQL. No Redis, no broker, no SaaS.
+
+## Network operations (unreleased)
+
+**Unreleased network operations:** the current source adds NetViz site collectors,
+agentless network inventory and discovery history, plus an explicit PortGlass handoff
+inside this console. Start from a site's **Network operations** link or **Network** in
+the navigation. See [setup and limits](docs/network-operations.md) and the
+[AnchorDesk / Material family direction](docs/product-family.md). SNMP monitoring,
+physical topology, configuration backups and flow analysis are still future work.
 
 ## How it is checked
 

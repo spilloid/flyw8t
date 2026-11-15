@@ -334,6 +334,15 @@ impl Browser {
     pub fn state(&self) -> &Shared {
         &self.server_state
     }
+
+    /// The same session in another `Browser`: to send a wrong CSRF token, or to move into a future.
+    pub fn clone_for_test(&self) -> Browser {
+        Browser {
+            server_state: self.server_state.clone(),
+            cookie: self.cookie.clone(),
+            csrf: self.csrf.clone(),
+        }
+    }
 }
 
 /// An enrolled agent with its own state directory.

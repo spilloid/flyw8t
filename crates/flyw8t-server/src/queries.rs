@@ -23,14 +23,16 @@ fn connection(
     }
 }
 
-fn like_pattern(q: &str) -> String {
-    let escaped = q
-        .trim()
-        .to_lowercase()
-        .replace('\\', "\\\\")
+/// `q` with LIKE's own characters escaped, so it matches only itself.
+pub(crate) fn like_escape(q: &str) -> String {
+    q.replace('\\', "\\\\")
         .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%{escaped}%")
+        .replace('_', "\\_")
+}
+
+/// A "contains" pattern for a lowercased column.
+pub(crate) fn like_pattern(q: &str) -> String {
+    format!("%{}%", like_escape(&q.trim().to_lowercase()))
 }
 
 type DeviceTuple = (
@@ -315,6 +317,10 @@ pub struct JobQuery {
     pub attention_since: Option<OffsetDateTime>,
     pub batch: Option<Uuid>,
     pub limit: i64,
+    /// A catalog action's name.
+    pub action: Option<String>,
+    /// Rows to skip, newest first: the pages before this one.
+    pub offset: i64,
 }
 
 type JobTuple = (
@@ -401,7 +407,8 @@ pub async fn jobs(state: &Shared, p: &Principal, q: &JobQuery) -> sqlx::Result<V
             AND ($5::timestamptz IS NULL OR (j.created_at >= $5 AND
                  (j.state IN ('outcome_unknown', 'failed', 'timed_out') OR j.verification = 'failed')))
             AND ($7::uuid IS NULL OR j.batch_id = $7)
-          ORDER BY j.created_at DESC LIMIT $6"
+            AND ($8::text IS NULL OR j.action = $8)
+          ORDER BY j.created_at DESC, j.id DESC LIMIT $6 OFFSET $9"
     ))
     .bind(all)
     .bind(&orgs)
@@ -410,6 +417,8 @@ pub async fn jobs(state: &Shared, p: &Principal, q: &JobQuery) -> sqlx::Result<V
     .bind(q.attention_since)
     .bind(q.limit.clamp(1, 500))
     .bind(q.batch)
+    .bind(q.action.as_deref())
+    .bind(q.offset.max(0))
     .fetch_all(&state.db)
     .await?;
     Ok(rows.into_iter().map(job_row).collect())
@@ -728,15 +737,69 @@ pub async fn enrollment_tokens(
         .collect())
 }
 
-pub async fn audit(state: &Shared) -> sqlx::Result<Vec<AuditRow>> {
-    let rows: Vec<(i64, OffsetDateTime, String, String, String, Option<String>, Option<Uuid>, String, Option<String>, Value)> =
-        sqlx::query_as(
-            "SELECT a.id, a.at, a.actor_label, a.channel, a.action, a.target_type, a.target_id, a.outcome, o.name, a.detail
-               FROM audit_events a LEFT JOIN organizations o ON o.id = a.organization_id
-              ORDER BY a.id DESC LIMIT 200",
-        )
-        .fetch_all(&state.db)
-        .await?;
+/// Audit events a page holds.
+pub const AUDIT_PAGE_SIZE: i64 = 100;
+/// Audit events one export holds at most.
+pub const AUDIT_EXPORT_LIMIT: i64 = 10_000;
+
+/// Audit events matching `f`, newest first, within the caller's organizations. An event that belongs to no
+/// organization (a sign-in, a user change) is visible only to those who see every organization.
+pub async fn audit(
+    state: &Shared,
+    p: &Principal,
+    f: &AuditFilter,
+    limit: i64,
+) -> sqlx::Result<Vec<AuditRow>> {
+    type Row = (
+        i64,
+        OffsetDateTime,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<Uuid>,
+        String,
+        Option<String>,
+        Value,
+        Option<String>,
+        Option<String>,
+    );
+    let (all, orgs) = p.scope();
+    let actor = f.actor.trim();
+    let action = f.action.trim();
+    let from = f.from.map(|d| d.midnight().assume_utc());
+    // The day after `to`, exclusive: the whole of that day is included.
+    let until =
+        f.to.and_then(|d| d.next_day())
+            .map(|d| d.midnight().assume_utc());
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT a.id, a.at, a.actor_label, a.channel, a.action, a.target_type, a.target_id, a.outcome, o.name,
+                a.detail, a.client_ip, a.credential
+           FROM audit_events a LEFT JOIN organizations o ON o.id = a.organization_id
+          WHERE ($1 OR a.organization_id = ANY($2))
+            AND ($3 = '' OR lower(a.actor_label) LIKE $4)
+            AND ($5 = '' OR a.action LIKE $6)
+            AND ($7::text IS NULL OR a.outcome = $7)
+            AND ($8::uuid IS NULL OR a.organization_id = $8)
+            AND ($9::timestamptz IS NULL OR a.at >= $9)
+            AND ($10::timestamptz IS NULL OR a.at < $10)
+            AND ($11::bigint IS NULL OR a.id < $11)
+          ORDER BY a.id DESC LIMIT $12",
+    )
+    .bind(all)
+    .bind(&orgs)
+    .bind(actor)
+    .bind(like_pattern(actor))
+    .bind(action)
+    .bind(format!("{}%", like_escape(action)))
+    .bind(f.outcome.as_deref())
+    .bind(f.organization)
+    .bind(from)
+    .bind(until)
+    .bind(f.before)
+    .bind(limit.clamp(1, AUDIT_EXPORT_LIMIT + 1))
+    .fetch_all(&state.db)
+    .await?;
     Ok(rows
         .into_iter()
         .map(
@@ -751,6 +814,8 @@ pub async fn audit(state: &Shared) -> sqlx::Result<Vec<AuditRow>> {
                 outcome,
                 organization,
                 detail,
+                client_ip,
+                credential,
             )| AuditRow {
                 id,
                 at,
@@ -762,6 +827,8 @@ pub async fn audit(state: &Shared) -> sqlx::Result<Vec<AuditRow>> {
                 outcome,
                 organization,
                 detail,
+                client_ip,
+                credential,
             },
         )
         .collect())

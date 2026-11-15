@@ -27,7 +27,7 @@ For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pe
 
 ### The published image
 
-Each tagged release publishes the server as `ghcr.io/spilloid/flyw8t-server:<version>` (for example `:0.1.2`), built from `deploy/compose/Dockerfile`. The release notes give its digest; the image is not signed, so pin the digest (`ghcr.io/spilloid/flyw8t-server:0.1.2@sha256:…`) wherever a registry or a tag you do not control could otherwise change what runs. It listens on `0.0.0.0:8080`, runs as UID 10001, keeps nothing on disk, and needs only the variables below and a PostgreSQL database (18 is what the tests and the Compose file use). `flyw8t-server healthcheck` exits 0 when this server is ready, `flyw8t-server --version` prints the version, and `/readyz` answers 200 once the database is reachable and migrated.
+Each tagged release publishes the server as `ghcr.io/spilloid/flyw8t-server:<version>` (for example `:0.1.3`), built from `deploy/compose/Dockerfile`. The release notes give its digest; the image is not signed, so pin the digest (`ghcr.io/spilloid/flyw8t-server:0.1.2@sha256:…`) wherever a registry or a tag you do not control could otherwise change what runs. It listens on `0.0.0.0:8080`, runs as UID 10001, keeps nothing on disk, and needs only the variables below and a PostgreSQL database (18 is what the tests and the Compose file use). `flyw8t-server healthcheck` exits 0 when this server is ready, `flyw8t-server --version` prints the version, and `/readyz` answers 200 once the database is reachable and migrated.
 
 Of the script syntax checkers, only `bash` is in the image (it comes with the Debian base); `pwsh` and `python3` are not, so PowerShell and Python revisions say "not checked" while Bash ones are checked. Set `FLYW8T_SCRIPT_CHECKS=off` to check none.
 
@@ -39,6 +39,7 @@ A proxy that requires its own sign-in (Authentik, Authelia, oauth2-proxy, Cloudf
 |---|---|---|
 | `/api/agent/ws` | agents (enrollment and the live connection) | the enrollment token, then the device's Ed25519 key |
 | `/s`, `/s/…`, `/api/support/participant/ws`, `/api/support/helper/ws` | the person being helped, and the helper | the one-time invitation code or link, then consent |
+| `/probe/devices`, `/probe/heartbeat` | site network collectors (NetViz probes; see [network-operations.md](network-operations.md)) | the collector's own key, bound to one site and address range |
 | `/static/…`, `/manifest.webmanifest`, `/favicon.ico` | the pages above | nothing secret is served |
 | `/api/v1/…` (only if an integration calls it from outside) | API clients | the API token |
 
@@ -58,6 +59,7 @@ Everything else is the console and may sit behind the proxy. Keep `/metrics` off
 | `FLYW8T_FIELD_KEY` | no | (none) | 32 random bytes, base64 (`openssl rand -base64 32`), encrypting secret custom-field values at rest (AES-256-GCM). Without it, secret fields can be defined but no secret value can be stored. **Back it up with the database**: a lost key makes stored secrets unreadable. There is no rotation yet |
 | `FLYW8T_SCRIPT_CHECKS` | no | `on` | check script syntax on save with the languages' own parsers, found on `PATH`: `pwsh` (PowerShell 7; on Windows also Windows PowerShell), `bash`, `python3`. Each that is missing is reported on the script page as "not checked". None of them runs the script. `off` turns all of them off. The checkers do not yet run without network access or as a separate identity. PowerShell's parser can look up modules, assemblies and types while parsing; scripts that look like they might make it do so are not given to it, but that screen is a heuristic. If the server runs under an identity with network credentials (a domain account on Windows), run it where it has no outbound access, or set this to `off` |
 | `FLYW8T_TRUSTED_PROXIES` | no | (none) | comma-separated addresses or `addr/prefix` ranges of reverse proxies whose forwarded client address is believed (the Compose tunnel is `172.29.0.10`). Empty: the socket address is used and forwarding headers are ignored, so a client cannot choose its own address |
+| `FLYW8T_FAMILY_LINKS` | no | (none) | links to your other products, shown in the console's navigation under **Products**: `Label=https://url`, comma-separated, at most 8 (for example `AnchorDesk=https://desk.example.com,PortGlass=https://portglass.example.com`). Links only: nothing is fetched from them, no sign-in is shared and no context is passed. The server refuses to start on an entry that is not `http(s)://host[:port]` with an optional path (the host and port are checked; the rest only for characters that cannot appear in an address) |
 | `FLYW8T_CLIENT_IP_HEADER` | no | `cf-connecting-ip` | the header a trusted proxy puts the client address in (`x-forwarded-for` for most others; its last entry is used) |
 | `RUST_LOG` | no | `info,sqlx=warn` | log filter |
 

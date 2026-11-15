@@ -411,10 +411,19 @@ pub async fn setup(
 // Account page (full sessions)
 
 async fn account_view(state: &Shared, user: Uuid, session: Option<Uuid>) -> AppResult<AccountView> {
-    let (email, display_name, enabled_at, remaining): (String, String, Option<OffsetDateTime>, i64) =
+    type Row = (
+        String,
+        String,
+        Option<OffsetDateTime>,
+        i64,
+        Option<OffsetDateTime>,
+        bool,
+    );
+    let (email, display_name, enabled_at, remaining, password_changed_at, password_temporary): Row =
         sqlx::query_as(
             "SELECT u.email, u.display_name, u.totp_enabled_at,
-                    (SELECT count(*) FROM recovery_codes r WHERE r.user_id = u.id AND r.used_at IS NULL)
+                    (SELECT count(*) FROM recovery_codes r WHERE r.user_id = u.id AND r.used_at IS NULL),
+                    u.password_changed_at, u.password_temporary
                FROM users u WHERE u.id = $1",
         )
         .bind(user)
@@ -449,6 +458,8 @@ async fn account_view(state: &Shared, user: Uuid, session: Option<Uuid>) -> AppR
             .collect(),
         sudo_until,
         sessions: crate::sessions::list(state, user, session).await?,
+        password_changed_at,
+        password_temporary,
     })
 }
 
@@ -468,7 +479,11 @@ pub async fn account(
 }
 
 /// Re-render the account page with an error, for a wrong code on a full session.
-async fn account_error(state: &Shared, p: &auth::Principal, msg: &str) -> AppResult<Response> {
+pub(crate) async fn account_error(
+    state: &Shared,
+    p: &auth::Principal,
+    msg: &str,
+) -> AppResult<Response> {
     let v = account_view(state, p.user_id, p.session_id).await?;
     let flash = Flash {
         ok: false,

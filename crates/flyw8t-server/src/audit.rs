@@ -20,6 +20,9 @@ pub struct Audit {
     detail: Value,
 }
 
+/// An email address is at most 254 characters; nothing an anonymous caller is known by needs more.
+const MAX_ANONYMOUS_LABEL: usize = 254;
+
 impl Audit {
     pub fn user(p: &Principal, action: &'static str) -> Self {
         Self {
@@ -47,9 +50,11 @@ impl Audit {
         label: impl Into<String>,
         action: &'static str,
     ) -> Self {
+        // Whatever an unauthenticated caller typed as their name is kept short: the log is not theirs to fill.
+        let label: String = label.into().chars().take(MAX_ANONYMOUS_LABEL).collect();
         Self {
             actor_type: "anonymous",
-            actor_label: label.into(),
+            actor_label: label,
             channel,
             ..Self::base(action)
         }

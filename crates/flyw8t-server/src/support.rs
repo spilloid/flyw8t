@@ -298,6 +298,22 @@ impl SupportHub {
         }
     }
 
+    /// The sessions `user`'s technician socket is connected to on this server.
+    fn sessions_of(&self, user: Uuid) -> Vec<Uuid> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, peers)| {
+                peers
+                    .technician
+                    .as_ref()
+                    .is_some_and(|p| p.user == Some(user))
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Ask every technician socket of `user` to re-check its sign-in session now.
     pub fn recheck_user(&self, user: Uuid) {
         for peers in self.sessions.lock().unwrap().values() {
@@ -587,17 +603,32 @@ pub async fn end_all_created_by(
     who: &Who,
     reason: &str,
 ) -> anyhow::Result<()> {
-    let ids: Vec<(Uuid,)> = sqlx::query_as(
+    let listed: sqlx::Result<Vec<(Uuid,)>> = sqlx::query_as(
         "SELECT id FROM support_sessions WHERE created_by = $1
             AND state IN ('created', 'waiting', 'authorizing', 'awaiting_helper', 'connecting', 'connected')",
     )
     .bind(user)
     .fetch_all(&state.db)
-    .await?;
-    for (id,) in ids {
-        end(state, id, Side::Technician, who, reason).await?;
+    .await;
+    // The sessions this person's technician socket is on here are ended whatever the database says, or cannot
+    // say: their authority was just taken away, and that must not wait for a query to succeed.
+    let mut ids = state.support.sessions_of(user);
+    let failed = match listed {
+        Ok(rows) => {
+            ids.extend(rows.into_iter().map(|r| r.0));
+            None
+        }
+        Err(e) => Some(e),
+    };
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        end_or_force(state, id, Side::Technician, who, reason).await;
     }
-    Ok(())
+    match failed {
+        None => Ok(()),
+        Some(e) => Err(anyhow::Error::from(e).context("listing the support sessions to end")),
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -666,6 +697,10 @@ pub async fn create(
     let code_hash = code_digest(code.clone()).await?;
     let invite = auth::random_secret(32);
     let mut tx = state.db.begin().await?;
+    // The invitation is authority handed out in advance: whoever makes it must, as of now, still be enabled, hold
+    // the same role and this organization, and be signed in with the session that asked. An administrator's change
+    // to them holds the same row, so a session cannot be created after that change has ended the ones they had.
+    auth::recheck_actor(&mut tx, p, Some(organization), false).await?;
     // One technician's creations are serialized, so the cap below holds under concurrency.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("support-create:{}", p.user_id))

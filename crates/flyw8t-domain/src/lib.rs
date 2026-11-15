@@ -8,6 +8,7 @@ pub mod access;
 pub mod evidence;
 pub mod finding;
 pub mod job;
+pub mod network;
 pub mod support;
 
 pub use access::{Permission, Role};

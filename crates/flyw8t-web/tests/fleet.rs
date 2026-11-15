@@ -26,6 +26,7 @@ fn ctx() -> PageCtx {
         can_view_scripts: true,
         flash: None,
         version: "9.9.9",
+        family: Vec::new(),
     }
 }
 
