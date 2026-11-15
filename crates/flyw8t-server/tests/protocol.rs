@@ -403,13 +403,37 @@ async fn report_for_job_recorded_as_queued_is_accepted_not_looped() {
         .parse()
         .unwrap();
     raw.expect_offer().await;
+    // Keep the row locked from the edit until the server is waiting to apply the report.
+    // Otherwise the sweeper (every 200 ms here) or a late dispatch announcement can find the
+    // job `queued` first and dispatch it in the ordinary way, and the report implies nothing.
+    let mut edit = server.state.db.begin().await.unwrap();
     sqlx::query("UPDATE jobs SET state = 'queued' WHERE id = $1")
         .bind(job)
-        .execute(&server.state.db)
+        .execute(&mut *edit)
         .await
         .unwrap();
     raw.report(job, finished_exit0("Windows IP Configuration"))
         .await;
+    let waiting_since = std::time::Instant::now();
+    loop {
+        let (waiting,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM pg_stat_activity
+              WHERE datname = current_database() AND wait_event_type = 'Lock'
+                AND query LIKE '%FROM jobs WHERE id = $1 FOR UPDATE'",
+        )
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+        assert!(
+            waiting_since.elapsed() < Duration::from_secs(15),
+            "the report never reached the job's row lock"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    edit.commit().await.unwrap();
     let reply = next(&mut raw.ws).await;
     assert!(
         matches!(reply, ServerMsg::ReportAck { job_id } if job_id == job),

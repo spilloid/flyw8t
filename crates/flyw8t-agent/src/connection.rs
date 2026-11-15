@@ -548,8 +548,10 @@ mod tests {
         let second = lock_state_dir_within(dir.path(), Duration::from_millis(300));
         assert!(second.unwrap_err().to_string().contains("already running"));
         drop(first);
+        // Allow a moment: on Linux, a child that another test is spawning holds a copy of the
+        // lock file's descriptor between fork and exec, so the lock outlives `drop` briefly.
         assert!(
-            lock_state_dir_within(dir.path(), Duration::ZERO).is_ok(),
+            lock_state_dir_within(dir.path(), Duration::from_secs(5)).is_ok(),
             "released on drop"
         );
     }
