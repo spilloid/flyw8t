@@ -2,6 +2,8 @@ name: release
 
 # A pushed tag `vX.Y.Z` builds the server and agent for Windows and Linux and publishes them,
 # with SHA-256 sums, as a GitHub pre-release whose notes are that version's CHANGELOG section.
+# It also pushes the server image to ghcr.io/<owner>/flyw8t-server:X.Y.Z (unsigned; the release
+# notes carry its digest).
 # Windows binaries are Authenticode-signed with Azure Artifact Signing and verified before
 # anything is uploaded (`.github/actions/sign-release`); a release cannot publish unsigned
 # Windows binaries. Linux binaries are covered by SHA256SUMS only.
@@ -58,8 +60,44 @@ jobs:
           name: bin-${{ matrix.target }}
           path: dist/
 
+  image:
+    # The image CI builds and signs in to on every pull request (ci.yml, job `image`), pushed
+    # under the version alone: no `latest`, so a deployment always names what it runs.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      ref: ${{ steps.push.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: |
+          docker build -f deploy/compose/Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${GITHUB_REF_NAME#v}" \
+            -t "ghcr.io/${GITHUB_REPOSITORY_OWNER}/flyw8t-server:${GITHUB_REF_NAME#v}" .
+      - name: The image starts and reports its version
+        run: |
+          # The whole line must match: 0.1.20 is not 0.1.2.
+          got=$(docker run --rm "ghcr.io/${GITHUB_REPOSITORY_OWNER}/flyw8t-server:${GITHUB_REF_NAME#v}" --version)
+          test "$got" = "flyw8t-server ${GITHUB_REF_NAME#v}" || { echo "image reports '$got', tag is ${GITHUB_REF_NAME}"; exit 1; }
+      - name: Push
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/flyw8t-server:${GITHUB_REF_NAME#v}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$image"
+          ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$image")
+          case "$ref" in *@sha256:*) ;; *) echo "no digest for $image"; exit 1 ;; esac
+          echo "ref=${image}@${ref#*@}" >> "$GITHUB_OUTPUT"
+          echo "Pushed \`${image}@${ref#*@}\`" >> "$GITHUB_STEP_SUMMARY"
+
   publish:
-    needs: build
+    needs: [build, image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -76,6 +114,9 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           awk -v v="$version" '$0 ~ "^## " v " " {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md has no section for $version"; exit 1; }
+          printf '\n### Server image\n`%s` (unsigned; pin the digest)\n' "$IMAGE_REF" >> notes.md
+        env:
+          IMAGE_REF: ${{ needs.image.outputs.ref }}
       - name: Publish pre-release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -27,6 +27,8 @@ pub struct PageCtx {
     /// May read the script library.
     pub can_view_scripts: bool,
     pub flash: Option<Flash>,
+    /// The server's own version, shown in the frame.
+    pub version: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -79,9 +81,132 @@ pub struct DeviceRow {
     pub agent_version: Option<String>,
     pub connection: Connection,
     pub retired: bool,
+    /// Disk, memory and uptime from the device's latest inventory, if it has sent one that can be read.
+    pub health: Option<DeviceHealth>,
 }
 
+/// What a device last said about its own disks, memory and uptime. A claim made by the endpoint, as old as
+/// `collected_at`: never live, and never used for authorization.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceHealth {
+    #[serde(with = "time::serde::rfc3339")]
+    pub collected_at: OffsetDateTime,
+    /// When the server received that report. Staleness is judged by this, never by the device's clock.
+    #[serde(with = "time::serde::rfc3339")]
+    pub received_at: OffsetDateTime,
+    pub memory_total_bytes: u64,
+    pub memory_available_bytes: u64,
+    pub uptime_secs: u64,
+    /// The fixed disk with the largest share of its space used. Removable disks are left out: a full installer
+    /// stick is not a fault.
+    pub fullest_disk: Option<DiskUse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskUse {
+    pub mount_point: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// Percent of `total` that is not `available`, rounded down; 0 when `total` is 0.
+pub fn used_percent(total: u64, available: u64) -> u8 {
+    let used = total.saturating_sub(available) as u128;
+    used.saturating_mul(100)
+        .checked_div(total as u128)
+        .unwrap_or(0)
+        .min(100) as u8
+}
+
+impl DiskUse {
+    pub fn used_percent(&self) -> u8 {
+        used_percent(self.total_bytes, self.available_bytes)
+    }
+}
+
+impl DeviceHealth {
+    pub fn memory_used_percent(&self) -> u8 {
+        used_percent(self.memory_total_bytes, self.memory_available_bytes)
+    }
+}
+
+/// A fixed disk this full is listed under "needs attention".
+pub const DISK_NEARLY_FULL_PERCENT: u8 = 90;
+/// A device not heard from for this long is listed under "needs attention".
+pub const OFFLINE_ATTENTION_DAYS: i64 = 7;
+/// A connected device whose newest inventory is older than this is listed under "needs attention". The agent sends
+/// inventory every 6 hours; the device page calls it stale at the same age.
+pub const STALE_INVENTORY_DAYS: i64 = 2;
+
+/// Why a device is listed under "needs attention".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Concern {
+    /// Enrolled, but it has never connected.
+    NeverConnected,
+    /// Not connected, and not heard from for `OFFLINE_ATTENTION_DAYS` or more.
+    LongOffline { days: i64 },
+    /// Its fullest fixed disk is at or above `DISK_NEARLY_FULL_PERCENT`, as of its last inventory.
+    DiskNearlyFull {
+        mount_point: String,
+        used_percent: u8,
+    },
+    /// Connected, but the server received its newest inventory `STALE_INVENTORY_DAYS` or more ago.
+    StaleInventory { days: i64 },
+    /// Connected for `STALE_INVENTORY_DAYS` or more without sending an inventory the server can read.
+    NoInventory { days: i64 },
+}
+
+/// The device list shows at most this many devices.
+pub const DEVICE_PAGE_LIMIT: usize = 2000;
+/// Filters, orders and the overview's figures are worked out over at most this many devices, by name.
+pub const DEVICE_SCAN_LIMIT: usize = 50_000;
+
 impl DeviceRow {
+    /// What about this device wants a person's attention, most serious first. Retired devices have none. Disk
+    /// fullness is as old as the inventory it comes from; the page says so.
+    pub fn concerns(&self, now: OffsetDateTime) -> Vec<Concern> {
+        let mut out = Vec::new();
+        if self.retired {
+            return out;
+        }
+        if let Some(disk) = self.health.as_ref().and_then(|h| h.fullest_disk.as_ref()) {
+            if disk.used_percent() >= DISK_NEARLY_FULL_PERCENT {
+                out.push(Concern::DiskNearlyFull {
+                    mount_point: disk.mount_point.clone(),
+                    used_percent: disk.used_percent(),
+                });
+            }
+        }
+        match &self.connection {
+            Connection::NeverConnected | Connection::Disconnected { last_seen: None } => {
+                out.push(Concern::NeverConnected)
+            }
+            Connection::Disconnected { last_seen: Some(t) } => {
+                let days = (now - *t).whole_days();
+                if days >= OFFLINE_ATTENTION_DAYS {
+                    out.push(Concern::LongOffline { days });
+                }
+            }
+            // By the server's clock, so a device with a wrong clock cannot look fresh.
+            Connection::Connected { since } => match &self.health {
+                Some(h) => {
+                    let days = (now - h.received_at).whole_days();
+                    if days >= STALE_INVENTORY_DAYS {
+                        out.push(Concern::StaleInventory { days });
+                    }
+                }
+                None => {
+                    let days = (now - *since).whole_days();
+                    if days >= STALE_INVENTORY_DAYS {
+                        out.push(Concern::NoInventory { days });
+                    }
+                }
+            },
+        }
+        out
+    }
+
     /// The name to show: the chosen one, else the hostname.
     pub fn name(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.hostname)
@@ -224,6 +349,8 @@ pub struct RevealedSecret {
     pub label: String,
     pub secret: String,
     pub hint: String,
+    /// For an enrollment token: the commands to run on the device, with the token already in them.
+    pub commands: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,6 +410,26 @@ pub struct Overview {
     pub jobs_unknown: i64,
     pub attention: Vec<JobRow>,
     pub recent: Vec<JobRow>,
+    /// Organizations the caller can see: the first-run steps are shown until there is a device.
+    pub organizations: Vec<OrgRef>,
+    /// Active devices with a concern, most serious first, at most `Overview::DEVICE_ATTENTION_LIMIT`.
+    pub device_attention: Vec<DeviceAttention>,
+    /// How many active devices have a concern, including those not listed.
+    pub device_attention_total: i64,
+    /// Agent versions among active devices, most common first. `None` is a device that has not reported one.
+    pub agent_versions: Vec<(Option<String>, i64)>,
+    /// True when the device figures cover only part of the fleet (more active devices than one page loads).
+    pub devices_truncated: bool,
+}
+
+impl Overview {
+    pub const DEVICE_ATTENTION_LIMIT: usize = 8;
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceAttention {
+    pub device: DeviceRow,
+    pub concerns: Vec<Concern>,
 }
 
 /// Filters echoed back into the device list form.
@@ -294,6 +441,10 @@ pub struct DeviceFilter {
     pub tag: String,
     /// `""` active devices, `"retired"`, or `"all"`.
     pub status: String,
+    /// `""` by name, `"seen"` longest-silent first, `"disk"` fullest disk first.
+    pub sort: String,
+    /// Only devices with a concern (see `DeviceRow::concerns`).
+    pub attention: bool,
 }
 
 /// One custom field's definition, for the administration page.

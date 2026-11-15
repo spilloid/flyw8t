@@ -73,29 +73,48 @@ fn shell_with(
     script: Option<&'static str>,
     body: impl IntoView + 'static,
 ) -> String {
-    let mut items = vec![
-        (Nav::Overview, "/", "Overview"),
-        (Nav::Devices, "/devices", "Devices"),
-        (Nav::Organizations, "/organizations", "Organizations"),
-        (Nav::Jobs, "/jobs", "Jobs"),
-    ];
+    // Grouped by what a technician is doing. The labels show only where the navigation is a column.
+    let mut work = vec![(Nav::Jobs, "/jobs", "Jobs")];
     if ctx.can_view_scripts {
-        items.push((Nav::Scripts, "/scripts", "Scripts"));
+        work.push((Nav::Scripts, "/scripts", "Scripts"));
     }
     if ctx.can_support {
-        items.push((Nav::Support, "/support", "Support"));
+        work.push((Nav::Support, "/support", "Support"));
     }
+    let mut groups = vec![
+        (
+            "Fleet",
+            vec![
+                (Nav::Overview, "/", "Overview"),
+                (Nav::Devices, "/devices", "Devices"),
+                (Nav::Organizations, "/organizations", "Organizations"),
+            ],
+        ),
+        ("Work", work),
+    ];
     if ctx.is_admin {
-        items.push((Nav::Audit, "/audit", "Audit"));
-        items.push((Nav::Admin, "/admin", "Administration"));
+        groups.push((
+            "Control",
+            vec![
+                (Nav::Audit, "/audit", "Audit"),
+                (Nav::Admin, "/admin", "Administration"),
+            ],
+        ));
     }
-    let nav = items
+    let nav = groups
         .into_iter()
-        .map(|(n, href, label)| {
-            let current = (n == active).then_some("page");
-            view! { <a href=href aria-current=current>{label}</a> }
+        .map(|(group, items)| {
+            let links = items
+                .into_iter()
+                .map(|(n, href, label)| {
+                    let current = (n == active).then_some("page");
+                    view! { <a href=href aria-current=current>{label}</a> }
+                })
+                .collect_view();
+            view! { <div class="navgroup"><span class="navlabel">{group}</span>{links}</div> }
         })
         .collect_view();
+    let version = format!("flyw8t {} · pre-release", ctx.version);
     let flash = ctx.flash.clone().map(|f| {
         let class = if f.ok { "flash ok" } else { "flash bad" };
         view! { <div class=class role="status">{f.message}</div> }
@@ -105,17 +124,19 @@ fn shell_with(
     render(view! {
         <html lang="en">
             {head(format!("{title} · flyw8t"), refresh, script)}
-            <body>
+            <body class="app">
+                <a class="skip" href="#main">"Skip to content"</a>
                 <header class="top">
-                    <a class="brand" href="/">"flyw8t"</a>
+                    <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="24" height="24"/>"flyw8t"</a>
                     <nav aria-label="Main">{nav}</nav>
                     <form class="logout" method="post" action="/logout">
                         <input type="hidden" name="csrf" value=csrf/>
                         <a class="who" href="/account" title="Your account and two-step verification">{user}</a>
                         <button type="submit" class="link">"Sign out"</button>
                     </form>
+                    <p class="ver">{version}</p>
                 </header>
-                <main>
+                <main id="main">
                     {flash}
                     {body}
                 </main>
@@ -161,6 +182,76 @@ fn opt_time(now: OffsetDateTime, t: Option<OffsetDateTime>) -> impl IntoView {
         Some(t) => time_cell(now, t).into_any(),
         None => view! { <span class="muted">"—"</span> }.into_any(),
     }
+}
+
+/// A share in use, with its bar. Green below 75%, amber to 90%, red above.
+fn usage(percent: u8, label: String, detail: String) -> impl IntoView {
+    view! {
+        <div class="usage">
+            <span class="fig">{format!("{percent}%")}</span>
+            <meter min="0" max="100" low="75" high="90" optimum="0" value=percent.to_string() aria-label=label></meter>
+            <span class="muted small">{detail}</span>
+        </div>
+    }
+}
+
+/// Percent-encodes a query-string value.
+fn query_value(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The device list with these filters, in `sort` order.
+fn devices_href(f: &DeviceFilter, sort: &str) -> String {
+    let mut q = Vec::new();
+    if !f.q.is_empty() {
+        q.push(format!("q={}", query_value(&f.q)));
+    }
+    if let Some(o) = f.organization {
+        q.push(format!("org={o}"));
+    }
+    for (k, v) in [
+        ("tag", &f.tag),
+        ("connection", &f.connection),
+        ("status", &f.status),
+    ] {
+        if !v.is_empty() {
+            q.push(format!("{k}={}", query_value(v)));
+        }
+    }
+    if f.attention {
+        q.push("attention=1".into());
+    }
+    if !sort.is_empty() {
+        q.push(format!("sort={sort}"));
+    }
+    if q.is_empty() {
+        "/devices".into()
+    } else {
+        format!("/devices?{}", q.join("&"))
+    }
+}
+
+fn concern_badge(c: &Concern) -> impl IntoView {
+    let (class, label) = match c {
+        Concern::NeverConnected => ("badge neutral", "Never connected".to_string()),
+        Concern::LongOffline { days } => ("badge unknown", format!("Offline {days} d")),
+        Concern::DiskNearlyFull {
+            mount_point,
+            used_percent,
+        } => ("badge bad", format!("{mount_point} {used_percent}% full")),
+        Concern::StaleInventory { days } => ("badge unknown", format!("Inventory {days} d old")),
+        Concern::NoInventory { days } => {
+            ("badge unknown", format!("Connected {days} d, no inventory"))
+        }
+    };
+    view! { <li><span class=class>{label}</span></li> }
 }
 
 fn job_table(rows: Vec<JobRow>, now: OffsetDateTime, show_device: bool) -> impl IntoView {
@@ -262,15 +353,128 @@ pub fn overview_page(ctx: &PageCtx, o: Overview) -> String {
             </section>
         }
     });
+    // First run: until a device is enrolled, say what to do next instead of showing an empty console.
+    let setup = (o.devices_total == 0).then(|| {
+        if !ctx.can_enroll {
+            return view! { <p class="empty">"No devices are enrolled in your organizations yet. An administrator or technician enrolls them."</p> }.into_any();
+        }
+        let have_org = !o.organizations.is_empty();
+        let org_step = if have_org {
+            view! { <li class="done"><strong>"Create an organization"</strong><p class="muted">"Done. Every device belongs to one."</p></li> }.into_any()
+        } else if ctx.is_admin {
+            view! { <li><strong><a href="/organizations">"Create an organization"</a></strong><p class="muted">"Every device belongs to one: a customer, or your own company."</p></li> }.into_any()
+        } else {
+            view! { <li><strong>"Ask an administrator to create an organization and assign you to it"</strong></li> }.into_any()
+        };
+        let token_step = match o.organizations.first() {
+            Some(org) => {
+                let href = format!("/organizations/{}", org.id);
+                view! { <li><strong><a href=href>"Create an enrollment token"</a></strong><p class="muted">"On the organization's page. The token is shown once, with the commands to run."</p></li> }.into_any()
+            }
+            None => view! { <li><strong>"Create an enrollment token"</strong><p class="muted">"On the organization's page. The token is shown once, with the commands to run."</p></li> }.into_any(),
+        };
+        view! {
+            <section class="card">
+                <h2>"Enroll your first device"</h2>
+                <ol class="setup">
+                    {org_step}
+                    {token_step}
+                    <li><strong>"Run the agent on the device"</strong><p class="muted">"In an elevated PowerShell on the Windows device, run the commands shown with the token. The device appears under Devices as soon as it connects."</p></li>
+                </ol>
+            </section>
+        }
+        .into_any()
+    });
+    let device_attention = (o.devices_total > 0).then(|| {
+        let total = o.device_attention_total;
+        let partial = o.devices_truncated.then(|| view! { <p class="muted small">{format!("The fleet is larger than these figures cover: only the first {DEVICE_SCAN_LIMIT} devices by name were examined.")}</p> });
+        let content = if o.device_attention.is_empty() && o.devices_truncated {
+            // Not an all-clear: part of the fleet was not looked at.
+            view! { <p class="empty">"No concerns among the devices examined. The rest of the fleet was not examined."</p> }.into_any()
+        } else if o.device_attention.is_empty() {
+            view! { <p class="empty">"Nothing to report: every device has been heard from within a week, none reports a nearly full disk, and every connected device has sent inventory lately."</p> }.into_any()
+        } else {
+            let rows = o
+                .device_attention
+                .iter()
+                .map(|a| {
+                    let href = format!("/devices/{}", a.device.id);
+                    let reasons = a.concerns.iter().map(concern_badge).collect_view();
+                    let reported = match &a.device.health {
+                        Some(h) => time_cell(now, h.collected_at).into_any(),
+                        None => view! { <span class="muted">"no inventory"</span> }.into_any(),
+                    };
+                    view! {
+                        <tr>
+                            <td data-label="Device"><a href=href><strong>{a.device.name().to_string()}</strong></a><div class="muted small">{a.device.organization.name.clone()}</div></td>
+                            <td data-label="Why"><ul class="reasons">{reasons}</ul></td>
+                            <td data-label="Inventory from">{reported}</td>
+                        </tr>
+                    }
+                })
+                .collect_view();
+            let more = (total > o.device_attention.len() as i64).then(|| {
+                view! { <p><a href="/devices?attention=1">{format!("All {total} devices needing attention →")}</a></p> }
+            });
+            view! {
+                <table class="list">
+                    <thead><tr><th scope="col">"Device"</th><th scope="col">"Why"</th><th scope="col">"Inventory from"</th></tr></thead>
+                    <tbody>{rows}</tbody>
+                </table>
+                {more}
+            }
+            .into_any()
+        };
+        // Out of every active device, not only those on the versions listed.
+        let known = o.devices_total;
+        let versions = o
+            .agent_versions
+            .iter()
+            .map(|(v, n)| {
+                let label = v.clone().unwrap_or_else(|| "not reported".into());
+                let aria = format!("{n} of {known} devices on {label}");
+                view! {
+                    <li>
+                        <span class="mono">{label}</span>
+                        <meter min="0" max=known.to_string() value=n.to_string() aria-label=aria></meter>
+                        <span class="fig">{*n}</span>
+                    </li>
+                }
+            })
+            .collect_view();
+        view! {
+            <div class="grid">
+                <section class="card">
+                    <h2>"Devices needing attention"</h2>
+                    <p class="muted">{format!("Not heard from for {OFFLINE_ATTENTION_DAYS} days or more, never connected, a fixed disk at {DISK_NEARLY_FULL_PERCENT}% or more, or connected with no inventory received for {STALE_INVENTORY_DAYS} days. Disk figures are what each device last reported, not live.")}</p>
+                    {partial}
+                    {content}
+                </section>
+                <section class="card">
+                    <h2>"Agent versions"</h2>
+                    <p class="muted">{format!("What each active device reported when it last connected, however long ago that was. This server is {}.", ctx.version)}</p>
+                    <ul class="bars">{versions}</ul>
+                </section>
+            </div>
+        }
+    });
+    let attention_class = if o.device_attention_total > 0 {
+        "tile unknown"
+    } else {
+        "tile"
+    };
     let body = view! {
         <h1>"Overview"</h1>
+        {setup}
         <div class="tiles">
             <a class="tile" href="/devices?connection=connected"><span class="num">{o.devices_connected}</span>" of "{o.devices_total}" devices connected now"</a>
+            <a class=attention_class href="/devices?attention=1"><span class="num">{o.device_attention_total}</span>" devices need attention"</a>
             <a class="tile" href="/jobs?state=running"><span class="num">{o.jobs_in_flight}</span>" queued or running"</a>
             <a class="tile" href="/jobs?state=completed"><span class="num">{o.jobs_succeeded_24h}</span>" verified successes (24 h)"</a>
             <a class="tile bad" href="/jobs?state=failed"><span class="num">{o.jobs_failed_24h}</span>" failed (24 h)"</a>
             <a class="tile unknown" href="/jobs?state=outcome_unknown"><span class="num">{o.jobs_unknown}</span>" outcome unknown"</a>
         </div>
+        {device_attention}
         {attention}
         <section>
             <h2>"Recent jobs"</h2>
@@ -304,6 +508,18 @@ pub fn devices_page(
             view! { <option value=o.id.to_string() selected=selected>{o.name}</option> }
         })
         .collect_view();
+    // Also in the column headings, which a narrow screen does not show.
+    let sort_options = [
+        ("", "By name"),
+        ("seen", "Longest silent first"),
+        ("disk", "Fullest disk first"),
+    ]
+    .into_iter()
+    .map(|(v, l)| {
+        let selected = filter.sort == v;
+        view! { <option value=v selected=selected>{l}</option> }
+    })
+    .collect_view();
     let conn_options = [
         ("", "Any connection"),
         ("connected", "Connected now"),
@@ -351,33 +567,67 @@ pub fn devices_page(
                 let check = pick.then(|| view! {
                     <td class="pick"><input type="checkbox" name="device" value=d.id.to_string() aria-label=label/></td>
                 });
+                let dash = || view! { <span class="muted">"—"</span> }.into_any();
+                let disk = match d.health.as_ref().and_then(|h| h.fullest_disk.as_ref()) {
+                    Some(k) => usage(
+                        k.used_percent(),
+                        format!("{} used", k.mount_point),
+                        format!("{} · {} free", k.mount_point, fmt::bytes(k.available_bytes)),
+                    )
+                    .into_any(),
+                    None => dash(),
+                };
+                let memory = match &d.health {
+                    Some(h) if h.memory_total_bytes > 0 => usage(
+                        h.memory_used_percent(),
+                        "Memory used".into(),
+                        format!("{} free of {}", fmt::bytes(h.memory_available_bytes), fmt::bytes(h.memory_total_bytes)),
+                    )
+                    .into_any(),
+                    _ => dash(),
+                };
+                // Device-reported figures always say how old they are.
+                let reported = d.health.as_ref().map(|h| {
+                    view! { <div class="muted small">"reported "{time_cell(now, h.collected_at)}</div> }
+                });
                 view! {
                     <tr>
                         {check}
                         <td data-label="Device"><a href=href><strong>{d.name().to_string()}</strong></a>{retired}{host}{tag_chips(&d.tags)}</td>
                         <td data-label="Organization">{d.organization.name.clone()}{d.site.clone().map(|s| format!(" / {s}"))}</td>
                         <td data-label="Connection">{connection_badge(&d.connection, now)}</td>
-                        <td data-label="OS">{d.os.clone().unwrap_or_else(|| "—".into())}</td>
-                        <td data-label="Agent" class="mono">{d.agent_version.clone().unwrap_or_else(|| "—".into())}</td>
+                        <td data-label="Fullest disk">{disk}</td>
+                        <td data-label="Memory">{memory}</td>
+                        <td data-label="System">{d.os.clone().unwrap_or_else(|| "—".into())}<div class="muted small mono">{d.agent_version.clone().map(|v| format!("agent {v}")).unwrap_or_else(|| "agent —".into())}</div>{reported}</td>
                     </tr>
                 }
             })
             .collect_view();
         let pick_head = pick
             .then(|| view! { <th scope="col" class="pick"><span class="sr">"Select"</span></th> });
+        // The three orders, as links in the headings they sort by.
+        let sorted = |sort: &'static str, dir: &'static str| (filter.sort == sort).then_some(dir);
         let table = view! {
             <table class="list">
-                <thead><tr>{pick_head}<th scope="col">"Device"</th><th scope="col">"Organization"</th><th scope="col">"Connection"</th><th scope="col">"OS"</th><th scope="col">"Agent"</th></tr></thead>
+                <thead><tr>
+                    {pick_head}
+                    <th scope="col" aria-sort=sorted("", "ascending")><a href=devices_href(&filter, "") title="Sort by name">"Device"</a></th>
+                    <th scope="col">"Organization"</th>
+                    <th scope="col" aria-sort=sorted("seen", "ascending")><a href=devices_href(&filter, "seen") title="Longest silent first">"Connection"</a></th>
+                    <th scope="col" aria-sort=sorted("disk", "descending")><a href=devices_href(&filter, "disk") title="Fullest first">"Fullest disk"</a></th>
+                    <th scope="col">"Memory"</th>
+                    <th scope="col">"System"</th>
+                </tr></thead>
                 <tbody>{body}</tbody>
             </table>
         };
         if pick {
             let tag_ops = ctx.can_manage_devices.then(|| view! {
                 <label>"Tag"<input type="text" name="tag" maxlength="40" placeholder="kiosk" pattern="[A-Za-z0-9][A-Za-z0-9._:\\-]*"/></label>
-                <button type="submit" name="op" value="tag-add">"Add tag"</button>
+                <button type="submit" name="op" value="tag-add" class="secondary">"Add tag"</button>
                 <button type="submit" name="op" value="tag-remove" class="link">"Remove tag"</button>
             });
-            let run = ctx.can_run.then(|| view! { <button type="submit" name="op" value="run">"Run a diagnostic…"</button> });
+            let run = ctx.can_run.then(|| view! { <button type="submit" name="op" value="run" class="secondary">"Run a diagnostic…"</button> });
             let retire = ctx.can_retire.then(|| view! { <button type="submit" name="op" value="retire" class="bad">"Retire…"</button> });
             let all_label = format!("All {count} shown");
             view! {
@@ -408,9 +658,11 @@ pub fn devices_page(
             <select name="tag" aria-label="Tag"><option value="">"Any tag"</option>{tag_options}</select>
             <select name="connection" aria-label="Connection">{conn_options}</select>
             <select name="status" aria-label="Status">{status_options}</select>
+            <label class="inline"><input type="checkbox" name="attention" value="1" checked=filter.attention/>"Needs attention"</label>
+            <select name="sort" aria-label="Order">{sort_options}</select>
             <button type="submit">"Filter"</button>
         </form>
-        <p class="muted">{format!("{count} device(s). Connection state is live; everything else is the last report the device sent.")}</p>
+        <p class="muted">{format!("{count} device(s). Connection state is live; disk, memory and system are what each device last reported, with its age.")}{(count >= DEVICE_PAGE_LIMIT).then(|| format!(" Only the first {DEVICE_PAGE_LIMIT} are shown: narrow the filters to see the rest."))}</p>
         {table}
     };
     shell("Devices", ctx, Nav::Devices, None, body)
@@ -446,14 +698,20 @@ fn inventory_section(inv: Option<InventoryView>, now: OffsetDateTime) -> impl In
             let pct = (used.saturating_mul(100))
                 .checked_div(d.total_bytes)
                 .unwrap_or(0);
-            let label = format!(
-                "{} ({}) — {} free of {} ({pct}% used)",
-                d.mount_point,
-                d.file_system,
+            let name = format!("{} ({})", d.mount_point, d.file_system);
+            let figures = format!(
+                "{} free of {} ({pct}% used)",
                 fmt::bytes(d.available_bytes),
                 fmt::bytes(d.total_bytes)
             );
-            view! { <li>{label}</li> }
+            let aria = format!("{} used", d.mount_point);
+            view! {
+                <li>
+                    <span>{name}</span>
+                    <meter min="0" max="100" low="75" high="90" optimum="0" value=pct.to_string() aria-label=aria></meter>
+                    <span>{figures}</span>
+                </li>
+            }
         })
         .collect_view();
     let nics = r
@@ -495,7 +753,7 @@ fn inventory_section(inv: Option<InventoryView>, now: OffsetDateTime) -> impl In
                 <dt>"CPU"</dt><dd>{r.hardware.cpu_model.clone().unwrap_or_else(|| "unknown".into())}{format!(" · {} logical cores", r.hardware.cpu_logical_cores)}</dd>
                 <dt>"Memory"</dt><dd>{format!("{} total, {} available", fmt::bytes(r.hardware.memory_total_bytes), fmt::bytes(r.hardware.memory_available_bytes))}</dd>
                 <dt>"Uptime"</dt><dd>{format!("{} (at collection)", fmt::duration_secs(r.uptime_secs))}</dd>
-                <dt>"Disks"</dt><dd><ul class="plain">{disks}</ul></dd>
+                <dt>"Disks"</dt><dd><ul class="plain disks">{disks}</ul></dd>
                 <dt>"Network"</dt><dd><ul class="plain">{nics}</ul></dd>
             </dl>
         </section>
@@ -568,9 +826,9 @@ fn run_forms(
     .into_any()
 }
 
-/// Name, tags, site and notes; and, for those allowed, moving and retiring.
+/// Name, tags, site and notes.
 fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
-    if !ctx.can_manage_devices && !ctx.can_retire {
+    if !ctx.can_manage_devices {
         return ().into_any();
     }
     let id = d.row.id;
@@ -586,20 +844,13 @@ fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
         view! {
             <form method="post" action=format!("/devices/{id}/edit") class="stack">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
-                <label>"Name (blank shows the hostname)"<input type="text" name="display_name" maxlength="200" value=d.row.display_name.clone().unwrap_or_default() placeholder=d.row.hostname.clone()/></label>
+                <div class="cols">
+                    <label>"Name (blank shows the hostname)"<input type="text" name="display_name" maxlength="200" value=d.row.display_name.clone().unwrap_or_default() placeholder=d.row.hostname.clone()/></label>
+                    <label>"Site"<select name="site"><option value="">"No site"</option>{site_options}</select></label>
+                </div>
                 <label>"Tags, separated by commas"<input type="text" name="tags" maxlength="900" value=d.row.tags.join(", ") placeholder="finance, kiosk"/></label>
-                <label>"Site"<select name="site"><option value="">"No site"</option>{site_options}</select></label>
-                <label>"Notes"<textarea name="notes" rows="4" maxlength="4000">{textarea_text(&d.notes)}</textarea></label>
+                <label>"Notes"<textarea name="notes" rows="3" maxlength="4000">{textarea_text(&d.notes)}</textarea></label>
                 <button type="submit">"Save"</button>
-            </form>
-        }
-    });
-    let retire = (ctx.can_retire && !d.row.retired).then(|| {
-        view! {
-            <form method="post" action=format!("/devices/{id}/retire") class="danger">
-                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
-                <label class="inline"><input type="checkbox" name="confirm" value="yes" required=true/>" Retire this device: revoke its credential, close its connection and hide it from the active list. Its history stays with this organization. Jobs not yet delivered expire; a job already running ends with an unknown outcome. To manage it again, or under another organization, enroll it again."</label>
-                <button type="submit" class="bad">"Retire device"</button>
             </form>
         }
     });
@@ -607,10 +858,63 @@ fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
         <section class="card">
             <h2>"Manage"</h2>
             {edit}
-            {retire}
         </section>
     }
     .into_any()
+}
+
+/// The device's last report at a glance: disks, memory, uptime and how old the report is.
+fn glance_section(d: &DeviceDetail, now: OffsetDateTime) -> Option<impl IntoView> {
+    let inv = d.inventory.as_ref()?;
+    let r = &inv.report;
+    let memory = (r.hardware.memory_total_bytes > 0).then(|| {
+        let pct = used_percent(
+            r.hardware.memory_total_bytes,
+            r.hardware.memory_available_bytes,
+        );
+        view! {
+            <div class="stat">
+                <span class="k">"Memory"</span>
+                <span class="v">{format!("{pct}% used")}</span>
+                <meter min="0" max="100" low="75" high="90" optimum="0" value=pct.to_string() aria-label="Memory used"></meter>
+                <span class="muted small">{format!("{} free of {}", fmt::bytes(r.hardware.memory_available_bytes), fmt::bytes(r.hardware.memory_total_bytes))}</span>
+            </div>
+        }
+    });
+    let disks = r
+        .disks
+        .iter()
+        .filter(|k| !k.removable && k.total_bytes > 0)
+        .take(4)
+        .map(|k| {
+            let pct = used_percent(k.total_bytes, k.available_bytes);
+            let aria = format!("{} used", k.mount_point);
+            view! {
+                <div class="stat">
+                    <span class="k">{format!("Disk {}", k.mount_point)}</span>
+                    <span class="v">{format!("{pct}% used")}</span>
+                    <meter min="0" max="100" low="75" high="90" optimum="0" value=pct.to_string() aria-label=aria></meter>
+                    <span class="muted small">{format!("{} free of {}", fmt::bytes(k.available_bytes), fmt::bytes(k.total_bytes))}</span>
+                </div>
+            }
+        })
+        .collect_view();
+    let os = [r.os.long_version.clone(), r.os.name.clone()]
+        .into_iter()
+        .flatten()
+        .next()
+        .unwrap_or_else(|| r.os.family.clone());
+    Some(view! {
+        <section class="card">
+            <div class="stats">
+                <div class="stat"><span class="k">"System"</span><span class="v">{os}</span><span class="muted small">{r.os.arch.clone()}</span></div>
+                {disks}
+                {memory}
+                <div class="stat"><span class="k">"Uptime"</span><span class="v">{fmt::duration_secs(r.uptime_secs)}</span><span class="muted small">"when reported"</span></div>
+            </div>
+            <p class="muted small">"Reported by the device "{time_cell(now, r.collected_at)}". Not live: run System information for current figures."</p>
+        </section>
+    })
 }
 
 pub fn bulk_confirm_page(ctx: &PageCtx, c: BulkConfirm) -> String {
@@ -725,6 +1029,26 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
             </form>
         }
     });
+    let retire = (ctx.can_retire && !d.row.retired).then(|| {
+        view! {
+            <form method="post" action=format!("/devices/{}/retire", d.row.id) class="danger">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label class="inline"><input type="checkbox" name="confirm" value="yes" required=true/>" Retire this device: revoke its credential, close its connection and hide it from the active list. Its history stays with this organization. Jobs not yet delivered expire; a job already running ends with an unknown outcome. To manage it again, or under another organization, enroll it again."</label>
+                <button type="submit" class="bad">"Retire device"</button>
+            </form>
+        }
+    });
+    // Both end the device's access for good, so they sit together, closed until asked for.
+    let danger = (revoke.is_some() || retire.is_some()).then(|| {
+        view! {
+            <details class="card dangerzone">
+                <summary>"Revoke or retire this device"</summary>
+                {revoke}
+                {retire}
+            </details>
+        }
+    });
+    let glance = glance_section(&d, now);
     let title = d.row.name().to_string();
     let manage = manage_section(ctx, &d);
     let tags = tag_chips(&d.row.tags);
@@ -745,6 +1069,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
         {retired_note}
         <p>{tags}</p>
+        {glance}
         <div class="grid">
             <section class="card">
                 <h2>"Identity"</h2>
@@ -759,12 +1084,9 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
                     <dt>"Device ID"</dt><dd class="mono">{d.row.id.to_string()}</dd>
                     {notes}
                 </dl>
-                {revoke}
             </section>
             {inventory_section(d.inventory.clone(), now)}
         </div>
-        {manage}
-        {fields_card(ctx, &d.fields, "device", d.row.id)}
         <section class="card">
             <h2>"Run a diagnostic"</h2>
             {run_forms(ctx, d.row.id, connected, d.row.retired)}
@@ -773,6 +1095,9 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
             <h2>"Job history"</h2>
             {job_table(d.recent_jobs.clone(), now, false)}
         </section>
+        {manage}
+        {fields_card(ctx, &d.fields, "device", d.row.id)}
+        {danger}
     };
     shell(&title, ctx, Nav::Devices, None, body)
 }
@@ -991,12 +1316,21 @@ pub fn organizations_page(ctx: &PageCtx, orgs: Vec<OrgSummary>) -> String {
 }
 
 fn revealed_box(r: RevealedSecret) -> impl IntoView {
+    let commands = r.commands.map(|c| {
+        view! {
+            <h3>"On the Windows device"</h3>
+            <p class="muted">"In an elevated PowerShell, in the folder holding "<span class="mono">"flyw8t-agent.exe"</span>" (from the "<a href="https://github.com/spilloid/flyw8t/releases" rel="noreferrer">"release downloads"</a>"; check it against SHA256SUMS). The token is already in the first command:"</p>
+            <pre class="output secret cmd">{c}</pre>
+            <p class="muted">"The first command registers the device and stores its key, the second installs the service, and the third prints the server and device ID the agent holds. Whether it is connected shows on the device's page here."</p>
+        }
+    });
     view! {
         <section class="card reveal" role="alert">
             <h2>{r.label}</h2>
             <p><strong>"Copy it now. It is shown once and only its hash is stored."</strong></p>
             <pre class="output secret">{r.secret}</pre>
             <p class="muted">{r.hint}</p>
+            {commands}
         </section>
     }
 }
@@ -1196,8 +1530,9 @@ pub fn fields_page(
         .map(|(v, l)| view! { <label class="inline"><input type="checkbox" name="scope" value=v/>{l}</label> })
         .collect_view();
     let body = view! {
-        <p class="crumbs"><a href="/admin">"Administration"</a>" / "</p>
-        <h1>"Custom fields"</h1>
+        <h1>"Administration"</h1>
+        {admin_tabs("/admin/fields")}
+        <h2>"Custom fields"</h2>
         <p class="lead">"Values scripts will read: set globally, per organization, per site or per device. The most specific value wins. Every change is kept."</p>
         {no_key}
         {missing_view}
@@ -1447,6 +1782,21 @@ pub fn audit_page(ctx: &PageCtx, rows: Vec<AuditRow>) -> String {
     shell("Audit", ctx, Nav::Audit, None, body)
 }
 
+/// The administration pages, as tabs.
+fn admin_tabs(active: &'static str) -> impl IntoView {
+    let tabs = [
+        ("/admin", "Users and API tokens"),
+        ("/admin/fields", "Custom fields"),
+    ]
+    .into_iter()
+    .map(|(href, label)| {
+        let current = (href == active).then_some("page");
+        view! { <a href=href aria-current=current>{label}</a> }
+    })
+    .collect_view();
+    view! { <nav class="tabs" aria-label="Administration">{tabs}</nav> }
+}
+
 pub fn admin_page(
     ctx: &PageCtx,
     users: Vec<UserRow>,
@@ -1498,7 +1848,7 @@ pub fn admin_page(
         .collect_view();
     let body = view! {
         <h1>"Administration"</h1>
-        <p><a href="/admin/fields">"Custom fields →"</a></p>
+        {admin_tabs("/admin")}
         {revealed.map(revealed_box)}
         <section>
             <h2>"Users"</h2>
@@ -1506,11 +1856,14 @@ pub fn admin_page(
                 <thead><tr><th scope="col">"User"</th><th scope="col">"Role"</th><th scope="col">"Organizations"</th><th scope="col">"Two-step"</th><th scope="col">"Sessions"</th></tr></thead>
                 <tbody>{user_rows}</tbody>
             </table>
-            <form method="post" action="/admin/users" class="card stack">
-                <h3>"Add user"</h3>
+            <details class="card">
+            <summary>"Add a user"</summary>
+            <form method="post" action="/admin/users" class="stack">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
-                <label>"Email"<input type="email" name="email" required=true/></label>
-                <label>"Name"<input type="text" name="display_name" required=true maxlength="200"/></label>
+                <div class="cols">
+                    <label>"Email"<input type="email" name="email" required=true/></label>
+                    <label>"Name"<input type="text" name="display_name" required=true maxlength="200"/></label>
+                </div>
                 <label>"Initial password (12+ characters)"<input type="password" name="password" required=true minlength="12" autocomplete="new-password"/></label>
                 <label>"Role"<select name="role">
                     <option value="technician">"Technician — view and run diagnostics in assigned organizations"</option>
@@ -1520,6 +1873,7 @@ pub fn admin_page(
                 <fieldset><legend>"Organizations (ignored for administrators)"</legend>{org_checks}</fieldset>
                 <button type="submit">"Create user"</button>
             </form>
+            </details>
         </section>
         <section>
             <h2>"API tokens"</h2>
@@ -2712,6 +3066,7 @@ mod tests {
             can_retire: true,
             can_view_scripts: true,
             flash: None,
+            version: "9.9.9",
         }
     }
 

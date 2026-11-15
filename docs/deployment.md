@@ -25,6 +25,25 @@ Agents refuse plaintext to any non-loopback host, and the server refuses to star
 
 For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pem`); it is stored in the agent's configuration and trusted alongside public roots.
 
+### The published image
+
+Each tagged release publishes the server as `ghcr.io/spilloid/flyw8t-server:<version>` (for example `:0.1.2`), built from `deploy/compose/Dockerfile`. The release notes give its digest; the image is not signed, so pin the digest (`ghcr.io/spilloid/flyw8t-server:0.1.2@sha256:…`) wherever a registry or a tag you do not control could otherwise change what runs. It listens on `0.0.0.0:8080`, runs as UID 10001, keeps nothing on disk, and needs only the variables below and a PostgreSQL database (18 is what the tests and the Compose file use). `flyw8t-server healthcheck` exits 0 when this server is ready, `flyw8t-server --version` prints the version, and `/readyz` answers 200 once the database is reachable and migrated.
+
+Of the script syntax checkers, only `bash` is in the image (it comes with the Debian base); `pwsh` and `python3` are not, so PowerShell and Python revisions say "not checked" while Bash ones are checked. Set `FLYW8T_SCRIPT_CHECKS=off` to check none.
+
+### Behind a proxy that signs people in
+
+A proxy that requires its own sign-in (Authentik, Authelia, oauth2-proxy, Cloudflare Access) in front of the console is a second lock, not a replacement: flyw8t still asks for its own password, second factor and passkeys. Agents and support participants are not people with an account at that proxy, so these paths must reach flyw8t without it:
+
+| Path | Who calls it | What protects it |
+|---|---|---|
+| `/api/agent/ws` | agents (enrollment and the live connection) | the enrollment token, then the device's Ed25519 key |
+| `/s`, `/s/…`, `/api/support/participant/ws`, `/api/support/helper/ws` | the person being helped, and the helper | the one-time invitation code or link, then consent |
+| `/static/…`, `/manifest.webmanifest`, `/favicon.ico` | the pages above | nothing secret is served |
+| `/api/v1/…` (only if an integration calls it from outside) | API clients | the API token |
+
+Everything else is the console and may sit behind the proxy. Keep `/metrics` off the public side altogether and scrape it from inside. Set `FLYW8T_TRUSTED_PROXIES` to the proxy's addresses, or every rate limit and audit entry will carry the proxy's address. The proxy must pass WebSocket upgrades and must not rewrite `Origin`: flyw8t refuses writes whose origin is not `FLYW8T_PUBLIC_URL`.
+
 ## Configuration
 
 | Variable | Required | Default | Meaning |

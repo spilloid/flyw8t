@@ -5,6 +5,7 @@
 3. Tag the merge commit and push the tag: `git tag -a vX.Y.Z -m "flyw8t X.Y.Z" <sha> && git push origin vX.Y.Z`.
 4. `.github/workflows/release.yml` builds `flyw8t-server` and `flyw8t-agent` for Windows (MSVC) and Linux (GNU), writes `SHA256SUMS`, and publishes a GitHub **pre-release** with that CHANGELOG section as its notes. It fails if the section is missing.
 5. Check the release page: every asset is present and the sums match a local `sha256sum`.
+6. The same workflow pushes the server image to `ghcr.io/spilloid/flyw8t-server:X.Y.Z` and appends its digest to the release notes. No `latest` tag is pushed: a deployment names the version it runs. A new package on GitHub starts **private**; make it public once (Packages → flyw8t-server → Package settings), or give deployments a pull credential. The image is not signed.
 
 Every release is a pre-release while `docs/threat-model.md` lists blocking open items. Do not describe a release as production-ready.
 

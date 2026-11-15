@@ -3,8 +3,14 @@ use tokio_util::sync::CancellationToken;
 fn main() -> anyhow::Result<()> {
     // `flyw8t-server healthcheck`: exit 0 if this host's server reports ready. Used by the
     // container HEALTHCHECK so the image needs no curl.
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        return healthcheck();
+    match std::env::args().nth(1).as_deref() {
+        Some("healthcheck") => return healthcheck(),
+        // Needs no configuration, so a release can check what an image holds before pushing it.
+        Some("--version") => {
+            println!("flyw8t-server {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
     }
     tokio::runtime::Runtime::new()?.block_on(run())
 }

@@ -5,6 +5,10 @@
   --muted: #5d6670;
   --line: #dde1e6;
   --accent: #2456c7;
+  /* Filled controls have their own colours, so link blue can be light in the dark theme without making buttons unreadable. */
+  --btn-bg: #2456c7; --btn-fg: #ffffff; --btn-hover: #1c459f;
+  --danger-bg: #b3261e; --danger-fg: #ffffff; --danger-hover: #8f1d17;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
   --good-bg: #e3f5e9; --good-fg: #11643a;
   --bad-bg: #fde8e8; --bad-fg: #a3191f;
   --unk-bg: #fff2d6; --unk-fg: #7a4d00;
@@ -16,6 +20,9 @@
   :root {
     --bg: #111418; --surface: #1a1e24; --text: #e6e9ed; --muted: #9aa4af; --line: #2c333b;
     --accent: #7ea6ff;
+    --btn-bg: #3565d6; --btn-fg: #ffffff; --btn-hover: #4a78e6;
+    --danger-bg: #c2362f; --danger-fg: #ffffff; --danger-hover: #d64840;
+    --shadow: none;
     --good-bg: #13321f; --good-fg: #7fdca2;
     --bad-bg: #3a1618; --bad-fg: #ff9a9e;
     --unk-bg: #3a2c0c; --unk-fg: #ffcf73;
@@ -28,7 +35,7 @@ html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 a { color: var(--accent); }
 a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-h1 { font-size: 1.5rem; margin: 0.2rem 0 1rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 1.5rem; line-height: 1.25; margin: 0.2rem 0 1rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; letter-spacing: -0.01em; }
 h2 { font-size: 1.1rem; margin: 1.4rem 0 0.6rem; }
 .card h2 { margin-top: 0; }
 h3 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
@@ -37,27 +44,62 @@ h3 { font-size: 0.95rem; margin: 1rem 0 0.4rem; }
 .mono { font-family: var(--mono); font-size: 0.88em; }
 .lead { font-size: 1.05rem; }
 .empty { color: var(--muted); padding: 1rem; border: 1px dashed var(--line); border-radius: 8px; }
+.empty a { font-weight: 600; }
 
+/* The frame. Narrow screens: a bar across the top, with the navigation scrolling sideways on a phone. Wide screens
+   (the media query below): the same header becomes a fixed column on the left. One element, no script. */
+.skip { position: absolute; left: -999px; top: 0; background: var(--surface); padding: 0.5rem 0.8rem; z-index: 10; }
+.skip:focus { left: 0.5rem; top: 0.5rem; }
 .top { display: flex; align-items: center; gap: 1rem; padding: 0.6rem 1rem; background: var(--surface); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-.brand { font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text); letter-spacing: 0.02em; }
+.brand { font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text); letter-spacing: 0.02em; display: inline-flex; align-items: center; gap: 0.5rem; }
+.brand img { width: 1.5rem; height: 1.5rem; border-radius: 5px; }
 .top nav { display: flex; gap: 0.2rem; flex-wrap: wrap; flex: 1; }
+.navgroup { display: contents; }
+.navlabel { display: none; }
 .top nav a { padding: 0.35rem 0.6rem; border-radius: 6px; text-decoration: none; color: var(--text); }
 .top nav a[aria-current="page"] { background: var(--busy-bg); color: var(--busy-fg); font-weight: 600; }
 .top nav a:hover { background: var(--neutral-bg); }
 .logout { display: flex; gap: 0.5rem; align-items: center; margin: 0; }
 .who { color: var(--muted); font-size: 0.85rem; }
+.ver { display: none; }
 main { max-width: 1180px; margin: 0 auto; padding: 1rem; }
 .crumbs { margin: 0; font-size: 0.85rem; }
 
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; margin-bottom: 1rem; min-width: 0; }
+@media (min-width: 960px) {
+  body.app { display: grid; grid-template-columns: 14.5rem minmax(0, 1fr); align-items: start; }
+  body.app > .top { position: sticky; top: 0; height: 100vh; overflow-y: auto; flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0.4rem; padding: 1rem 0.75rem; border-bottom: none; border-right: 1px solid var(--line); }
+  body.app .brand { padding: 0.2rem 0.5rem 0.8rem; font-size: 1.2rem; }
+  body.app .top nav { flex-direction: column; flex-wrap: nowrap; gap: 0.1rem; flex: 1; }
+  body.app .navgroup { display: flex; flex-direction: column; gap: 0.1rem; margin-bottom: 0.9rem; }
+  body.app .navlabel { display: block; padding: 0 0.6rem 0.25rem; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+  body.app .top nav a { padding: 0.4rem 0.6rem; }
+  body.app .logout { flex-direction: column; align-items: flex-start; gap: 0.1rem; padding: 0.7rem 0.5rem 0; border-top: 1px solid var(--line); }
+  body.app .logout button.link { padding-left: 0; }
+  body.app .who { overflow-wrap: anywhere; }
+  body.app .ver { display: block; margin: 0.4rem 0 0; padding: 0 0.5rem; font-size: 0.72rem; color: var(--muted); }
+  body.app > main { width: 100%; padding: 1.4rem 2rem 3rem; }
+}
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; margin-bottom: 1rem; min-width: 0; box-shadow: var(--shadow); }
 .narrow { max-width: 420px; margin: 8vh auto; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 1rem; }
 .stack { display: flex; flex-direction: column; gap: 0.7rem; }
 label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; color: var(--muted); }
 label.inline { flex-direction: row; align-items: center; gap: 0.4rem; color: var(--text); }
 input, select, button { font: inherit; padding: 0.45rem 0.6rem; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); max-width: 100%; }
-button { background: var(--accent); color: #fff; border-color: transparent; cursor: pointer; font-weight: 600; }
-button.bad { background: var(--bad-fg); }
+input:hover, select:hover, textarea:hover { border-color: var(--muted); }
+button { background: var(--btn-bg); color: var(--btn-fg); border-color: transparent; cursor: pointer; font-weight: 600; }
+button:hover { background: var(--btn-hover); }
+/* The second choice beside a primary button, and actions that are not the point of the page. */
+button.secondary, a.button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
+button.secondary:hover, a.button.secondary:hover { background: var(--neutral-bg); }
+button.bad { background: var(--danger-bg); color: var(--danger-fg); }
+button.bad:hover { background: var(--danger-hover); }
+button.link:hover { background: none; }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+/* Forms read better at a line's width than stretched across a wide card. */
+form.stack { max-width: 36rem; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 0.7rem 1rem; }
 button.link { background: none; color: var(--accent); padding: 0.1rem 0.3rem; font-weight: 400; text-decoration: underline; }
 fieldset { border: 1px solid var(--line); border-radius: 6px; display: flex; flex-wrap: wrap; gap: 0.6rem; }
 .inline-form { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; margin: 0.4rem 0; }
@@ -83,7 +125,8 @@ fieldset { border: 1px solid var(--line); border-radius: 6px; display: flex; fle
 .flash.bad { background: var(--bad-bg); color: var(--bad-fg); }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 0.8rem; margin-bottom: 1rem; }
-.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem; text-decoration: none; color: var(--muted); }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem; text-decoration: none; color: var(--muted); box-shadow: var(--shadow); }
+a.tile:hover { border-color: var(--accent); }
 .tile .num { display: block; font-size: 1.8rem; font-weight: 700; color: var(--text); }
 .tile.bad .num { color: var(--bad-fg); }
 .tile.unknown .num { color: var(--unk-fg); }
@@ -92,6 +135,11 @@ table.list { width: 100%; border-collapse: collapse; background: var(--surface);
 table.list th, table.list td { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
 table.list th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); background: var(--bg); }
 table.list tr:last-child td { border-bottom: none; }
+table.list tbody tr:hover { background: color-mix(in srgb, var(--neutral-bg) 45%, transparent); }
+table.list th a { color: inherit; text-decoration: none; }
+table.list th a:hover { text-decoration: underline; }
+table.list th[aria-sort="ascending"] a::after { content: " \25B4"; }
+table.list th[aria-sort="descending"] a::after { content: " \25BE"; }
 dl.facts { display: grid; grid-template-columns: minmax(110px, max-content) 1fr; gap: 0.35rem 1rem; margin: 0; }
 dl.facts.card { margin-bottom: 1rem; }
 dl.facts dt { color: var(--muted); }
@@ -122,7 +170,8 @@ ol.timeline time { color: var(--muted); font-size: 0.82rem; }
 }
 
 .code-big { font-family: var(--mono); font-size: 2.2rem; font-weight: 700; letter-spacing: 0.08em; margin: 0.4rem 0; }
-a.button { display: inline-block; background: var(--accent); color: #fff; padding: 0.45rem 0.9rem; border-radius: 6px; text-decoration: none; font-weight: 600; }
+a.button { display: inline-block; background: var(--btn-bg); color: var(--btn-fg); padding: 0.45rem 0.9rem; border-radius: 6px; text-decoration: none; font-weight: 600; }
+a.button:hover { background: var(--btn-hover); }
 .sas { border-color: var(--unk-fg); }
 .sas #sas { font-size: 1.4rem; font-weight: 700; letter-spacing: 0.1em; }
 #remote { width: 100%; max-height: 75vh; background: #000; border-radius: 8px; }
@@ -158,3 +207,52 @@ table.diff tr.del td.t { background: var(--bad-bg); color: var(--bad-fg); }
 table.diff tr.fold td { color: var(--muted); font-style: italic; padding: 0.15rem 0.5rem; }
 ul.problems { padding-left: 1.2rem; margin: 0.4rem 0; }
 .hint { font-size: 0.8rem; color: var(--muted); }
+
+/* Console frame and fleet health (0.1.2) */
+.pagehead .sub, p.sub { margin: -0.6rem 0 1rem; color: var(--muted); }
+.tabs { display: flex; flex-wrap: wrap; gap: 0.2rem; margin: 0 0 1rem; border-bottom: 1px solid var(--line); }
+.tabs a { padding: 0.45rem 0.8rem; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs a:hover { color: var(--text); }
+.tabs a[aria-current="page"] { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+
+/* A device-reported amount with its bar. The bar is a <meter>: it needs no inline style, which the content security
+   policy refuses, and a screen reader reads it as a value. */
+meter { width: 100%; max-width: 8.5rem; height: 0.5rem; display: block; margin-top: 0.2rem; border: 0; background: var(--neutral-bg); border-radius: 999px; overflow: hidden; }
+meter::-webkit-meter-bar { background: var(--neutral-bg); border: 0; border-radius: 999px; height: 0.5rem; }
+meter::-webkit-meter-optimum-value { background: var(--good-fg); border-radius: 999px; }
+meter::-webkit-meter-suboptimum-value { background: var(--unk-fg); border-radius: 999px; }
+meter::-webkit-meter-even-less-good-value { background: var(--bad-fg); border-radius: 999px; }
+meter:-moz-meter-optimum::-moz-meter-bar { background: var(--good-fg); }
+meter:-moz-meter-sub-optimum::-moz-meter-bar { background: var(--unk-fg); }
+meter:-moz-meter-sub-sub-optimum::-moz-meter-bar { background: var(--bad-fg); }
+.usage { min-width: 7rem; }
+.usage .fig { font-variant-numeric: tabular-nums; }
+.usage .small { display: block; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 11.5rem), 1fr)); gap: 0.8rem 1.4rem; }
+.stat { min-width: 0; }
+.stat .k { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.stat .v { display: block; font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+.stat meter { max-width: none; }
+
+ol.setup { margin: 0; padding: 0; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 0.9rem; }
+ol.setup li { counter-increment: step; position: relative; padding-left: 2.4rem; min-height: 1.6rem; }
+ol.setup li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 1.6rem; height: 1.6rem; border-radius: 50%; background: var(--busy-bg); color: var(--busy-fg); font-weight: 700; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; }
+ol.setup li.done::before { content: "\2713"; background: var(--good-bg); color: var(--good-fg); }
+ol.setup p { margin: 0.1rem 0 0; }
+ul.reasons { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 0.3rem; }
+ul.bars { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: minmax(0, max-content) minmax(4rem, 1fr) max-content; gap: 0.3rem 0.7rem; align-items: center; }
+ul.bars li { display: contents; }
+ul.bars li > :first-child { min-width: 0; overflow-wrap: anywhere; }
+ul.bars meter { max-width: none; margin: 0; }
+/* One disk per line in a narrow column: the figures wrap under the name and never push the card wider. */
+ul.disks li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.1rem 0.6rem; }
+ul.disks meter { flex: 0 1 5rem; margin: 0; }
+
+details.card > summary { cursor: pointer; font-weight: 600; }
+details.card[open] > summary { margin-bottom: 0.8rem; }
+details.card > summary::marker { color: var(--muted); }
+details.dangerzone { border-color: color-mix(in srgb, var(--bad-fg) 45%, var(--line)); }
+details.dangerzone > summary { color: var(--bad-fg); }
+details.dangerzone .danger:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+pre.cmd { white-space: pre; overflow-x: auto; overflow-wrap: normal; user-select: all; }
