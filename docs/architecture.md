@@ -4,6 +4,12 @@ flyw8t is a self-hosted RMM: a small Rust agent on each endpoint and one Rust co
 
 ## Shape
 
+Network operations now live in this same control plane (unreleased, ADR-0016): site-bound
+NetViz collectors report through `/probe/devices` and `/probe/heartbeat` using distinct
+hashed `fw8n_` keys. `network_assets` and bounded `network_observations` describe equipment
+without agent enrollment. The console offers a PortGlass prefill handoff; session trust
+and enforcement remain in PortGlass. See [network operations](network-operations.md).
+
 ```text
  Technician browser ──HTTPS──┐                         ┌── AnchorDesk / other integrations
   (server-rendered pages)    │                         │   (Bearer fw8_… tokens, /api/v1)

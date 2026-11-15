@@ -5,6 +5,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub use flyw8t_web::model::FamilyLink;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
@@ -45,6 +47,90 @@ pub struct Config {
     /// Check script syntax on save with the languages' own parsers, when installed (ADR-0014). `FLYW8T_SCRIPT_CHECKS=off`
     /// turns it off; every revision then says it was not checked.
     pub script_checks: bool,
+    /// Links to the operator's other products, shown in the console frame (`FLYW8T_FAMILY_LINKS`). Links only:
+    /// nothing is fetched from them and no sign-in is shared.
+    pub family_links: Vec<FamilyLink>,
+}
+
+/// `host`, `host:port` or `[v6]:port`, with no user name: what may follow `https://` in a family link.
+fn authority_ok(authority: &str) -> bool {
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((v6, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if v6.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        match after.strip_prefix(':') {
+            Some(port) => (None, Some(port)),
+            None if after.is_empty() => (None, None),
+            None => return false,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (Some(host), Some(port)),
+            None => (Some(authority), None),
+        }
+    };
+    let host_ok = host.is_none_or(|h| {
+        !h.is_empty()
+            && h.len() <= 253
+            && h.split('.').all(|label| {
+                !label.is_empty()
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+            // Browsers read a host whose last label is a number as an IPv4 address, and refuse it if it is not one.
+            && (!h
+                .rsplit('.')
+                .next()
+                .is_some_and(|last| last.chars().all(|c| c.is_ascii_digit()))
+                || h.parse::<std::net::Ipv4Addr>().is_ok())
+    });
+    let port_ok = port.is_none_or(|p| {
+        !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_digit())
+            && p.parse::<u16>().is_ok_and(|n| n > 0)
+    });
+    host_ok && port_ok
+}
+
+/// `Label=https://url, Label=https://url`: at most 8 links, each an absolute http(s) URL.
+pub fn parse_family_links(raw: &str) -> Result<Vec<FamilyLink>> {
+    let mut out = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let (label, url) = entry
+            .split_once('=')
+            .with_context(|| format!("FLYW8T_FAMILY_LINKS: {entry:?} is not Label=URL"))?;
+        let (label, url) = (label.trim(), url.trim());
+        let count = label.chars().count();
+        if count == 0 || count > 40 || label.chars().any(char::is_control) {
+            bail!("FLYW8T_FAMILY_LINKS: the label in {entry:?} must be 1 to 40 characters");
+        }
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .with_context(|| {
+                format!("FLYW8T_FAMILY_LINKS: {url:?} must start with https:// or http://")
+            })?;
+        if !authority_ok(rest.split(['/', '?', '#']).next().unwrap_or(""))
+            || url.len() > 500
+            || url.chars().any(|c| {
+                c.is_control() || c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '\\')
+            })
+        {
+            bail!("FLYW8T_FAMILY_LINKS: {url:?} is not a usable URL");
+        }
+        out.push(FamilyLink {
+            label: label.to_string(),
+            url: url.to_string(),
+        });
+    }
+    if out.len() > 8 {
+        bail!("FLYW8T_FAMILY_LINKS: at most 8 links");
+    }
+    Ok(out)
 }
 
 impl Config {
@@ -120,6 +206,10 @@ impl Config {
                 Some("false") => false,
                 Some(other) => bail!("FLYW8T_REQUIRE_MFA must be true or false, not {other:?}"),
             },
+            family_links: match var("FLYW8T_FAMILY_LINKS") {
+                None => Vec::new(),
+                Some(v) => parse_family_links(&v)?,
+            },
             ..Self::defaults()
         };
         cfg.validate()?;
@@ -148,6 +238,7 @@ impl Config {
             client_ip_header: "cf-connecting-ip".into(),
             field_key: None,
             script_checks: true,
+            family_links: Vec::new(),
         }
     }
 
@@ -209,5 +300,71 @@ mod tests {
         assert!(with_url("http://localhost.example.com").validate().is_err());
         assert!(!with_url("http://localhost:8080").secure_cookies());
         assert!(with_url("https://x").secure_cookies());
+    }
+
+    #[test]
+    fn family_links_are_labelled_absolute_web_addresses() {
+        let links = parse_family_links(
+            " AnchorDesk = https://desk.example.com/ , PortGlass=http://localhost:7443/a?b=c ",
+        )
+        .unwrap();
+        assert_eq!(
+            links,
+            vec![
+                FamilyLink {
+                    label: "AnchorDesk".into(),
+                    url: "https://desk.example.com/".into()
+                },
+                FamilyLink {
+                    label: "PortGlass".into(),
+                    url: "http://localhost:7443/a?b=c".into()
+                },
+            ]
+        );
+        assert!(parse_family_links("").unwrap().is_empty());
+        for good in [
+            "A=https://desk.example.com",
+            "A=https://desk.example.com:8443/path?q=1#top",
+            "A=http://[::1]:7443/",
+            "A=https://[2001:db8::1]",
+            "A=http://192.168.1.10:8080",
+            "A=https://desk",
+        ] {
+            assert!(parse_family_links(good).is_ok(), "{good:?} was refused");
+        }
+        for bad in [
+            "AnchorDesk",
+            "=https://desk.example.com",
+            "Desk=javascript:alert(1)",
+            "Desk=//desk.example.com",
+            "Desk=https://",
+            "Desk=https:///path",
+            "Desk=https://desk.example.com/\"onmouseover=x",
+            "Desk=https://desk.example.com/ two",
+            "Desk=data:text/html,x",
+            "Desk=desk.example.com:8080",
+            "Desk=mailto:8080",
+            "Desk=https://[",
+            "Desk=https://[::1",
+            "Desk=https://[zz]/",
+            "Desk=https://desk.example:banana",
+            "Desk=https://desk.example:0",
+            "Desk=https://desk.example:65536",
+            "Desk=https://desk.example:",
+            "Desk=https://user@desk.example/",
+            "Desk=https://desk..example/",
+            "Desk=https://-desk.example/",
+            "Desk=https://desk_one.example/",
+            "Desk=https://999.999.999.999/",
+            "Desk=https://desk.123/",
+            "Desk=https://1.2.3/",
+        ] {
+            assert!(parse_family_links(bad).is_err(), "{bad:?} was accepted");
+        }
+        let nine = (0..9)
+            .map(|i| format!("P{i}=https://p{i}.example.com"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_family_links(&nine).is_err());
     }
 }

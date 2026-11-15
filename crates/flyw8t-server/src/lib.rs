@@ -21,6 +21,7 @@ pub mod gateway;
 pub mod jobs;
 pub mod metrics;
 pub mod mfa;
+pub mod network;
 pub mod passkeys;
 pub mod queries;
 pub mod ratelimit;
@@ -31,6 +32,7 @@ pub mod scripts;
 pub mod sessions;
 pub mod support;
 pub mod totp;
+pub mod users;
 pub mod web;
 
 use anyhow::Context;
@@ -90,6 +92,9 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         started_unix: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
         bodies: BodyGate::default(),
     });
+    // The frame's product links are the process's configuration, like its version: the first server started in a
+    // process sets them.
+    let _ = web::FAMILY.set(state.config.family_links.clone());
     bootstrap_admin(&state).await?;
     Ok(state)
 }
@@ -138,6 +143,7 @@ pub fn router(state: Shared) -> Router {
             get(passkeys::sign_in_form).post(passkeys::sign_in),
         )
         .route("/account", get(mfa::account))
+        .route("/account/password", post(users::change_password))
         .route("/account/mfa", get(mfa::setup_form).post(mfa::setup))
         .route("/account/mfa/recovery-codes", post(mfa::regenerate_codes))
         .route("/account/mfa/disable", post(mfa::disable))
@@ -152,6 +158,21 @@ pub fn router(state: Shared) -> Router {
         .route("/sudo", get(passkeys::sudo_form).post(passkeys::sudo))
         .route("/", get(web::overview))
         .route("/devices", get(web::devices))
+        .route("/network", get(network::workspace))
+        .route("/network/assets/{id}", get(network::detail))
+        .route("/network/assets/{id}/open", post(network::open_interface))
+        .route("/sites/{id}/network-collectors", post(network::register))
+        .route("/network/collectors/{id}", get(network::collector_page))
+        .route(
+            "/network/collectors/{id}/access",
+            post(network::configure_access),
+        )
+        .route("/network/collectors/{id}/revoke", post(network::revoke))
+        .route(
+            "/probe/devices",
+            post(network::ingest).layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .route("/probe/heartbeat", post(network::heartbeat))
         .route("/devices/{id}", get(web::device))
         .route("/devices/{id}/jobs", post(web::run_job))
         .route("/devices/{id}/revoke", post(web::revoke_device))
@@ -191,6 +212,8 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/organizations/{id}", get(web::organization))
         .route("/organizations/{id}/sites", post(web::add_site))
+        .route("/organizations/{id}/rename", post(web::rename_org))
+        .route("/sites/{id}/rename", post(web::rename_site))
         .route("/sites/{id}", get(web::site))
         .route(
             "/organizations/{id}/enrollment-tokens",
@@ -201,8 +224,17 @@ pub fn router(state: Shared) -> Router {
             post(web::revoke_enrollment_token),
         )
         .route("/audit", get(web::audit))
+        .route("/audit.csv", get(web::audit_csv))
         .route("/admin", get(web::admin))
         .route("/admin/users", post(web::create_user))
+        .route("/admin/users/{id}", get(users::user_page))
+        .route("/admin/users/{id}/edit", post(users::edit))
+        .route("/admin/users/{id}/disable", post(users::disable))
+        .route("/admin/users/{id}/enable", post(users::enable))
+        .route(
+            "/admin/users/{id}/password",
+            post(users::temporary_password),
+        )
         .route("/admin/users/{id}/mfa/reset", post(mfa::admin_reset))
         .route("/admin/users/{id}/sign-out", post(sessions::admin_sign_out))
         .route("/admin/tokens", post(web::create_api_token))
@@ -361,7 +393,7 @@ pub const BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30
 /// Bodies being received at once, server-wide and from one address.
 pub const BODIES_IN_FLIGHT: usize = 256;
 pub const BODIES_PER_ADDRESS: u32 = 16;
-/// The body size every route accepts, and the script editor's larger one (as its route's `DefaultBodyLimit` says).
+/// Ordinary and script-editor body budgets. NetViz batches have a separate 1 MiB route budget.
 const BODY_LIMIT: usize = 256 * 1024;
 const SCRIPT_BODY_LIMIT: usize = 1536 * 1024;
 
@@ -445,6 +477,8 @@ async fn whole_body(State(state): State<Shared>, req: Request, next: Next) -> Re
     };
     let limit = if is_script_save(req.uri().path()) {
         SCRIPT_BODY_LIMIT
+    } else if req.uri().path() == "/probe/devices" {
+        1024 * 1024
     } else {
         BODY_LIMIT
     };

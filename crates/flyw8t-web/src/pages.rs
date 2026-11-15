@@ -10,6 +10,7 @@ use time::{Duration, OffsetDateTime};
 pub enum Nav {
     Overview,
     Devices,
+    Network,
     Organizations,
     Jobs,
     Scripts,
@@ -53,7 +54,7 @@ fn head(title: String, refresh: Option<u32>, script: Option<&'static str>) -> im
     }
 }
 
-fn shell(
+pub(crate) fn shell(
     title: &str,
     ctx: &PageCtx,
     active: Nav,
@@ -87,6 +88,7 @@ fn shell_with(
             vec![
                 (Nav::Overview, "/", "Overview"),
                 (Nav::Devices, "/devices", "Devices"),
+                (Nav::Network, "/network", "Network"),
                 (Nav::Organizations, "/organizations", "Organizations"),
             ],
         ),
@@ -101,6 +103,14 @@ fn shell_with(
             ],
         ));
     }
+    let family = (!ctx.family.is_empty()).then(|| {
+        let links = ctx
+            .family
+            .iter()
+            .map(|l| view! { <a href=l.url.clone() rel="noopener noreferrer" class="family">{l.label.clone()}</a> })
+            .collect_view();
+        view! { <div class="navgroup"><span class="navlabel">"Products"</span>{links}</div> }
+    });
     let nav = groups
         .into_iter()
         .map(|(group, items)| {
@@ -128,7 +138,7 @@ fn shell_with(
                 <a class="skip" href="#main">"Skip to content"</a>
                 <header class="top">
                     <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="24" height="24"/>"flyw8t"</a>
-                    <nav aria-label="Main">{nav}</nav>
+                    <nav aria-label="Main">{nav}{family}</nav>
                     <form class="logout" method="post" action="/logout">
                         <input type="hidden" name="csrf" value=csrf/>
                         <a class="who" href="/account" title="Your account and two-step verification">{user}</a>
@@ -173,7 +183,7 @@ fn connection_badge(c: &Connection, now: OffsetDateTime) -> impl IntoView {
     }
 }
 
-fn time_cell(now: OffsetDateTime, t: OffsetDateTime) -> impl IntoView {
+pub(crate) fn time_cell(now: OffsetDateTime, t: OffsetDateTime) -> impl IntoView {
     view! { <time datetime=fmt::iso(t) title=fmt::timestamp(t)>{fmt::ago(now, t)}</time> }
 }
 
@@ -196,7 +206,7 @@ fn usage(percent: u8, label: String, detail: String) -> impl IntoView {
 }
 
 /// Percent-encodes a query-string value.
-fn query_value(s: &str) -> String {
+pub(crate) fn query_value(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
@@ -1102,13 +1112,52 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     shell(&title, ctx, Nav::Devices, None, body)
 }
 
-pub fn jobs_page(
-    ctx: &PageCtx,
-    rows: Vec<JobRow>,
-    state: Option<ExecState>,
-    batch: Option<BatchSummary>,
-) -> String {
+/// What the jobs list is narrowed to, and which page of it this is.
+#[derive(Debug, Clone, Default)]
+pub struct JobsView {
+    pub state: Option<ExecState>,
+    /// A catalog action's name, or empty.
+    pub action: String,
+    pub batch: Option<BatchSummary>,
+    /// From 1.
+    pub page: u32,
+    /// Older jobs exist beyond this page.
+    pub more: bool,
+}
+
+/// Jobs to a page.
+pub const JOBS_PAGE_SIZE: i64 = 100;
+
+fn jobs_href(v: &JobsView, page: u32) -> String {
+    let mut parts = vec![format!("page={page}")];
+    if let Some(s) = v.state {
+        parts.push(format!("state={}", s.as_str()));
+    }
+    if !v.action.is_empty() {
+        parts.push(format!("action={}", query_value(&v.action)));
+    }
+    if let Some(b) = &v.batch {
+        parts.push(format!("batch={}", b.id));
+    }
+    format!("/jobs?{}", parts.join("&"))
+}
+
+pub fn jobs_page(ctx: &PageCtx, rows: Vec<JobRow>, v: JobsView) -> String {
     let now = ctx.now;
+    let state = v.state;
+    let previous = (v.page > 1)
+        .then(|| view! { <a class="button secondary" href=jobs_href(&v, v.page - 1)>"Newer"</a> });
+    let next = v
+        .more
+        .then(|| view! { <a class="button secondary" href=jobs_href(&v, v.page + 1)>"Older"</a> });
+    let paging = (v.page > 1 || v.more).then(|| view! {
+        <div class="pagination">{previous}<span class="small muted">{format!("Page {}", v.page)}</span>{next}</div>
+    });
+    let action_options = flyw8t_protocol::catalog::CATALOG
+        .iter()
+        .map(|a| view! { <option value=a.name selected={v.action == a.name}>{a.name}</option> })
+        .collect_view();
+    let batch = v.batch.clone();
     let options = ALL_STATES
         .into_iter()
         .map(|s| {
@@ -1142,9 +1191,11 @@ pub fn jobs_page(
         <form method="get" action="/jobs" class="filters">
             {batch_field}
             <select name="state" aria-label="Execution state"><option value="">"Any state"</option>{options}</select>
+            <select name="action" aria-label="Action"><option value="">"Any action"</option>{action_options}</select>
             <button type="submit">"Filter"</button>
         </form>
         {job_table(rows, now, true)}
+        {paging}
     };
     shell(&title, ctx, Nav::Jobs, refresh, body)
 }
@@ -1315,7 +1366,7 @@ pub fn organizations_page(ctx: &PageCtx, orgs: Vec<OrgSummary>) -> String {
     shell("Organizations", ctx, Nav::Organizations, None, body)
 }
 
-fn revealed_box(r: RevealedSecret) -> impl IntoView {
+pub(crate) fn revealed_box(r: RevealedSecret) -> impl IntoView {
     let commands = r.commands.map(|c| {
         view! {
             <h3>"On the Windows device"</h3>
@@ -1690,6 +1741,20 @@ pub fn organization_page(
         })
         .collect_view();
     let devices_href = format!("/devices?org={id}");
+    let rename = ctx.is_admin.then(|| {
+        let url = format!("/organizations/{id}/rename");
+        view! {
+            <details class="card">
+                <summary>"Rename this organization"</summary>
+                <form method="post" action=url class="inline-form">
+                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                    <label>"Name"<input type="text" name="name" required=true maxlength="200" value=org.name.clone()/></label>
+                    <button type="submit">"Rename"</button>
+                </form>
+                <p class="hint">"Devices, history and the audit trail keep their link to it; only the name shown changes."</p>
+            </details>
+        }
+    });
     let body = view! {
         <p class="crumbs"><a href="/organizations">"Organizations"</a>" / "</p>
         <h1>{org.name.clone()}</h1>
@@ -1708,6 +1773,7 @@ pub fn organization_page(
             </section>
         </div>
         {fields_card(ctx, &fields, "organization", id)}
+        {rename}
         <section>
             <h2>"Enrollment tokens"</h2>
             <table class="list">
@@ -1722,6 +1788,19 @@ pub fn organization_page(
 pub fn site_page(ctx: &PageCtx, site: SitePage, fields: Vec<ResolvedField>) -> String {
     let org_href = format!("/organizations/{}", site.organization.id);
     let none = site.devices.is_empty();
+    let rename = ctx.is_admin.then(|| {
+        let url = format!("/sites/{}/rename", site.id);
+        view! {
+            <details class="card">
+                <summary>"Rename this site"</summary>
+                <form method="post" action=url class="inline-form">
+                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                    <label>"Name"<input type="text" name="name" required=true maxlength="200" value=site.name.clone()/></label>
+                    <button type="submit">"Rename"</button>
+                </form>
+            </details>
+        }
+    });
     let devices = site
         .devices
         .iter()
@@ -1733,53 +1812,20 @@ pub fn site_page(ctx: &PageCtx, site: SitePage, fields: Vec<ResolvedField>) -> S
     let body = view! {
         <p class="crumbs"><a href="/organizations">"Organizations"</a>" / "<a href=org_href>{site.organization.name.clone()}</a>" / "</p>
         <h1>{site.name.clone()}</h1>
+        <a class="tile network-site-link" href=format!("/network?site={}",site.id)>
+            <strong>"Network operations"</strong>
+            <span>{format!("{} assets · {} collectors",site.network_assets,site.network_collectors)}</span>
+            <span class="small">"Inventory, discovery history and device access →"</span>
+        </a>
         <section class="card">
             <h2>"Devices"</h2>
             {none.then(|| view! { <p class="empty">"No devices in this site."</p> })}
             <ul class="plain">{devices}</ul>
         </section>
         {fields_card(ctx, &fields, "site", site.id)}
+        {rename}
     };
     shell(&site.name, ctx, Nav::Organizations, None, body)
-}
-
-pub fn audit_page(ctx: &PageCtx, rows: Vec<AuditRow>) -> String {
-    let now = ctx.now;
-    let body_rows = rows
-        .into_iter()
-        .map(|a| {
-            let class = match a.outcome.as_str() {
-                "success" => "badge good",
-                "denied" => "badge bad",
-                _ => "badge unknown",
-            };
-            let target = match (&a.target_type, a.target_id) {
-                (Some(t), Some(id)) => format!("{t} {}", fmt::short_id(id)),
-                (Some(t), None) => t.clone(),
-                _ => String::new(),
-            };
-            let detail = if a.detail.as_object().is_some_and(|o| o.is_empty()) { String::new() } else { a.detail.to_string() };
-            view! {
-                <tr>
-                    <td data-label="When">{time_cell(now, a.at)}</td>
-                    <td data-label="Actor">{a.actor_label.clone()}<span class="muted">{format!(" via {}", a.channel)}</span></td>
-                    <td data-label="Action" class="mono">{a.action.clone()}</td>
-                    <td data-label="Target" class="mono">{target}</td>
-                    <td data-label="Result"><span class=class>{a.outcome.clone()}</span></td>
-                    <td data-label="Detail" class="mono small">{a.organization.clone().map(|o| format!("[{o}] "))}{detail}</td>
-                </tr>
-            }
-        })
-        .collect_view();
-    let body = view! {
-        <h1>"Audit"</h1>
-        <p class="muted">"Append-only; the database rejects updates and deletes on this table. Newest 200 shown."</p>
-        <table class="list">
-            <thead><tr><th scope="col">"When"</th><th scope="col">"Actor"</th><th scope="col">"Action"</th><th scope="col">"Target"</th><th scope="col">"Result"</th><th scope="col">"Detail"</th></tr></thead>
-            <tbody>{body_rows}</tbody>
-        </table>
-    };
-    shell("Audit", ctx, Nav::Audit, None, body)
 }
 
 /// The administration pages, as tabs.
@@ -1810,8 +1856,8 @@ pub fn admin_page(
         .map(|u| {
             view! {
                 <tr>
-                    <td data-label="User">{u.display_name.clone()}<div class="muted">{u.email.clone()}</div></td>
-                    <td data-label="Role">{u.role.clone()}{u.disabled.then_some(" (disabled)")}</td>
+                    <td data-label="User"><a href=format!("/admin/users/{}", u.id)>{u.display_name.clone()}</a><div class="muted">{u.email.clone()}</div></td>
+                    <td data-label="Role">{u.role.clone()}{u.disabled.then(|| view! { " "<span class="badge bad">"Disabled"</span> })}</td>
                     <td data-label="Organizations">{if u.role == "admin" { "all".to_string() } else { u.organizations.join(", ") }}</td>
                     <td data-label="Two-step">{mfa_cell(&u, &ctx.csrf)}</td>
                     <td data-label="Sessions">{sessions_cell(&u, &ctx.csrf)}</td>
@@ -2455,6 +2501,7 @@ pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
             </form>
         }
     });
+    let password = crate::admin::password_card(ctx, a.password_temporary, a.password_changed_at);
     let body = view! {
         <h1>"Your account"</h1>
         <dl class="facts">
@@ -2470,6 +2517,7 @@ pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
             <h2>"Passkeys and security keys"</h2>
             {passkeys}
         </section>
+        {password}
         <section>
             <h2>"Where you are signed in"</h2>
             <p class="muted">"Browsers holding a session of yours. One you do not recognise means someone has your password: sign it out, then change your password."</p>
@@ -3067,7 +3115,144 @@ mod tests {
             can_view_scripts: true,
             flash: None,
             version: "9.9.9",
+            family: Vec::new(),
         }
+    }
+
+    fn first_page() -> JobsView {
+        JobsView {
+            page: 1,
+            ..Default::default()
+        }
+    }
+
+    fn user(role: &str) -> UserDetail {
+        UserDetail {
+            id: Uuid::nil(),
+            email: "pat@example.com".into(),
+            display_name: "Pat <img src=x>".into(),
+            role: role.into(),
+            disabled_at: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            organization_ids: vec![],
+            mfa: false,
+            passkeys: 0,
+            sessions: 0,
+            api_tokens: 0,
+            password_changed_at: None,
+            password_temporary: false,
+            is_self: false,
+            only_admin: false,
+        }
+    }
+
+    #[test]
+    fn a_users_page_offers_only_the_changes_that_can_be_made() {
+        let html = crate::admin::user_page(&ctx(), user("technician"), vec![], None);
+        assert!(!html.contains("<img src=x>"), "a name must be escaped");
+        assert!(html.contains("Pat &lt;img src=x&gt;"));
+        assert!(html.contains(r#"<select name="role""#));
+        assert!(html.contains("/disable"));
+        assert!(html.contains("/password"));
+        // Yourself: no role choice, no disabling, and your password is changed on your own page.
+        let mut me = user("admin");
+        me.is_self = true;
+        let html = crate::admin::user_page(&ctx(), me, vec![], None);
+        assert!(!html.contains(r#"<select name="role""#));
+        assert!(html.contains(r#"<input type="hidden" name="role" value="admin""#));
+        assert!(!html.contains("/disable"));
+        assert!(!html.contains("/password\""));
+        // The only administrator, seen by someone else: the role stays and the account cannot be disabled.
+        let mut last = user("admin");
+        last.only_admin = true;
+        let html = crate::admin::user_page(&ctx(), last, vec![], None);
+        assert!(!html.contains(r#"<select name="role""#));
+        assert!(!html.contains("/disable"));
+        // A disabled account is offered enabling, not disabling.
+        let mut off = user("readonly");
+        off.disabled_at = Some(OffsetDateTime::UNIX_EPOCH);
+        let html = crate::admin::user_page(&ctx(), off, vec![], None);
+        assert!(html.contains("/enable"));
+        assert!(!html.contains("/disable"));
+    }
+
+    #[test]
+    fn the_audit_page_escapes_what_devices_and_people_put_in_the_log() {
+        let row = AuditRow {
+            id: 7,
+            at: OffsetDateTime::UNIX_EPOCH,
+            actor_label: "<script>alert(1)</script>".into(),
+            channel: "agent".into(),
+            action: "device.connect".into(),
+            target_type: None,
+            target_id: None,
+            outcome: "success".into(),
+            organization: Some("<b>Org".into()),
+            detail: serde_json::json!({ "note": "</td><img src=x>" }),
+            client_ip: Some("203.0.113.9".into()),
+            credential: None,
+        };
+        let filter = AuditFilter {
+            actor: "\"><script>".into(),
+            action: "user.".into(),
+            ..Default::default()
+        };
+        let html = crate::admin::audit_page(
+            &ctx(),
+            AuditPage {
+                rows: vec![row],
+                filter,
+                older: Some(6),
+                organizations: vec![],
+            },
+        );
+        assert!(!html.contains("<script>alert"));
+        assert!(!html.contains("<img src=x>"));
+        assert!(!html.contains("<b>Org"));
+        assert!(!html.contains(r#"value=""><script>"#));
+        assert!(html.contains("203.0.113.9"));
+        // The filters travel with the export and the next page, percent-encoded.
+        assert!(html.contains("/audit.csv?actor=%22%3E%3Cscript%3E&amp;action=user."));
+        assert!(html.contains("/audit?actor=%22%3E%3Cscript%3E&amp;action=user.&amp;before=6"));
+    }
+
+    #[test]
+    fn configured_products_are_links_that_leave_the_console() {
+        let mut c = ctx();
+        assert!(!jobs_page(&c, vec![], first_page()).contains("Products"));
+        c.family = vec![FamilyLink {
+            label: "Desk <b>".into(),
+            url: "https://desk.example.com/?a=1&b=2".into(),
+        }];
+        let html = jobs_page(&c, vec![], first_page());
+        assert!(html.contains("Products"));
+        assert!(html.contains("Desk &lt;b&gt;"));
+        assert!(html
+            .contains(r#"href="https://desk.example.com/?a=1&amp;b=2" rel="noopener noreferrer""#));
+    }
+
+    #[test]
+    fn the_jobs_list_offers_the_pages_that_exist() {
+        let one = jobs_page(&ctx(), vec![], first_page());
+        assert!(!one.contains("pagination"), "one page needs no paging");
+        let v = JobsView {
+            page: 2,
+            more: true,
+            action: "net.ping".into(),
+            state: Some(ExecState::Failed),
+            batch: None,
+        };
+        let html = jobs_page(&ctx(), vec![], v);
+        assert!(html.contains("/jobs?page=1&amp;state=failed&amp;action=net.ping"));
+        assert!(html.contains("/jobs?page=3&amp;state=failed&amp;action=net.ping"));
+        assert!(html.contains("Page 2"));
+        let last = JobsView {
+            page: 3,
+            ..Default::default()
+        };
+        let html = jobs_page(&ctx(), vec![], last);
+        assert!(html.contains(">Newer<"));
+        assert!(!html.contains(">Older<"));
     }
 
     #[test]
@@ -3108,8 +3293,7 @@ mod tests {
         let html = jobs_page(
             &ctx(),
             vec![job(ExecState::Queued, Verification::Pending)],
-            None,
-            None,
+            first_page(),
         );
         assert!(
             !html.contains("<img src=x>"),
@@ -3125,16 +3309,14 @@ mod tests {
         let html = jobs_page(
             &ctx(),
             vec![job(ExecState::Completed, Verification::Failed)],
-            None,
-            None,
+            first_page(),
         );
         assert!(html.contains("Verification failed"));
         assert!(!html.contains(">Succeeded<"));
         let html = jobs_page(
             &ctx(),
             vec![job(ExecState::Dispatched, Verification::Pending)],
-            None,
-            None,
+            first_page(),
         );
         assert!(html.contains(">Sent<"));
     }
@@ -3143,7 +3325,7 @@ mod tests {
     fn readonly_users_get_no_admin_navigation() {
         let mut c = ctx();
         c.is_admin = false;
-        let html = jobs_page(&c, vec![], None, None);
+        let html = jobs_page(&c, vec![], first_page());
         assert!(!html.contains("href=\"/admin\""));
         assert!(!html.contains("href=\"/audit\""));
     }

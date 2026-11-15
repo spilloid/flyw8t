@@ -439,6 +439,73 @@ pub async fn promote_session(
     Ok(set_cookie(state, &secret, ttl.as_secs()))
 }
 
+/// Before a credential is issued in `p`'s name (an API token, an enrollment token, a collector key): hold the
+/// issuer's row and check, as of now, that the account is enabled, still has the role this request was authorized
+/// with, and (for an organization's credential) still belongs to that organization. An administrator disabling or
+/// changing the person holds the same row, so the two cannot overlap: either the credential exists when their change
+/// revokes what the person holds, or the person's authority is already gone here.
+///
+/// The session that made the request is re-checked too (`recheck_session`): being signed out everywhere, as a
+/// password replacement does, ends what a request already under way may do.
+pub async fn recheck_actor(
+    exec: &mut sqlx::PgConnection,
+    p: &Principal,
+    org: Option<Uuid>,
+    need_sudo: bool,
+) -> AppResult<()> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT u.role FROM users u WHERE u.id = $1 AND u.disabled_at IS NULL FOR SHARE OF u",
+    )
+    .bind(p.user_id)
+    .fetch_optional(&mut *exec)
+    .await?;
+    let Some((role,)) = row else {
+        return Err(AppError::Unauthorized);
+    };
+    if role != p.role.as_str() {
+        return Err(AppError::Forbidden);
+    }
+    // A statement of its own, after the lock is held: one that waited for the lock would still see the
+    // memberships as they were before it waited.
+    if let (false, Some(org)) = (p.role.is_global(), org) {
+        let (member,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS (SELECT 1 FROM user_organizations WHERE user_id = $1 AND organization_id = $2)",
+        )
+        .bind(p.user_id)
+        .bind(org)
+        .fetch_one(&mut *exec)
+        .await?;
+        if !member {
+            return Err(AppError::Forbidden);
+        }
+    }
+    recheck_session(exec, p, need_sudo).await
+}
+
+/// With the caller's user row already locked: the browser session that made this request must still be live, full
+/// and holding the secret it presented, and still in sudo mode when the change needs that. Locks the session row
+/// (always after the user row).
+pub async fn recheck_session(
+    exec: &mut sqlx::PgConnection,
+    p: &Principal,
+    need_sudo: bool,
+) -> AppResult<()> {
+    let session = p.session_id.ok_or(AppError::Unauthorized)?;
+    lock_session(exec, session, p.session_token.as_deref(), &[Stage::Full]).await?;
+    if need_sudo {
+        let (sudo,): (bool,) = sqlx::query_as(
+            "SELECT coalesce(sudo_until > now(), false) FROM sessions WHERE id = $1",
+        )
+        .bind(session)
+        .fetch_one(&mut *exec)
+        .await?;
+        if !sudo {
+            return Err(AppError::Forbidden);
+        }
+    }
+    Ok(())
+}
+
 /// Lock a user's row and read their current TOTP secret. Every change to a user's second
 /// factor, and every check of one, takes this lock first (then any session lock), so a check
 /// always sees the factor as it is now, never one replaced while the request was in flight.

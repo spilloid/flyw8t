@@ -2,6 +2,33 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## 0.1.3 — 2026-11-15 (pre-release)
+
+The administration console catches up with what an administrator has to do, and network operations arrive. **Not production-ready:** the 0.2.0 gates in `docs/roadmap.md` are still open. Single sign-on is not in this release.
+
+### Console
+- **Managing people.** Each user has a page (`/admin/users/{id}`, linked from the users table) where an administrator changes their name, role and organizations, disables or enables the account, and gives a temporary password. Until now a user could only be created: offboarding someone, or moving a technician to another customer, meant editing the database. Disabling signs the person out everywhere, revokes their API tokens and unspent enrollment tokens, and ends the support sessions they started; enabling restores sign-in only. A lowered role or a removed organization applies to their next page, ends the support sessions they started and revokes the enrollment tokens they issued under the authority they lost. A sign-in, a token being issued or an administrator's own change that is already under way when the person behind it is disabled, demoted or signed out is refused rather than slipping past: each re-checks the account and the session under the person's row lock. All of it needs sudo mode and is audited. Nobody can change their own role or disable themselves, and two administrators acting on each other at once cannot leave the console with no administrator: the second one finds, under the lock, that it is no longer an administrator's request.
+- **Passwords can be changed.** A person changes their own on the account page (current password required, 12 to 1024 characters, five attempts per five minutes); every other browser of theirs is signed out. An administrator can replace a lost password with a temporary one the server makes up and shows once; the person's account page then asks them to choose their own. Sign-in does not yet force that. Migration 0013.
+- **The audit log is searchable.** Filters for the actor, the action (or the start of one, such as `user.`), the result, the organization and a range of UTC days; 100 events to a page with an **Older events** link instead of only the newest 200; each event shows the address it came from. **Export as CSV** downloads the filtered events (newest first, at most 10,000 and never more than 32 MiB), with every cell quoted and a leading apostrophe on any cell that starts, after white space, with `=`, `+`, `-`, `@` or their full-width forms, so a spreadsheet reads it as text. That guard follows OWASP's advice and was not tried in a spreadsheet program. Each export is itself audited.
+- **The jobs list has pages** (100 jobs each, Newer and Older) and an action filter beside the state filter. It used to stop at the newest 500.
+- **Organizations and sites can be renamed** by an administrator, from their pages. Ids, devices, history and the audit trail are unaffected; the old and new names are audited.
+- **Links to your other products.** `FLYW8T_FAMILY_LINKS` (for example `AnchorDesk=https://desk.example.com`) adds a **Products** group to the navigation. Links only: no shared sign-in and no context passed.
+- The network workspace joins the navigation's Fleet group, and the 0.1.2 frame (sidebar, secondary and danger buttons) now uses the Material colour roles introduced with it.
+
+### Fixed
+- The account page told people to change their password when a session looked unfamiliar, and there was no way to do it.
+- The network equipment search treated `%` and `_` as wildcards.
+- Wrong collector keys were unlimited, each costing a database connection: an address now gets 30 in five minutes on `/probe/devices` and `/probe/heartbeat`; a working collector is not counted.
+- Issuing an API token, an enrollment token or a collector key now re-checks, under the issuer's row lock, that the issuer is still enabled, still holds the role and organization the request was authorized with, and is still signed in with the session that asked. Creating a user and starting a support session do the same.
+- Ending a person's support sessions (on sign-out everywhere, a second-factor reset, or the changes above) no longer depends on the database answering: the sessions their socket is on here are closed regardless, and the durable record is retried.
+- An unauthenticated caller could put an arbitrarily long name into the audit log through the sign-in form; it is now cut at 254 characters.
+- The real-NetViz-probe test failed the whole suite where no probe binary is present (as in CI); it now says it was skipped.
+
+### Added
+- Network operations in the RMM console: site-bound NetViz collector registration and revocation, a separate hashed collector credential, site-scoped agentless inventory, search and pagination, collected/received timestamps, stale-data labels and bounded observation history. Existing NetViz v1 pushes work without a wire change. Network assets do not create endpoint agents; overlapping site ranges stay separate and old observations cannot overwrite newer ones. Migration 0012.
+- PortGlass handoff from a network asset's discovered web ports, requiring fresh evidence and a configured probe fingerprint. The local controller must already trust the probe and asks the technician to Connect; flyw8t audits the request rather than claiming an observed session. Setup and limits: `docs/network-operations.md`.
+- Material semantic color roles and console surfaces aligned with AnchorDesk's default palettes, with the family UI/integration direction documented in `docs/product-family.md`. Native server-rendered forms remain functional; this is not an `@material/web` migration.
+
 ## 0.1.2 — 2026-11-14 (pre-release)
 
 A console refresh, the first published server image, and everything merged since 0.1.1. **Not production-ready:** the 0.2.0 gates in `docs/roadmap.md` are open (off-host restore, install-time signature checks, the unified threat model, independent review). Script approval and running (ADR-0015 steps 3 and 4) are not in this release.

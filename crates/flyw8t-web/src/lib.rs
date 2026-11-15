@@ -4,10 +4,14 @@
 //! redirects, and in-flight jobs refresh with a meta refresh until they reach a final state.
 //! See `docs/decisions/ADR-0003-web-ui-ssr-first.md`.
 
+mod admin;
 pub mod fmt;
 pub mod model;
+mod network;
 mod pages;
 
+pub use admin::{audit_page, audit_query, user_page};
+pub use network::*;
 pub use pages::*;
 
 /// Stylesheet served at `/static/app.css`.

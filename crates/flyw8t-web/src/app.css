@@ -1,12 +1,24 @@
 :root {
-  --bg: #f6f7f9;
-  --surface: #ffffff;
-  --text: #16191d;
-  --muted: #5d6670;
-  --line: #dde1e6;
-  --accent: #2456c7;
-  /* Filled controls have their own colours, so link blue can be light in the dark theme without making buttons unreadable. */
-  --btn-bg: #2456c7; --btn-fg: #ffffff; --btn-hover: #1c459f;
+  /* Material roles, aligned with AnchorDesk's default palette. Native SSR controls
+     consume the same roles that a future Material Web adapter will consume. */
+  --md-sys-color-primary: #4f46e5;
+  --md-sys-color-on-primary: #ffffff;
+  --md-sys-color-surface: #ffffff;
+  --md-sys-color-surface-container: #f4f5f9;
+  --md-sys-color-on-surface: #1f2430;
+  --md-sys-color-on-surface-variant: #5b6472;
+  --md-sys-color-outline-variant: #e6e8ef;
+  --md-sys-shape-corner-medium: 12px;
+  --md-sys-shape-corner-large: 16px;
+  --bg: var(--md-sys-color-surface-container);
+  --surface: var(--md-sys-color-surface);
+  --text: var(--md-sys-color-on-surface);
+  --muted: var(--md-sys-color-on-surface-variant);
+  --line: var(--md-sys-color-outline-variant);
+  --accent: var(--md-sys-color-primary);
+  /* Filled controls have their own colours, so the primary role can be light in the dark theme without making
+     buttons unreadable. */
+  --btn-bg: var(--md-sys-color-primary); --btn-fg: var(--md-sys-color-on-primary); --btn-hover: #4338ca;
   --danger-bg: #b3261e; --danger-fg: #ffffff; --danger-hover: #8f1d17;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
   --good-bg: #e3f5e9; --good-fg: #11643a;
@@ -18,9 +30,11 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #111418; --surface: #1a1e24; --text: #e6e9ed; --muted: #9aa4af; --line: #2c333b;
-    --accent: #7ea6ff;
-    --btn-bg: #3565d6; --btn-fg: #ffffff; --btn-hover: #4a78e6;
+    --md-sys-color-primary: #818cf8; --md-sys-color-on-primary: #15133b;
+    --md-sys-color-surface-container: #0f1116; --md-sys-color-surface: #181b24;
+    --md-sys-color-on-surface: #e7e9f2; --md-sys-color-on-surface-variant: #a5abbd;
+    --md-sys-color-outline-variant: #2a2f3c;
+    --btn-hover: #a5b4fc;
     --danger-bg: #c2362f; --danger-fg: #ffffff; --danger-hover: #d64840;
     --shadow: none;
     --good-bg: #13321f; --good-fg: #7fdca2;
@@ -32,7 +46,7 @@
 }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 Inter, Roboto, "Segoe UI", system-ui, sans-serif; }
 a { color: var(--accent); }
 a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 h1 { font-size: 1.5rem; line-height: 1.25; margin: 0.2rem 0 1rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; letter-spacing: -0.01em; }
@@ -80,7 +94,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 1rem; }
   body.app > main { width: 100%; padding: 1.4rem 2rem 3rem; }
 }
 
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; margin-bottom: 1rem; min-width: 0; box-shadow: var(--shadow); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--md-sys-shape-corner-large); padding: 1.25rem; margin-bottom: 1rem; min-width: 0; box-shadow: var(--shadow); }
 .narrow { max-width: 420px; margin: 8vh auto; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 1rem; }
 .stack { display: flex; flex-direction: column; gap: 0.7rem; }
@@ -88,7 +102,7 @@ label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; 
 label.inline { flex-direction: row; align-items: center; gap: 0.4rem; color: var(--text); }
 input, select, button { font: inherit; padding: 0.45rem 0.6rem; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); max-width: 100%; }
 input:hover, select:hover, textarea:hover { border-color: var(--muted); }
-button { background: var(--btn-bg); color: var(--btn-fg); border-color: transparent; cursor: pointer; font-weight: 600; }
+button { background: var(--btn-bg); color: var(--btn-fg); border-color: transparent; cursor: pointer; font-weight: 600; border-radius: 999px; min-height: 40px; padding-inline: 1rem; }
 button:hover { background: var(--btn-hover); }
 /* The second choice beside a primary button, and actions that are not the point of the page. */
 button.secondary, a.button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
@@ -100,7 +114,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 /* Forms read better at a line's width than stretched across a wide card. */
 form.stack { max-width: 36rem; }
 .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 0.7rem 1rem; }
-button.link { background: none; color: var(--accent); padding: 0.1rem 0.3rem; font-weight: 400; text-decoration: underline; }
+button.link { background: none; color: var(--accent); padding: 0.1rem 0.3rem; font-weight: 400; text-decoration: underline; min-height: 0; border-radius: 6px; }
 fieldset { border: 1px solid var(--line); border-radius: 6px; display: flex; flex-wrap: wrap; gap: 0.6rem; }
 .inline-form { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; margin: 0.4rem 0; }
 .inline-form.card { padding: 0.8rem 1rem; }
@@ -170,7 +184,7 @@ ol.timeline time { color: var(--muted); font-size: 0.82rem; }
 }
 
 .code-big { font-family: var(--mono); font-size: 2.2rem; font-weight: 700; letter-spacing: 0.08em; margin: 0.4rem 0; }
-a.button { display: inline-block; background: var(--btn-bg); color: var(--btn-fg); padding: 0.45rem 0.9rem; border-radius: 6px; text-decoration: none; font-weight: 600; }
+a.button { display: inline-block; background: var(--btn-bg); color: var(--btn-fg); padding: 0.55rem 1.1rem; border-radius: 999px; text-decoration: none; font-weight: 600; }
 a.button:hover { background: var(--btn-hover); }
 .sas { border-color: var(--unk-fg); }
 .sas #sas { font-size: 1.4rem; font-weight: 700; letter-spacing: 0.1em; }
@@ -256,3 +270,39 @@ details.dangerzone { border-color: color-mix(in srgb, var(--bad-fg) 45%, var(--l
 details.dangerzone > summary { color: var(--bad-fg); }
 details.dangerzone .danger:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
 pre.cmd { white-space: pre; overflow-x: auto; overflow-wrap: normal; user-select: all; }
+
+/* Network workspace: the same surfaces, density and status language as the family console. */
+.block { display: block; }
+.eyebrow { margin: 0 0 .35rem; font-size: .75rem; color: var(--muted); font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
+.workspace-heading, .section-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .8rem; }
+.workspace-heading { margin: .6rem 0 1.4rem; }
+.workspace-heading h1 { font-size: 1.9rem; letter-spacing: -.025em; margin: 0; }
+.workspace-heading p { margin-bottom: 0; }
+.capability-chips { display: flex; flex-wrap: wrap; gap: .5rem; }
+.section-heading h2 { margin: 0; }
+.section-heading { margin-bottom: .8rem; }
+.device-link { font-weight: 600; text-decoration: none; }
+.device-link:hover { text-decoration: underline; }
+.collector-grid, .form-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,250px),1fr)); gap: 1rem; }
+.collector-card { border: 1px solid var(--line); border-radius: var(--md-sys-shape-corner-medium); padding: 1rem; min-width: 0; overflow-wrap: anywhere; }
+.collector-card p { margin: .4rem 0 0; }
+.setup-card summary { font-weight: 600; cursor: pointer; padding: .25rem 0; }
+.network-site-link { display: flex; flex-direction: column; gap: .3rem; margin-bottom: 1rem; }
+.network-site-link strong { color: var(--text); }
+.filters.card { align-items: end; gap: .8rem; }
+.filters .search-field { flex: 1 1 220px; }
+.filters input[type=search] { flex: auto; width: 100%; }
+.pagination { display: flex; align-items: center; justify-content: flex-end; gap: .8rem; margin-top: 1rem; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+@media (max-width:680px) {
+  .workspace-heading h1 { font-size: 1.55rem; }
+  .filters.card label { flex: 1 1 100%; min-width: 0; }
+  input, select, button, a.button { min-height: 44px; }
+}
+
+/* The operator's other products (FLYW8T_FAMILY_LINKS): links that leave this console, and say so. */
+.top nav a.family::after { content: " 97"; color: var(--muted); font-size: 0.85em; }
+/* An administrator's page about one user. */
+h1 .badge { font-size: 0.78rem; letter-spacing: 0; }

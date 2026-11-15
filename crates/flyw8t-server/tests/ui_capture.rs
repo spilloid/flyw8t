@@ -117,8 +117,48 @@ async fn console_renders_cleanly_everywhere() {
     let docs_img = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/img");
 
     // Real state to look at.
-    let server = start_fresh().await;
+    // With the operator's other products configured, so the frame shows its Products group.
+    let mut config = test_config(&fresh_database().await);
+    config.family_links = vec![
+        flyw8t_server::config::FamilyLink {
+            label: "AnchorDesk".into(),
+            url: "https://desk.example.com/".into(),
+        },
+        flyw8t_server::config::FamilyLink {
+            label: "PortGlass".into(),
+            url: "https://portglass.example.com/".into(),
+        },
+    ];
+    let server = start(config).await;
     let (admin, org, agent) = enrolled(&server).await;
+    // Users to look at: a technician holding a temporary password, and a disabled account. Their passwords are not
+    // usable: nobody signs in as them here.
+    let (technician,): (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO users (email, display_name, password_hash, role, password_changed_at, password_temporary)
+         VALUES ('riley@example.com', 'Riley Okafor', 'x', 'technician', now() - interval '3 hours', true) RETURNING id",
+    )
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO user_organizations (user_id, organization_id) VALUES ($1, $2)")
+        .bind(technician)
+        .bind(org)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let (former,): (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO users (email, display_name, password_hash, role, disabled_at)
+         VALUES ('former.colleague@example.com', 'A Former Colleague With A Long Name', 'x', 'readonly', now() - interval '9 days')
+         RETURNING id",
+    )
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    let (myself,): (uuid::Uuid,) = sqlx::query_as("SELECT id FROM users WHERE email = $1")
+        .bind(ADMIN_EMAIL)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
     let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, agent.device_id).await;
     let ok = admin
@@ -210,6 +250,55 @@ async fn console_renders_cleanly_everywhere() {
             .fetch_one(&server.state.db)
             .await
             .unwrap();
+    // The network workspace uses synthetic LAN observations, never a scan of the host LAN.
+    let registered = admin
+        .post(
+            &server,
+            &format!("/sites/{site}/network-collectors"),
+            &[
+                ("name", "Office discovery"),
+                ("cidr", "192.168.40.0/24"),
+                ("interval_secs", "60"),
+                ("portglass_fingerprint", &"ab".repeat(32)),
+            ],
+        )
+        .await;
+    assert_eq!(
+        registered.status,
+        axum::http::StatusCode::OK,
+        "{}",
+        registered.body
+    );
+    let network_key = extract(&registered.body, r"(fw8n_[A-Za-z0-9_-]{43})").unwrap();
+    let collector = extract(&registered.body, r"/network/collectors/([0-9a-f-]{36})").unwrap();
+    let timestamp = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let batch = json!({"devices":[
+        {"ip":"192.168.40.1","mac":"02:40:00:00:00:01","hostname":"Office gateway","vendor":"Example Networks","deviceType":"router","status":"up","openPorts":[80,443],"lastSeen":timestamp},
+        {"ip":"192.168.40.20","mac":"02:40:00:00:00:20","hostname":"Reception printer","vendor":"Example Printing","deviceType":"printer","status":"up","openPorts":[80,443,631,9100],"lastSeen":timestamp}
+    ]});
+    let received = server
+        .request(
+            axum::http::Request::post("/probe/devices")
+                .header("x-probe-key", network_key)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(batch.to_string()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        received.status,
+        axum::http::StatusCode::OK,
+        "{}",
+        received.body
+    );
+    let (network_asset,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT id FROM network_assets WHERE site_id=$1 AND ip='192.168.40.20'")
+            .bind(site)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
     let session_value = admin.cookie.split_once('=').unwrap().1.to_string();
     let pages: Vec<(String, &str)> = vec![
         ("/".into(), "overview"),
@@ -224,8 +313,23 @@ async fn console_renders_cleanly_everywhere() {
         ("/organizations".into(), "organizations"),
         (format!("/organizations/{org}"), "organization"),
         (format!("/sites/{site}"), "site"),
+        ("/network".into(), "network"),
+        (format!("/network?site={site}"), "network-site"),
+        (format!("/network/assets/{network_asset}"), "network-asset"),
+        (
+            format!("/network/collectors/{collector}"),
+            "network-collector",
+        ),
         ("/audit".into(), "audit"),
+        (
+            "/audit?action=organization.&outcome=success&from=2026-01-01".into(),
+            "audit-filtered",
+        ),
+        ("/audit?actor=nobody-by-that-name".into(), "audit-empty"),
         ("/admin".into(), "admin"),
+        (format!("/admin/users/{technician}"), "user"),
+        (format!("/admin/users/{former}"), "user-disabled"),
+        (format!("/admin/users/{myself}"), "user-self"),
         ("/admin/fields".into(), "admin-fields"),
         ("/scripts".into(), "scripts"),
         (format!("/scripts/{script}"), "script"),

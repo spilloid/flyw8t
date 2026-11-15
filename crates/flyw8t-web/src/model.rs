@@ -29,6 +29,15 @@ pub struct PageCtx {
     pub flash: Option<Flash>,
     /// The server's own version, shown in the frame.
     pub version: &'static str,
+    /// The operator's other products, as configured (`FLYW8T_FAMILY_LINKS`): links only, never a shared sign-in.
+    pub family: Vec<FamilyLink>,
+}
+
+/// One configured link to another product of the family.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyLink {
+    pub label: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +59,67 @@ pub struct SitePage {
     pub name: String,
     pub organization: OrgRef,
     pub devices: Vec<OrgRef>,
+    pub network_assets: i64,
+    pub network_collectors: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkSite {
+    pub id: Uuid,
+    pub name: String,
+    pub organization: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkCollector {
+    pub id: Uuid,
+    pub name: String,
+    pub site: NetworkSite,
+    pub cidr: String,
+    pub interval_secs: i32,
+    pub heartbeat_at: Option<OffsetDateTime>,
+    pub inventory_at: Option<OffsetDateTime>,
+    pub revoked_at: Option<OffsetDateTime>,
+    pub version: Option<String>,
+    pub portglass_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkAsset {
+    pub id: Uuid,
+    pub site: NetworkSite,
+    pub collector_id: Uuid,
+    pub ip: String,
+    pub mac: Option<String>,
+    pub hostname: String,
+    pub vendor: String,
+    pub device_type: String,
+    pub status: String,
+    pub open_ports: Vec<i32>,
+    pub first_seen_at: OffsetDateTime,
+    pub collected_at: OffsetDateTime,
+    pub received_at: OffsetDateTime,
+    pub interval_secs: i32,
+    pub collector_revoked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkWorkspace {
+    pub sites: Vec<NetworkSite>,
+    pub selected_site: Option<Uuid>,
+    pub query: String,
+    pub page: u32,
+    pub total: i64,
+    pub assets: Vec<NetworkAsset>,
+    pub collectors: Vec<NetworkCollector>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkHistory {
+    pub collected_at: OffsetDateTime,
+    pub received_at: OffsetDateTime,
+    pub collector: String,
+    pub observation: String,
 }
 
 /// Whether the server holds a live, authenticated connection to the device right now.
@@ -366,6 +436,74 @@ pub struct AuditRow {
     pub outcome: String,
     pub organization: Option<String>,
     pub detail: serde_json::Value,
+    /// The address the request came from, where one was recorded.
+    pub client_ip: Option<String>,
+    /// `session:<id prefix>` or `token:<prefix>`; never a secret.
+    pub credential: Option<String>,
+}
+
+/// What the audit page and its export are narrowed to. Text filters are kept as typed, to show them back.
+#[derive(Debug, Clone, Default)]
+pub struct AuditFilter {
+    /// Part of the actor's label (an email, a device name).
+    pub actor: String,
+    /// An action, or the start of one: `user.` matches every user action.
+    pub action: String,
+    /// `success`, `denied` or `failed`.
+    pub outcome: Option<String>,
+    pub organization: Option<Uuid>,
+    /// Inclusive UTC days.
+    pub from: Option<time::Date>,
+    pub to: Option<time::Date>,
+    /// Only events older than this id: the page after the one that ended there.
+    pub before: Option<i64>,
+}
+
+impl AuditFilter {
+    pub fn is_empty(&self) -> bool {
+        self.actor.is_empty()
+            && self.action.is_empty()
+            && self.outcome.is_none()
+            && self.organization.is_none()
+            && self.from.is_none()
+            && self.to.is_none()
+    }
+}
+
+/// One page of the audit log.
+#[derive(Debug, Clone)]
+pub struct AuditPage {
+    pub rows: Vec<AuditRow>,
+    pub filter: AuditFilter,
+    /// The id to continue from, when older matching events exist.
+    pub older: Option<i64>,
+    pub organizations: Vec<OrgRef>,
+}
+
+/// One user, for the administrator's page about them.
+#[derive(Debug, Clone)]
+pub struct UserDetail {
+    pub id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    pub role: String,
+    pub disabled_at: Option<OffsetDateTime>,
+    pub created_at: OffsetDateTime,
+    pub organization_ids: Vec<Uuid>,
+    /// Two-step verification is set up.
+    pub mfa: bool,
+    pub passkeys: i64,
+    /// Live sessions, partial ones included.
+    pub sessions: i64,
+    /// API tokens that still work.
+    pub api_tokens: i64,
+    pub password_changed_at: Option<OffsetDateTime>,
+    /// The password was made up for them by an administrator and they have not replaced it.
+    pub password_temporary: bool,
+    /// The administrator looking at the page.
+    pub is_self: bool,
+    /// The only enabled administrator: cannot be demoted or disabled.
+    pub only_admin: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -616,6 +754,9 @@ pub struct AccountView {
     /// Sudo mode lasts until then, when the session is in it.
     pub sudo_until: Option<OffsetDateTime>,
     pub sessions: Vec<SessionRow>,
+    pub password_changed_at: Option<OffsetDateTime>,
+    /// An administrator made up the current password; the person should choose their own.
+    pub password_temporary: bool,
 }
 
 /// A live browser session of the person viewing the account page.
