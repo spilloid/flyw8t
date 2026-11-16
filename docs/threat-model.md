@@ -68,7 +68,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 ### T9: Compromised software updates
 - **Control:** there is no automatic update mechanism. Agents are installed and upgraded by an administrator.
-- **Residual:** auto-update is designed to require a signed manifest (an Ed25519 key held outside the server, following PortGlass's updater) **before** it is enabled. Binaries are not Authenticode-signed yet.
+- **Residual:** auto-update is designed to require a signed manifest (an Ed25519 key held outside the server, following PortGlass's updater) **before** it is enabled. Published Windows agent/server binaries are timestamped Authenticode-signed (0.1.3 assets verified on 2026-11-15, dev-process row 47); install-time verification by the agent and signed automatic-update manifests remain open.
 
 ### T10: Compromised server or database
 - **Reality:** a compromised server can command every agent within the catalog. Today that means read-only diagnostics to every endpoint and full knowledge of inventory. It **cannot** obtain device private keys (they never leave devices) or user passwords in plaintext (Argon2id), and it cannot execute arbitrary code on endpoints, because the agent enforces its own catalog.
@@ -107,7 +107,7 @@ The operator-approved [release gates](roadmap.md) are the current production con
 
 1. OIDC sign-in. TOTP two-step verification is built and required by default (2026-10-29); passkeys for sudo mode (2026-11-04) and sign-in (2026-11-06).
 2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Done for attended support** (Codex gpt-5.6-sol, 2026-10-29: 13 findings, 12 fixed, 1 partly fixed); two-step verification reviewed (row 13) and both re-reviewed (row 15, 10 of 11 fixed); **the row 15 fixes are not yet reviewed.**
-3. Authenticode-signed agent and server binaries; signed update manifests before any auto-update.
+3. Windows release signing is implemented and verified (dev-process row 47). Install-time publisher verification and signed update manifests remain required before any agent auto-update.
 4. Pin the server identity at enrollment.
 5. Postgres row-level security as defense in depth for T2.
 6. ~~A session list and forced logout~~ (built 2026-11-06).
