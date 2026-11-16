@@ -200,6 +200,7 @@ pub(crate) fn login_page_response(
             error.map(String::from),
             no_admin,
             &token,
+            state.config.oidc.is_some(),
         )),
     )
         .into_response()
@@ -253,7 +254,7 @@ pub async fn login(
         );
     }
     let user: Option<(Uuid, String, bool, bool)> = match sqlx::query_as(
-        "SELECT id, password_hash, disabled_at IS NOT NULL, totp_enabled_at IS NOT NULL FROM users WHERE email = $1",
+        "SELECT id, password_hash, disabled_at IS NOT NULL, totp_enabled_at IS NOT NULL FROM users WHERE email = $1 AND NOT EXISTS (SELECT 1 FROM directory_users d WHERE d.user_id=users.id)",
     )
     .bind(&email)
     .fetch_optional(&state.db)
@@ -1209,6 +1210,7 @@ async fn admin_view(
         tokens,
         orgs,
         revealed.clone(),
+        state.config.oidc.is_some(),
     ))
     .into_response();
     if revealed.is_some() {

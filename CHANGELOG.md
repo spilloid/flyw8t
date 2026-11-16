@@ -2,6 +2,22 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## 0.1.4 — 2026-11-16 (pre-release)
+
+- Optional OpenID Connect code/PKCE sign-in with discovery, RS256/ES256 JWKS validation,
+  browser-bound state and nonce; local break-glass identities stay independent.
+- SCIM 2.0 Users and Groups with separate hashed `fw8s_` credentials and administrator
+  group-to-role/organization mappings applied on sign-in and synchronization.
+- Directory deprovisioning and access loss revoke sessions, tokens and attended support;
+  directory changes cannot remove the last enabled administrator.
+- Provider MFA creates a full session. Local passkeys still gate sudo; first directory
+  passkey registration requires a recent verified provider authentication.
+
+- Authentik SCIM retries return existing immutable IDs directly; ambiguous profiles and
+  malformed membership changes are refused without adopting mutable email/name matches.
+- Enrollment refusal guidance preserves existing identities and job history; the roadmap
+  prioritizes a gated Windows desktop-control preview after SSO.
+
 ## 0.1.3 — 2026-11-15 (pre-release)
 
 The administration console catches up with what an administrator has to do, and network operations arrive. **Not production-ready:** the 0.2.0 gates in `docs/roadmap.md` are still open. Single sign-on is not in this release.

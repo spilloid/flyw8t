@@ -9,6 +9,8 @@ pub use flyw8t_web::model::FamilyLink;
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Optional OIDC identity provider; local break-glass sign-in stays available.
+    pub oidc: Option<crate::oidc::OidcConfig>,
     pub database_url: String,
     pub bind: SocketAddr,
     /// The URL technicians and agents use to reach this server.
@@ -155,7 +157,13 @@ impl Config {
             (None, None) => None,
             _ => bail!("set both FLYW8T_BOOTSTRAP_ADMIN_EMAIL and FLYW8T_BOOTSTRAP_ADMIN_PASSWORD, or neither"),
         };
+        let oidc = match (var("FLYW8T_OIDC_ISSUER"),var("FLYW8T_OIDC_CLIENT_ID"),var("FLYW8T_OIDC_CLIENT_SECRET")) {
+            (None,None,None) => None,
+            (Some(issuer),Some(client_id),Some(client_secret)) => Some(crate::oidc::OidcConfig { issuer,client_id,client_secret }),
+            _ => bail!("set all FLYW8T_OIDC_ISSUER, FLYW8T_OIDC_CLIENT_ID and FLYW8T_OIDC_CLIENT_SECRET, or none"),
+        };
         let cfg = Self {
+            oidc,
             database_url,
             bind,
             public_url: public_url.trim_end_matches('/').to_string(),
@@ -219,6 +227,7 @@ impl Config {
     /// Defaults for everything but the required fields; used by tests.
     pub fn defaults() -> Self {
         Self {
+            oidc: None,
             database_url: String::new(),
             bind: "127.0.0.1:0".parse().unwrap(),
             public_url: "http://127.0.0.1".into(),
@@ -245,6 +254,9 @@ impl Config {
     /// Plaintext is allowed only when the public URL is loopback. A deployment reachable
     /// from anywhere else must present HTTPS, natively or through a proxy.
     pub fn validate(&self) -> Result<()> {
+        if let Some(oidc) = &self.oidc {
+            oidc.validate()?;
+        }
         let ice: serde_json::Value =
             serde_json::from_str(&self.ice_servers).context("FLYW8T_ICE_SERVERS must be JSON")?;
         anyhow::ensure!(

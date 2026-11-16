@@ -142,3 +142,31 @@ Stop the server, back up, pull or build the new image, start it. Migrations run 
 ## Monitoring the deployment
 
 Scrape `/metrics` and probe `/readyz` from **outside** the host. See [reliability.md](reliability.md) for the SLIs. `/metrics` is unauthenticated and exposes counts only (no names or identifiers); restrict it at the proxy if that matters to you.
+
+## Existing test enrollment
+
+An enrollment refusal means the state directory already contains a device identity.
+Changing `--server` or downloading a newer binary does not move that identity to another
+server. Preserve its complete state directory, including the private key and job journal;
+do not delete or edit the journal to get past the refusal.
+
+For an existing localhost/test enrollment, stop the agent/service first and retain an
+access-controlled archive of the complete old state. Follow an operator-reviewed migration
+procedure to create a fresh state directory and enroll a new identity against the intended
+server, then verify that exact device appears there before retiring the old test identity.
+Keep any unresolved old job evidence with its original identity; never transplant an old
+journal into a new identity. Use the reviewed migration helper when the operator supplies
+it, rather than removing individual credential or history files.
+
+A signed upgrade of an agent staying on the same server should preserve its identity and
+journal. Re-enrollment is a migration step, not the normal upgrade path.
+
+## Directory-aware server rollout and rollback
+
+Remove all server processes older than 0.1.4 before provisioning directory users or sudo
+keys. Once directory data exists, do not roll back only the server image: 0.1.3 lacks the
+new authentication exclusions. A reviewed rollback must preserve history while removing
+or revoking directory authority; backup restore requires coordination with agent journals,
+job reconciliation and IdP/ingress configuration. Restoring an old database casually can
+lose fleet/job evidence. See [directory setup and limits](directory-sso.md). Existing 0.1.3
+agents may continue diagnostics; this is a server downgrade constraint.

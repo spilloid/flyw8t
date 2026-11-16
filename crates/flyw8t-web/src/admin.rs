@@ -95,7 +95,9 @@ pub fn user_page(
         .into_any()
     };
     let edit_url = format!("/admin/users/{id}/edit");
-    let password_card = if u.is_self {
+    let password_card = if u.directory {
+        view! {<section class="card"><h2>"Directory account"</h2><p>"Sign-in and MFA are managed by your organization. Group access is configured on the "<a href="/admin/directory">"directory page"</a>". No local password is available."</p></section>}.into_any()
+    } else if u.is_self {
         view! {
             <section class="card">
                 <h2>"Password"</h2>
@@ -170,7 +172,7 @@ pub fn user_page(
                     {u.disabled_at.map(|at| view! { <dt>"Disabled"</dt><dd>{time_cell(now, at)}</dd> })}
                 </dl>
             </section>
-            <section class="card">
+            {(!u.directory).then(|| view! { <section class="card">
                 <h2>"Name, role and organizations"</h2>
                 <form method="post" action=edit_url class="stack">
                     <input type="hidden" name="csrf" value=csrf.clone()/>
@@ -180,7 +182,7 @@ pub fn user_page(
                     <p class="hint">"Administrators reach every organization, whatever is ticked. Lowering a role or removing an organization takes effect on their next page and ends the support sessions they started."</p>
                     <button type="submit">"Save"</button>
                 </form>
-            </section>
+            </section> })}
         </div>
         {password_card}
         {state_card}

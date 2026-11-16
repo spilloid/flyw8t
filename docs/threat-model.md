@@ -57,7 +57,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 - **Control (whole request first):** the server reads a request's whole body, within 30 seconds and within the route's size limit, before checking its session (at most 256 bodies at once, 16 from one address, so this cannot be used to make it hold much memory), so a request started while a session was valid (or in sudo mode) and finished after it was signed out (or sudo mode ended) is judged by the later state. Evidence: `a_request_is_judged_by_the_session_as_it_is_when_the_request_is_complete`. Residual: a sign-out that lands during the server's own handling of a request (milliseconds, not under the client's control) does not stop that request.
 - **Control (people):** an administrator in sudo mode can change a user's name, role and organizations, disable or enable the account, and replace a lost password with a temporary one the server makes up and shows once. Disabling signs the person out everywhere, revokes their API tokens and unspent enrollment tokens and ends the support sessions they started; lowering a role or removing an organization applies to their next request, ends those support sessions and revokes the enrollment tokens issued under the lost authority. These changes hold the person's row: a password sign-in re-checks the account and the password under that lock before it creates a session, and issuing an API token, enrollment token or collector key, creating a user and starting a support session re-check the issuer and the issuing session under it, so none can complete across the change. Nobody can change their own role or disable themselves, and each change locks the administrator's own row with the user's and requires, under that lock, an enabled administrator on the same live session in sudo mode; so two administrators acting on each other at once cannot leave the console with none, and a request already under way when its caller is disabled or signed out does nothing. A person changes their own password with the current one (five attempts per five minutes), which signs out their other browsers. Evidence: `tests/users.rs`.
 - **Residual (people):** a temporary password is known to the administrator who issued it until the person replaces it; the account page asks them to, but sign-in does not force it. A disabled person's already-queued jobs still run. Network collectors they registered keep reporting. The jobs list pages by offset, so a job created while someone pages can appear twice or be passed over; the audit log pages by event id and does not have this. The CSV formula guard was not tried in a spreadsheet program. An administrator's second-factor reset and sign-out-everywhere of another user do not re-check their caller under lock; they only take access away. An administrator's passkey confirms these changes, so an administrator account with no passkey cannot make them.
-- **Residual:** TOTP is phishable in real time (a proxy that relays the code within 30 seconds); passkeys close this for sudo-mode changes and for anyone who signs in with one, but **password + TOTP is still accepted for sign-in**, so a relayed sign-in reaches everything but sudo-mode changes. Requiring passkeys for sign-in (per user or server-wide) is not built. TOTP secrets are stored unencrypted in PostgreSQL, so a database reader can mint codes (they can also read everything else; an application-held key would narrow this). `FLYW8T_REQUIRE_MFA=false` lets users opt out. No OIDC yet.
+- **Residual:** TOTP is phishable in real time (a proxy that relays the code within 30 seconds); passkeys close this for sudo-mode changes and for anyone who signs in with one, but **password + TOTP is still accepted for sign-in**, so a relayed sign-in reaches everything but sudo-mode changes. Requiring passkeys for sign-in (per user or server-wide) is not built. TOTP secrets are stored unencrypted in PostgreSQL, so a database reader can mint codes (they can also read everything else; an application-held key would narrow this). `FLYW8T_REQUIRE_MFA=false` lets users opt out. OIDC is optional; the configured provider owns its MFA policy. Directory accounts cannot use local-password/passkey sign-in, and registered passkeys only confirm sudo. Directory identities never attach to local email addresses.
 
 ### T7: Fleet-wide abuse
 - **Control:** there is no fleet-wide or multi-device operation; one job targets one device. Actions are read-only.
@@ -105,7 +105,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 The operator-approved [release gates](roadmap.md) are the current production contract. In particular, G02-TRUST requires a unified model before privileged features ship: for diagnostics, signed scripts, remote viewing/input, policy changes, enrollment and updates, record what a compromised server, stolen technician session and stolen signing key can do. Remote input can initiate commands outside the signed-script path; an update can replace every endpoint control. Neither inherits the script-signing guarantee. Require endpoint-enforced authorization/policy, revocation and replay tests appropriate to each capability, and independently review each trust boundary. This is an open gate, not a claim that those controls already exist.
 
-1. OIDC sign-in. TOTP two-step verification is built and required by default (2026-10-29); passkeys for sudo mode (2026-11-04) and sign-in (2026-11-06).
+1. OIDC sign-in and SCIM provisioning are built in 0.1.4; live Authentik/provider-MFA and hardware-passkey deployment evidence remain open. See [directory integration](directory-sso.md) and ADR-0017.
 2. Cross-family adversarial review: **done for the core** (Codex gpt-6.1-sol, 2026-10-29: ten findings, nine fixed, the tenth (Windows rename durability) fixed on Unix only; see [dev-process.md](dev-process.md)). **Done for attended support** (Codex gpt-5.6-sol, 2026-10-29: 13 findings, 12 fixed, 1 partly fixed); two-step verification reviewed (row 13) and both re-reviewed (row 15, 10 of 11 fixed); **the row 15 fixes are not yet reviewed.**
 3. Windows release signing is implemented and verified (dev-process row 47). Install-time publisher verification and signed update manifests remain required before any agent auto-update.
 4. Pin the server identity at enrollment.
@@ -117,3 +117,52 @@ The operator-approved [release gates](roadmap.md) are the current production con
 ## Attended support
 
 Attended (consent-based, browser screen view) sessions have their own threat analysis in [attended-support.md](attended-support.md#threats-specific-to-attended-support): consent before any signaling, single-use invitations, signaling-tampering detection through a committed security code (not a defense against a compromised flyw8t server), and no capability beyond viewing what the participant chooses.
+
+## Optional directory identity (0.1.4)
+
+The issuer is an operator trust decision: it can impersonate its directory users and assert
+JIT group membership. SCIM credentials can modify mapped group membership and must be
+protected as administrative secrets. Neither plane links local identities by email.
+A stolen full directory session with provider authentication and session creation both
+within five minutes can enroll an attacker's own user-verifying key if that account has
+no established keys, and then enter sudo. A compromised trusted IdP can manufacture that
+fresh proof for keyless mapped accounts. Existing keys still gate further key changes and
+sudo for accounts that have keys. Purpose-bound provider reauthentication is future
+hardening; the bounded bootstrap policy is an explicit beta trust decision. Directory mapping/active changes share ordered user locks,
+last-admin preservation and credential/support revocation. SCIM-managed memberships override
+later OIDC claims. An IdP-side disable is observed on synchronization, not by polling; local
+break-glass sign-in remains independent of direct provider authentication/provisioning. OIDC callback code/state
+are a bounded exception to the no-secrets-in-URLs rule and must be excluded from proxy/CDN
+query logging. The completion document sends no-referrer/no-store. Provider HTTP requests
+are origin-restricted, bounded and follow no redirects; RS256/ES256 validation uses the
+pinned maintained openidconnect library. Tests do not replace a live-provider deployment
+or hardware-passkey trial.
+
+If an unfamiliar passkey was enrolled, it persists until it is removed or an administrator
+resets the account factors; investigate the provider and end affected sessions. Directory
+passkeys cannot independently sign in, but can confirm sudo after a full provider sign-in.
+
+Authentik 2026.5.3 interprets a create 409 as permission to find and adopt a resource by
+mutable email/displayName. Both SCIM POST routes therefore emit no 409 responses. An exact
+immutable identity replay with a matching profile returns 200 and that exact existing ID
+without changing authority; all other create conflicts are explicit refusals with a status other than 409.
+Users require the same normalized userName, display name and directory active state.
+Groups require the requested case-insensitive displayName filter to resolve uniquely to
+that same externalId; omitted members preserve existing membership, while explicit members
+must match. Resolve profile drift by verified immutable externalId and PUT/PATCH before
+retrying creation. Direct-ID responses close a rename/reuse race between POST and lookup.
+Manual Authentik discovery/recovery is prohibited unless every externalId binding is
+verified; the installed client's manual discovery does not itself guarantee that match.
+
+A mapped SSO administrator who obtains sudo has ordinary application-administrator powers,
+including password/MFA recovery and account administration against local users. A compromised
+provider can reach those powers through the accepted keyless-admin bootstrap path. Local
+identity-plane independence does not protect local accounts from an application administrator.
+
+After directory identities or sudo keys exist, require server 0.1.4 or newer: server 0.1.3
+lacks the directory password/passkey exclusions. Do not perform an image-only server downgrade.
+Complete removal of older server processes before provisioning directory users. A reviewed
+rollback must preserve histories while removing/revoking directory authority, or coordinate a
+database backup restore with agent journals, job reconciliation and IdP/ingress changes; a
+casual pre-SSO database restore can discard fleet/job evidence. Agent 0.1.3 can remain a
+diagnostics client; this restriction applies to servers, not routine agent upgrades.

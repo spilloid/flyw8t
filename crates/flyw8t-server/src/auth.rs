@@ -494,7 +494,7 @@ pub async fn recheck_session(
     lock_session(exec, session, p.session_token.as_deref(), &[Stage::Full]).await?;
     if need_sudo {
         let (sudo,): (bool,) = sqlx::query_as(
-            "SELECT coalesce(sudo_until > now(), false) FROM sessions WHERE id = $1",
+            "SELECT coalesce(sudo_until > clock_timestamp(), false) FROM sessions WHERE id = $1",
         )
         .bind(session)
         .fetch_one(&mut *exec)
@@ -530,11 +530,16 @@ pub async fn lock_session(
     token_hash: Option<&[u8]>,
     stages: &[Stage],
 ) -> AppResult<Option<Vec<u8>>> {
+    // Acquire the row first; freshness must be evaluated after any wait, using wall time
+    // rather than the transaction's fixed now().
+    sqlx::query("SELECT id FROM sessions WHERE id=$1 FOR UPDATE")
+        .bind(session_id)
+        .fetch_optional(&mut *exec)
+        .await?;
     let row: Option<(String, Option<Vec<u8>>)> = sqlx::query_as(
         "SELECT stage, pending_totp_secret FROM sessions
           WHERE id = $1 AND ($2::bytea IS NULL OR token_hash = $2)
-            AND revoked_at IS NULL AND expires_at > now()
-          FOR UPDATE",
+            AND revoked_at IS NULL AND expires_at > clock_timestamp()",
     )
     .bind(session_id)
     .bind(token_hash)

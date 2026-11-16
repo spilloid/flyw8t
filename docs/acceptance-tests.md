@@ -74,6 +74,10 @@ Beyond the milestone:
 | AT-54 | Audit filters, cursor paging and bounded CSV export; paged/filterable jobs; organization/site renames retain identity and audit the change | `tests/console.rs` (5 tests), CSV unit tests |
 | AT-55 | Configured family products appear as ordinary links without shared sign-in | `tests/family.rs`, configuration and view tests |
 
+| AT-56 | OIDC code/PKCE, state/nonce/browser/expiry isolation, RSA/ECDSA signatures and invalid token refusal, bounded origin-restricted transport, immutable identity and real cross-site Strict-cookie completion | `tests/oidc.rs` (8 tests), OIDC unit tests |
+| AT-57 | SCIM credential isolation, directory-only identity, exact Authentik metadata/removal fixtures, atomic membership/revocation and last-admin guards, direct immutable-ID create retries with no mutable-name adoption | `tests/scim.rs` (14 tests), SCIM parser tests |
+| AT-58 | Valid first-key answers need recent provider proof; later key changes recheck session/sudo after lock waits; manual disables persist; cleanup faults close every affected support socket | `tests/directory_races.rs` (4 tests) |
+
 ## Manual checks still owed
 
 - **AT-06 as a service:** on a Windows machine, as Administrator, run `flyw8t-agent enroll …` then `flyw8t-agent service install`. Confirm the service starts, survives a reboot, restarts after `taskkill /f`, and that `%ProgramData%\flyw8t\agent` is not readable by a standard user.

@@ -15,6 +15,7 @@ pub mod auth;
 pub mod client_ip;
 pub mod config;
 pub mod devices;
+pub mod directory;
 pub mod error;
 pub mod fields;
 pub mod gateway;
@@ -22,11 +23,13 @@ pub mod jobs;
 pub mod metrics;
 pub mod mfa;
 pub mod network;
+pub mod oidc;
 pub mod passkeys;
 pub mod queries;
 pub mod ratelimit;
 pub mod registry;
 pub mod remote_access;
+pub mod scim;
 pub mod script_check;
 pub mod scripts;
 pub mod sessions;
@@ -60,6 +63,7 @@ pub struct AppState {
     pub support: support::SupportHub,
     pub started_unix: u64,
     pub bodies: BodyGate,
+    pub oidc_flows: oidc::Flows,
 }
 
 pub type Shared = Arc<AppState>;
@@ -91,6 +95,7 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         support: Default::default(),
         started_unix: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
         bodies: BodyGate::default(),
+        oidc_flows: Default::default(),
     });
     // The frame's product links are the process's configuration, like its version: the first server started in a
     // process sets them.
@@ -135,6 +140,23 @@ async fn bootstrap_admin(state: &Shared) -> anyhow::Result<()> {
 
 pub fn router(state: Shared) -> Router {
     Router::new()
+        .merge(scim::routes())
+        .route("/login/oidc", get(oidc::start))
+        .route("/login/oidc/callback", get(oidc::callback))
+        .route("/admin/directory", get(directory::admin_page))
+        .route("/admin/directory/mappings", post(directory::map_group))
+        .route(
+            "/admin/directory/mappings/{id}/remove",
+            post(directory::remove_mapping),
+        )
+        .route(
+            "/admin/directory/credentials",
+            post(directory::create_credential),
+        )
+        .route(
+            "/admin/directory/credentials/{id}/revoke",
+            post(directory::revoke_credential),
+        )
         .route("/login", get(web::login_form).post(web::login))
         .route("/logout", post(web::logout))
         .route("/login/mfa", get(mfa::challenge_form).post(mfa::challenge))
@@ -505,6 +527,7 @@ async fn security_headers(State(state): State<Shared>, req: Request, next: Next)
     if is_cross_origin_write(&state.config, &req) {
         return (StatusCode::FORBIDDEN, "cross-origin request refused").into_response();
     }
+    let oidc_callback = req.uri().path() == "/login/oidc/callback";
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     let set = |h: &mut axum::http::HeaderMap, k: header::HeaderName, v: &'static str| {
@@ -515,7 +538,15 @@ async fn security_headers(State(state): State<Shared>, req: Request, next: Next)
     // Not `no-referrer`: under it, browsers send `Origin: null` on same-origin form posts,
     // which the cross-origin check above must refuse. `same-origin` keeps referrers inside
     // this site and lets same-origin posts carry their real Origin.
-    set(h, header::REFERRER_POLICY, "same-origin");
+    set(
+        h,
+        header::REFERRER_POLICY,
+        if oidc_callback {
+            "no-referrer"
+        } else {
+            "same-origin"
+        },
+    );
     set(
         h,
         header::CONTENT_SECURITY_POLICY,
