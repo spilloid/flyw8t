@@ -127,15 +127,18 @@ struct Transport {
     origin: reqwest::Url,
 }
 impl Transport {
-    fn new(config: &OidcConfig) -> AppResult<Self> {
+    fn client_builder() -> reqwest::ClientBuilder {
         let _ = rustls::crypto::CryptoProvider::install_default(
             rustls::crypto::ring::default_provider(),
         );
-        let client = reqwest::Client::builder()
+        reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(10))
             .no_proxy()
+    }
+    fn new(config: &OidcConfig) -> AppResult<Self> {
+        let client = Self::client_builder()
             .build()
             .map_err(|_| provider_failed())?;
         Ok(Self {
@@ -577,5 +580,88 @@ mod flow_expiry_tests {
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod https_root_tests {
+    use super::*;
+    fn config(issuer: &str) -> OidcConfig {
+        OidcConfig {
+            issuer: issuer.into(),
+            client_id: "unused-read-only-test".into(),
+            client_secret: "unused-read-only-test".into(),
+        }
+    }
+
+    // Public-CA trust cannot be proven by injecting a private test root: that would also
+    // pass with the broken 0.1.4 manual-root feature. This mandatory release check uses
+    // the production client and requires external HTTPS egress, without credentials.
+    #[tokio::test]
+    #[ignore = "requires outbound public HTTPS; mandatory release/full --include-ignored check"]
+    async fn production_oidc_client_trusts_bundled_public_https_roots() {
+        let transport = Transport::new(&config("https://example.com/")).unwrap();
+        let response = transport
+            .client
+            .get("https://example.com/")
+            .send()
+            .await
+            .unwrap_or_else(|error| {
+                panic!("production OIDC client rejected public-CA HTTPS: {error:?}")
+            });
+        assert!(
+            !response.status().is_redirection(),
+            "public HTTPS fixture changed to a redirect"
+        );
+    }
+
+    #[tokio::test]
+    async fn oidc_https_rejects_untrusted_certificates_and_wrong_hostnames() {
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::ring::default_provider(),
+        );
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let pem = cert.cert.pem();
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+            pem.clone().into_bytes(),
+            cert.key_pair.serialize_pem().into_bytes(),
+        )
+        .await
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "TLS fixture" }));
+        let server = tokio::spawn(
+            axum_server::from_tcp_rustls(listener, tls)
+                .unwrap()
+                .serve(app.into_make_service()),
+        );
+        let url = format!("https://localhost:{port}/");
+        let production = Transport::new(&config(&url)).unwrap();
+        let error = production.client.get(&url).send().await.unwrap_err();
+        assert!(
+            format!("{error:?}").contains("UnknownIssuer"),
+            "wrong failure, not untrusted certificate: {error:?}"
+        );
+        // Trust only this fixture's CA as a test control, keeping verification enabled.
+        let control = Transport::client_builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes()).unwrap())
+            .build()
+            .unwrap();
+        assert_eq!(
+            control.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::OK
+        );
+        let error = control
+            .get(format!("https://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("NotValidForName"),
+            "wrong failure, not hostname mismatch: {error:?}"
+        );
+        server.abort();
     }
 }
