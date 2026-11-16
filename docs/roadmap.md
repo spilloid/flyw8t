@@ -1,6 +1,6 @@
 # Roadmap and release gates
 
-**Accepted by the operator: 2026-11-12.** These milestones are evidence gates, not dates or claims that their code exists. The build stays a **0.1.x pre-release** (0.1.3 at this writing) until a release is cut. Accepting this plan does not pass any gate.
+**Accepted by the operator: 2026-11-12.** These milestones are evidence gates, not dates or claims that their code exists. The build stays a **0.1.x pre-release** (0.1.4 at this writing) until a release is cut. Accepting this plan does not pass any gate.
 
 ## Product contract
 
@@ -17,6 +17,15 @@ Diagnostics stay allowlisted. Scripts follow [ADR-0014](decisions/ADR-0014-scrip
 
 ## Delivery sequence
 
+**Priority accepted 2026-11-15:** after SSO, bring forward a Windows logged-in desktop
+preview of **Take control** on already-enrolled hosts, ahead of additional findings and
+scheduling work. Use the shared engine, endpoint opt-in policy, a visible Notify state
+with local Stop, tenant authorization and revocation, and signed upgrades that preserve
+the device identity and journal. G02-TRUST and packaging evidence still gate delivery.
+This priority does not pass secure-desktop/UAC, macOS, TURN or other platform gates and
+does not renumber the full milestones below or promise a delivery date.
+
+
 | Milestone | Deliverable | Required demonstration |
 |---|---|---|
 | **0.2.0: Trustworthy foundation** | Journal hardening, reproducible deployment, signed packages, restore, unified threat model and early Mac experiments. | Failed writes never publish unsaved state; damaged history blocks startup without being discarded; fresh install/restore work; real Mac permissions and session limits are understood. |
@@ -24,7 +33,7 @@ Diagnostics stay allowlisted. Scripts follow [ADR-0014](decisions/ADR-0014-scrip
 | **0.4.0: Native attended control** | Shared engine, Windows/Mac capture and input, browser viewer, explicit consent, indicator and local Stop. | Separate physical machines connect directly and through TURN. Loss of consent/connectivity stops input/capture and releases held keys. |
 | **0.5.0: Native unattended control** | Service/session supervision, endpoint-enforced policy, reconnects, Windows secure-desktop support and proven Mac session behavior. | Reboot, lock/unlock, user switching, sleep/wake, helper crash and revocation pass the platform matrix. Windows UAC and sign-in control work. |
 | **0.6.0: Fleet lifecycle** | Signed auto-update, canaries, staged rollout, rollback, version compatibility, uninstall and revocation. | Bad signatures, incompatible builds, interrupted updates and reconnect failures fail safely or roll back without manual reinstalls. |
-| **0.7.0: Technician-complete workflows** | OIDC, refined permissions, pagination, dependable presence, fleet policy, audit export, integrations and support diagnostics. | Another technician installs and operates supported workflows from the docs without author intervention or manual database repair. |
+| **0.7.0: Technician-complete workflows** | OIDC provider/deployment evidence, refined permissions, pagination, dependable presence, fleet policy, audit export, integrations and support diagnostics. | Another technician installs and operates supported workflows from the docs without author intervention or manual database repair. |
 | **0.8.0: Feature complete** | Every promised 1.0 workflow on both endpoint platforms. | Pass the feature-freeze gate below. |
 | **0.9.0: Pilot proven** | Mixed-platform fleet evidence, fault drills, capacity measurements, independent security review and candidate upgrades. | Pass the operational gates below. |
 | **1.0.0: Supported release** | Verified artifacts, supported upgrades, recovery and support documentation. | Close all gates with evidence; pass final release review. |

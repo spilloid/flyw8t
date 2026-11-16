@@ -153,6 +153,13 @@ async fn detail(state: &Shared, p: &Principal, id: Uuid) -> AppResult<UserDetail
         api_tokens,
         password_changed_at,
         password_temporary,
+        directory: sqlx::query_as::<_, (bool,)>(
+            "SELECT EXISTS(SELECT 1 FROM directory_users WHERE user_id=$1)",
+        )
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?
+        .0,
     })
 }
 
@@ -223,6 +230,7 @@ pub async fn edit(
         }
         let mut tx = state.db.begin().await?;
         let u = lock_user(&mut tx, &p, id).await?;
+        if crate::directory::is_directory(&mut tx,id).await? { return Err(AppError::Conflict("This account is managed by the directory. Change its group mapping or directory profile.".into())); }
         if id == p.user_id && role != u.role {
             return Err(AppError::BadRequest(
                 "You cannot change your own role. Another administrator can.".into(),
@@ -274,6 +282,9 @@ pub async fn edit(
         // Enrollment tokens are authority handed out in advance. Judged by what the person may do now, not by
         // what was taken away (an administrator had no assignments to take): all of them stop if the new role may
         // not enroll, and otherwise those for organizations outside the new assignments.
+        if role != Role::Admin {
+            sqlx::query("UPDATE scim_credentials SET revoked_at=now() WHERE created_by=$1 AND revoked_at IS NULL").bind(id).execute(&mut *tx).await?;
+        }
         let keeps_all = role == Role::Admin;
         let lost_all = !role.allows(Permission::ManageEnrollment);
         let enrollment_tokens = sqlx::query(
@@ -333,7 +344,10 @@ pub async fn disable(
         }
         let mut tx = state.db.begin().await?;
         let u = lock_user(&mut tx, &p, id).await?;
+        let manual=sqlx::query("UPDATE directory_users SET directory_disabled=false WHERE user_id=$1 AND directory_disabled").bind(id).execute(&mut *tx).await?.rows_affected();
         if u.disabled {
+            if manual>0 {Audit::user(&p,"user.disable").target("user",id).detail(json!({"manual_directory_disable":true})).record(&mut *tx).await?;}
+            tx.commit().await?;
             return to(format!("{}?m=user-disabled", back(id)));
         }
         sqlx::query("UPDATE users SET disabled_at = now() WHERE id = $1")
@@ -341,6 +355,7 @@ pub async fn disable(
             .execute(&mut *tx)
             .await?;
         auth::revoke_other_sessions(&mut tx, id, None).await?;
+        sqlx::query("UPDATE scim_credentials SET revoked_at=now() WHERE created_by=$1 AND revoked_at IS NULL").bind(id).execute(&mut *tx).await?;
         let api_tokens = sqlx::query(
             "UPDATE api_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
         )
@@ -391,7 +406,12 @@ pub async fn enable(
         p.require_sudo(&back(id))?;
         let mut tx = state.db.begin().await?;
         let u = lock_user(&mut tx, &p, id).await?;
+        if crate::directory::is_directory(&mut tx,id).await? {
+            let (allowed,):(bool,)=sqlx::query_as("SELECT d.active AND EXISTS(SELECT 1 FROM directory_mappings m WHERE m.issuer=d.issuer AND m.group_key=ANY(d.groups)) FROM directory_users d WHERE d.user_id=$1").bind(id).fetch_one(&mut *tx).await?;
+            if !allowed {return Err(AppError::Conflict("Restore directory active status and a group mapping before enabling this account.".into()));}
+        }
         if u.disabled {
+            sqlx::query("UPDATE directory_users SET directory_disabled=false WHERE user_id=$1").bind(id).execute(&mut *tx).await?;
             sqlx::query("UPDATE users SET disabled_at = NULL WHERE id = $1")
                 .bind(id)
                 .execute(&mut *tx)
@@ -429,6 +449,7 @@ pub async fn temporary_password(
         let hash = auth::hash_password(&secret)?;
         let mut tx = state.db.begin().await?;
         let u = lock_user(&mut tx, &p, id).await?;
+        if crate::directory::is_directory(&mut tx,id).await? {return Err(AppError::Conflict("Directory accounts have no local password. Reset sign-in at the provider.".into()));}
         sqlx::query(
             "UPDATE users SET password_hash = $2, password_changed_at = now(), password_temporary = true WHERE id = $1",
         )
@@ -506,6 +527,7 @@ pub async fn change_password(
         .await?;
         let (stored,) = row.ok_or(AppError::Unauthorized)?;
         // The session that made this request must still be live now that the user is locked.
+        if crate::directory::is_directory(&mut tx,p.user_id).await? {return Err(AppError::Conflict("Directory accounts have no local password. Change it at the provider.".into()));}
         let session = p.session_id.ok_or(AppError::Unauthorized)?;
         auth::lock_session(&mut tx, session, p.session_token.as_deref(), &[Stage::Full]).await?;
         if !auth::verify_password(&stored, current) {

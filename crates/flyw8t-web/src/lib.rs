@@ -5,6 +5,8 @@
 //! See `docs/decisions/ADR-0003-web-ui-ssr-first.md`.
 
 mod admin;
+mod directory;
+pub use directory::directory_page;
 pub mod fmt;
 pub mod model;
 mod network;

@@ -376,7 +376,7 @@ fn refusal(code: RefusalCode, message: String) -> SessionError {
 pub async fn enroll(mut cfg: AgentConfig, token: &str) -> Result<(Uuid, String)> {
     if cfg.device_id.is_some() || cfg.key_path().exists() {
         bail!(
-            "{} already holds an enrolled identity; remove it to enroll again",
+            "{} already holds an enrolled identity; preserve its identity and job history and follow docs/deployment.md#existing-test-enrollment when moving it to another server",
             cfg.state_dir.display()
         );
     }

@@ -441,7 +441,15 @@ async fn account_view(state: &Shared, user: Uuid, session: Option<Uuid>) -> AppR
     .bind(session)
     .fetch_one(&state.db)
     .await?;
+    let directory = sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS(SELECT 1 FROM directory_users WHERE user_id=$1)",
+    )
+    .bind(user)
+    .fetch_one(&state.db)
+    .await?
+    .0;
     Ok(AccountView {
+        directory,
         email,
         display_name,
         mfa_enabled_at: enabled_at,

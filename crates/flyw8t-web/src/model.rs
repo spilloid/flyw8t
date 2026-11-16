@@ -483,6 +483,7 @@ pub struct AuditPage {
 /// One user, for the administrator's page about them.
 #[derive(Debug, Clone)]
 pub struct UserDetail {
+    pub directory: bool,
     pub id: Uuid,
     pub email: String,
     pub display_name: String,
@@ -745,6 +746,7 @@ pub struct MfaSetupView {
 
 #[derive(Debug, Clone)]
 pub struct AccountView {
+    pub directory: bool,
     pub email: String,
     pub display_name: String,
     pub mfa_enabled_at: Option<OffsetDateTime>,

@@ -106,7 +106,7 @@ async fn take_challenge(
     let session = p.session_id.ok_or(AppError::Unauthorized)?;
     auth::lock_session(tx, session, p.session_token.as_deref(), &[Stage::Full]).await?;
     let row: (Option<Vec<u8>>, Option<String>, bool) = sqlx::query_as(
-        "SELECT webauthn_challenge, webauthn_purpose, coalesce(webauthn_expires_at > now(), false)
+        "SELECT webauthn_challenge, webauthn_purpose, coalesce(webauthn_expires_at > clock_timestamp(), false)
            FROM sessions WHERE id = $1",
     )
     .bind(session)
@@ -141,6 +141,13 @@ fn descriptors(ids: &[Vec<u8>]) -> serde_json::Value {
         .collect()
 }
 
+/// Only a verified, recent provider authentication can bootstrap a directory account's first key.
+/// The mutation calls this after locking both user and the exact presented session.
+async fn recent_provider<'e, E: sqlx::PgExecutor<'e>>(exec: E, p: &Principal) -> AppResult<bool> {
+    Ok(sqlx::query_as::<_,(bool,)>("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=$1 AND user_id=$2 AND auth_method='oidc' AND stage='full' AND revoked_at IS NULL AND expires_at>clock_timestamp() AND token_hash=$3 AND created_at>clock_timestamp()-interval '5 minutes' AND provider_authenticated_at BETWEEN clock_timestamp()-interval '5 minutes' AND clock_timestamp())")
+        .bind(p.session_id).bind(p.user_id).bind(p.session_token.as_deref()).fetch_one(exec).await?.0)
+}
+
 // ---------------------------------------------------------------------------------------
 // Registration
 
@@ -152,6 +159,16 @@ async fn new_page(state: &Shared, p: &Principal, error: Option<String>) -> AppRe
     let existing = credential_ids(state, p.user_id).await?;
     if !existing.is_empty() {
         p.require_sudo("/account/passkeys/new")?;
+    }
+    let directory = sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS(SELECT 1 FROM directory_users WHERE user_id=$1)",
+    )
+    .bind(p.user_id)
+    .fetch_one(&state.db)
+    .await?
+    .0;
+    if existing.is_empty() && directory && !recent_provider(&state.db, p).await? {
+        return Err(AppError::Conflict("Sign in with your organization again to add your first passkey. The provider must return a recent auth_time.".into()));
     }
     let (_, rp_id) = rp(state)?;
     let challenge = new_challenge(state, p, "register").await?;
@@ -185,8 +202,8 @@ async fn new_page(state: &Shared, p: &Principal, error: Option<String>) -> AppRe
                 options: options.to_string(),
                 error,
             },
-            needs_password: existing.is_empty(),
-            needs_code: existing.is_empty() && totp.0,
+            needs_password: existing.is_empty() && !directory,
+            needs_code: existing.is_empty() && !directory && totp.0,
         },
     );
     let mut r = ceremony_page(html);
@@ -209,6 +226,7 @@ pub async fn register(State(state): State<Shared>, WebUser(p): WebUser, body: By
                 .await?;
         if count > 0 {
             p.require_sudo("/account/passkeys/new")?;
+            auth::recheck_session(&mut tx,&p,true).await?;
         }
         let challenge = take_challenge(&mut tx, &p, "register").await?;
         // Ok(Err(..)): refused, with a message for the person; Err(..): something broke.
@@ -219,7 +237,9 @@ pub async fn register(State(state): State<Shared>, WebUser(p): WebUser, body: By
             if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
                 return Ok(Err("Give the passkey a name of up to 100 characters, such as \"YubiKey on my keyring\".".into()));
             }
-            if count == 0 {
+            if count == 0 && crate::directory::is_directory(&mut tx,p.user_id).await? {
+                if !recent_provider(&mut *tx,&p).await? {return Ok(Err("Sign in with your organization again. Adding the first passkey needs a recent provider authentication.".into()));}
+            } else if count == 0 {
                 // The first key: the password, and the current code when two-step verification is on.
                 if mfa::rate_limited(&state, p.user_id) {
                     return Err(AppError::RateLimited);
@@ -295,6 +315,7 @@ pub async fn remove(
         p.require_sudo("/account")?;
         let mut tx = state.db.begin().await?;
         auth::lock_user_factor(&mut tx, p.user_id).await?;
+        auth::recheck_session(&mut tx, &p, true).await?;
         let gone: Option<(String,)> = sqlx::query_as(
             "DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2 RETURNING name",
         )
@@ -576,7 +597,7 @@ pub async fn sign_in(
         .fetch_optional(&mut *tx)
         .await?;
         let owner: Option<(Uuid, String)> = sqlx::query_as(
-            "SELECT c.user_id, u.email FROM webauthn_credentials c JOIN users u ON u.id = c.user_id WHERE c.credential_id = $1",
+            "SELECT c.user_id, u.email FROM webauthn_credentials c JOIN users u ON u.id = c.user_id WHERE c.credential_id = $1 AND NOT EXISTS(SELECT 1 FROM directory_users d WHERE d.user_id=u.id)",
         )
         .bind(&credential)
         .fetch_optional(&mut *tx)

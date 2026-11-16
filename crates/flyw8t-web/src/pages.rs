@@ -301,7 +301,7 @@ fn job_table(rows: Vec<JobRow>, now: OffsetDateTime, show_device: bool) -> impl 
 // ---------------------------------------------------------------------------------------
 
 /// The sign-in page. `login_token` is the value of the sign-in cookie set with it (login CSRF).
-pub fn login_page(error: Option<String>, no_admin: bool, login_token: &str) -> String {
+pub fn login_page(error: Option<String>, no_admin: bool, login_token: &str, oidc: bool) -> String {
     let note = no_admin.then(|| {
         view! {
             <p class="flash bad">
@@ -326,6 +326,7 @@ pub fn login_page(error: Option<String>, no_admin: bool, login_token: &str) -> S
                         <label>"Password"<input type="password" name="password" autocomplete="current-password" required=true/></label>
                         <button type="submit">"Sign in"</button>
                     </form>
+                    {oidc.then(|| view! { <p><a href="/login/oidc">"Sign in with your organization"</a></p> })}
                     <p><a href="/login/passkey">"Sign in with a passkey"</a></p>
                 </main>
             </body>
@@ -1849,6 +1850,7 @@ pub fn admin_page(
     tokens: Vec<ApiTokenRow>,
     orgs: Vec<OrgRef>,
     revealed: Option<RevealedSecret>,
+    oidc: bool,
 ) -> String {
     let now = ctx.now;
     let user_rows = users
@@ -1894,6 +1896,7 @@ pub fn admin_page(
         .collect_view();
     let body = view! {
         <h1>"Administration"</h1>
+            {oidc.then(||view!{<p><a href="/admin/directory">"Directory sign-in and provisioning"</a></p>})}
         {admin_tabs("/admin")}
         {revealed.map(revealed_box)}
         <section>
@@ -2501,7 +2504,13 @@ pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
             </form>
         }
     });
-    let password = crate::admin::password_card(ctx, a.password_temporary, a.password_changed_at);
+    let password = (!a.directory)
+        .then(|| crate::admin::password_card(ctx, a.password_temporary, a.password_changed_at));
+    let mfa = if a.directory {
+        view!{<p>"Sign-in and MFA are managed by your organization. Your local passkey confirms sudo mode."</p>}.into_any()
+    } else {
+        mfa
+    };
     let body = view! {
         <h1>"Your account"</h1>
         <dl class="facts">
@@ -2520,7 +2529,7 @@ pub fn account_page(ctx: &PageCtx, a: AccountView) -> String {
         {password}
         <section>
             <h2>"Where you are signed in"</h2>
-            <p class="muted">"Browsers holding a session of yours. One you do not recognise means someone has your password: sign it out, then change your password."</p>
+            <p class="muted">{if a.directory {"Browsers holding a session of yours. Sign out any you do not recognize, then review your organization sign-in security."} else {"Browsers holding a session of yours. One you do not recognise means someone has your password: sign it out, then change your password."}}</p>
             <table class="list">
                 <thead><tr><th>"Browser"</th><th>"Address"</th><th>"Signed in"</th><th>"Last active"</th><th></th></tr></thead>
                 <tbody>{session_rows}</tbody>
@@ -3093,6 +3102,14 @@ pub fn script_revision_page(
     shell(&title, ctx, Nav::Scripts, None, body)
 }
 
+/// A committed same-origin document lets the following user navigation send Strict cookies.
+pub fn oidc_complete_page() -> String {
+    card_page(
+        "Sign-in complete",
+        view! {<h1>"Sign-in complete"</h1><p>"Your organization has signed you in."</p><p><a class="button" href="/">"Continue to flyw8t"</a></p>},
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3128,6 +3145,7 @@ mod tests {
 
     fn user(role: &str) -> UserDetail {
         UserDetail {
+            directory: false,
             id: Uuid::nil(),
             email: "pat@example.com".into(),
             display_name: "Pat <img src=x>".into(),
