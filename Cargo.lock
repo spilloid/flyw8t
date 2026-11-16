@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-agent"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-domain"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flyw8t-protocol",
  "serde",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-helper"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-protocol"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1340,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-sign"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "flyw8t-web"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flyw8t-domain",
  "flyw8t-protocol",
@@ -1825,6 +1825,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -3260,6 +3261,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots",
 ]
 
 [[package]]

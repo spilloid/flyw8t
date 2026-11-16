@@ -2,6 +2,15 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## 0.1.5 — 2026-11-16 (pre-release)
+
+- Fix OIDC HTTPS discovery/token requests in 0.1.4: its reqwest feature selected an empty
+  manual TLS root store, so valid public certificates failed with `UnknownIssuer` and the
+  console returned a generic sign-in error. Bundle WebPKI roots while retaining explicit
+  Ring, certificate/hostname verification, same-origin endpoints and redirect refusal.
+- Add a required release check against public-CA HTTPS and local TLS certificate/hostname
+  rejection controls. No 0.1.4 release artifacts or tags are changed.
+
 ## 0.1.4 — 2026-11-16 (pre-release)
 
 - Optional OpenID Connect code/PKCE sign-in with discovery, RS256/ES256 JWKS validation,

@@ -158,3 +158,19 @@ rollback must preserve histories while removing/revoking directory authority, or
 database backup restore with agent journals, job reconciliation and IdP/ingress changes; a
 casual pre-SSO database restore can discard fleet/job evidence. Agent 0.1.3 can remain a
 diagnostics client; this restriction applies to servers, not routine agent upgrades.
+
+## HTTPS roots (0.1.5 hotfix)
+
+OIDC uses bundled WebPKI trust roots with the explicit Ring rustls provider. Certificate
+and hostname verification remain mandatory; redirects, cross-origin metadata endpoints,
+and non-loopback plaintext stay refused. Version 0.1.4 accidentally selected reqwest's
+manual-root feature without supplying roots, so HTTPS providers failed with UnknownIssuer.
+Upgrade the server to 0.1.5; do not disable TLS verification or change the issuer to HTTP.
+Private-CA providers are not configured through this feature; custom-CA support is separate
+work. Public DNS/egress and the provider's valid certificate chain must still be reachable.
+
+The release/full validation includes an ignored-by-default public HTTPS regression against
+`https://example.com/`, with strict TLS, no proxy, no credentials, no redirects and bounded
+requests. It requires outbound HTTPS and runs under `--include-ignored`; it never silently
+skips. Local controls prove an untrusted self-signed certificate and a wrong hostname are
+rejected, while a test-only trusted CA reaches the same running fixture.
