@@ -37,6 +37,7 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
   el('support').dataset = { role, session: SID, ice: '[]', state: role === 'participant' ? 'authorizing' : 'waiting', control: control ? '1' : '0' };
   const sockets = [];
   const peers = [];
+  const hintTimers = new Map();
   let pickerCalls = 0;
   let releaseCert = () => {};
   const certGate = delayCert ? new Promise((r) => { releaseCert = r; }) : Promise.resolve();
@@ -78,7 +79,14 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
     document: { getElementById: el },
     location: { protocol: 'https:', host: 'rmm.example' },
     WebSocket, RTCPeerConnection, MediaStream: class {},
-    crypto: webcrypto, TextEncoder, setTimeout,
+    crypto: webcrypto, TextEncoder,
+    setTimeout(fn, delay) {
+      if (delay < 2500) return setTimeout(fn, delay);
+      const token = {};
+      hintTimers.set(token, fn);
+      return token;
+    },
+    clearTimeout(token) { if (!hintTimers.delete(token)) clearTimeout(token); },
     navigator: { mediaDevices: { getDisplayMedia: () => { pickerCalls += 1; return new Promise((res, rej) => { resolvePicker = res; rejectPicker = rej; }); } } },
     window: { addEventListener: (t, f) => { windowHandlers[t] = f; } },
   };
@@ -88,6 +96,11 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
   const track = { kind: 'video', stopped: false, stop() { this.stopped = true; } };
   return {
     el, ws, peers, windowHandlers, track,
+    showDelayedHint() {
+      const callbacks = [...hintTimers.values()];
+      hintTimers.clear();
+      callbacks.forEach(fn => fn());
+    },
     pickerCalls: () => pickerCalls,
     pick: async () => { resolvePicker({ getTracks: () => [track], getVideoTracks: () => [track] }); await settle(); },
     releaseCert: async () => { releaseCert(); await settle(); },
@@ -99,6 +112,73 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
 }
 
 const state = (s) => ({ type: 'state', state: s, label: s, peer_present: true });
+
+test('a normal connection stays quiet; repeated waiting updates keep one actionable hint', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv({ ...state('waiting'), peer_present: false });
+  assert.equal(t.el('peer').textContent, '');
+  t.showDelayedHint();
+  assert.match(t.el('peer').textContent, /invitation/i);
+  await t.recv({ ...state('waiting'), peer_present: false });
+  assert.match(t.el('peer').textContent, /invitation/i);
+  await t.recv(state('connecting'));
+  assert.equal(t.el('peer').textContent, '');
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Access ended' });
+  t.showDelayedHint();
+  assert.equal(t.el('state').textContent, 'Access ended');
+  assert.equal(t.el('peer').textContent, '');
+});
+
+test('a technician reports connected only after a displayable frame and a connected transport', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  const video = t.el('remote');
+  let frame;
+  video.requestVideoFrameCallback = cb => { frame = cb; };
+  pc.ontrack({ track: { kind: 'video' }, streams: [{}] });
+  pc.connect();
+  assert.equal(t.sent('media').length, 0);
+  await t.recv(state('connected'));
+  assert.notEqual(t.el('support').dataset.state, 'connected');
+  t.showDelayedHint();
+  assert.match(t.el('peer').textContent, /first frame/i);
+  frame();
+  assert.equal(t.sent('media').length, 1);
+  assert.equal(t.el('support').dataset.state, 'connected');
+  assert.equal(t.el('peer').textContent, '');
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange();
+  await t.recv(state('connected'));
+  assert.equal(t.el('support').dataset.state, 'interrupted');
+  t.showDelayedHint();
+  assert.match(t.el('peer').textContent, /connection/i);
+  pc.connect();
+  assert.notEqual(t.el('support').dataset.state, 'connected');
+  frame();
+  assert.equal(t.el('support').dataset.state, 'connected');
+  assert.equal(t.sent('media').length, 1);
+  assert.equal(t.peers.length, 1);
+});
+
+test('a frame delivered after revocation cannot reopen the viewer or report media', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  const video = t.el('remote');
+  pc.connect();
+  pc.ontrack({ track: { kind: 'video' }, streams: [{}] });
+  const lateFrame = video.onloadeddata;
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Access ended' });
+  lateFrame();
+  t.showDelayedHint();
+  assert.equal(t.sent('media').length, 0);
+  assert.equal(t.el('support').dataset.state, 'ended');
+  assert.equal(t.el('viewer').hidden, true);
+  assert.equal(t.el('peer').textContent, '');
+});
 
 async function consentedParticipant(opts = {}) {
   const tDer = der('technician');
@@ -186,6 +266,8 @@ test('both sides derive the same code from the certificates in use', async () =>
   assert.equal(commits[0].data.commit, await commitOf(tDer), 'the commitment is to its own certificate');
   await t.recv(offer());
   t.peers[0].connect();
+  t.peers[0].ontrack({ track: { kind: 'video' }, streams: [{}] });
+  t.el('remote').onloadeddata();
   await settle();
   assert.equal(t.sas(), p.sas());
   assert.equal(t.sent('media').length, 1);

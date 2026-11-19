@@ -1359,6 +1359,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "flyw8t-technician"
+version = "0.1.5"
+dependencies = [
+ "cc",
+ "url",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "flyw8t-web"
 version = "0.1.5"
 dependencies = [

@@ -2091,20 +2091,24 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
         .join(", ")
         .replace("view_screen", "view screen")
         .replace("control_input", "keyboard and mouse (through the helper)");
-    let data_state = if s.terminal { "ended" } else { s.state };
     // Only the technician who created the session receives its signaling. Anyone else allowed
     // to see it (an administrator) gets its state and an End button, and no script.
     let observer = s.observer.then(|| view! {
         <p class="flash">{format!("Only {} can view this session. You can end it.", s.created_by)}</p>
     });
     let script = live && !s.observer;
+    let (state, label) = if script && s.state == "connected" {
+        ("checking", "Checking connection…")
+    } else {
+        (s.state, s.state_label)
+    };
+    let data_state = if s.terminal { "ended" } else { state };
     let body = view! {
         <p class="crumbs"><a href="/support">"Support"</a>" / "</p>
-        // The badge is updated live by support.js; it never shows the load-time state as current.
-        <h1>{title.clone()}" "<span id="state-badge" class=support_badge_class(s.state)>{s.state_label}</span></h1>
+        <h1>{title.clone()}" "<span id="state-badge" class=support_badge_class(state)>{label}</span></h1>
         <div id="support" data-role="technician" data-session=s.id.to_string() data-ice=ice_servers.to_string() data-state=data_state>
-            <p class="lead" id="state" aria-live="polite">{s.state_label}</p>
-            <p class="muted" id="peer"></p>
+            <p class="lead" id="state" aria-live="polite">{label}</p>
+            <p class="muted" id="peer" aria-live="polite" hidden=true></p>
             <p class="flash bad" id="error" aria-live="assertive"></p>
             {observer}
             {ended}
@@ -2227,6 +2231,11 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         .into_any()
     };
     let control = if v.control { "1" } else { "0" };
+    let (state, label) = if v.state == "connected" {
+        ("checking", "Checking connection…")
+    } else {
+        (v.state, v.state_label)
+    };
     participant_shell(
         if v.control {
             "Remote control request"
@@ -2235,12 +2244,13 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         },
         true,
         view! {
-            <div id="support" data-role="participant" data-session=v.session_id.to_string() data-ice=ice_servers.to_string() data-state=v.state data-control=control>
+            <div id="support" data-role="participant" data-session=v.session_id.to_string() data-ice=ice_servers.to_string() data-state=state data-control=control>
                 <h1>{heading}</h1>
                 <p>{who}</p>
                 // Live status and the way out come first, so ending is always one tap away.
                 <div class="live">
-                    <p class="lead" id="state" aria-live="polite">{v.state_label}</p>
+                    <p class="lead" id="state" aria-live="polite">{label}</p>
+                    <p class="muted" id="peer" aria-live="polite" hidden=true></p>
                     <p class="flash bad" id="error" aria-live="assertive"></p>
                     <button type="button" id="end" class="bad" hidden=true>"Stop sharing and end the session"</button>
                     <div id="sas-box" class="sas" hidden=true>

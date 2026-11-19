@@ -22,7 +22,7 @@
   const sessionId = root.dataset.session || '';
   const ice = JSON.parse(root.dataset.ice || '[]');
   const $ = (id) => document.getElementById(id);
-  const setText = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+  const setText = (id, text) => { const el = $(id); if (el && el.textContent !== text) el.textContent = text; };
   const show = (id, on) => { const el = $(id); if (el) el.hidden = !on; };
   const path = role === 'technician'
     ? `/api/support/${sessionId}/ws`
@@ -37,6 +37,12 @@
   let committed = false; // technician: commitment sent
   let offered = false; // technician: one offer per session, never a renegotiation
   let epoch = 0; // bumped by every teardown: async work started before it must not act after it
+  let sessionState = root.dataset.state;
+  let sessionLabel = $('state').textContent;
+  let peerPresent = false;
+  let frameReady = false;
+  let hint = '';
+  let hintTimer;
 
   const send = (msg) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); };
   const hex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -50,7 +56,7 @@
   };
   const commitTo = (fp) => sha256(`flyw8t-sas-commit-v1|${sessionId}|${fp}`);
 
-  const badgeClass = (state) => ({ connected: 'badge good', connection_failed: 'badge bad' }[state]
+  const badgeClass = (state) => ({ connected: 'badge good', interrupted: 'badge busy', connection_failed: 'badge bad' }[state]
     || (['connecting', 'waiting', 'authorizing', 'created'].includes(state) ? 'badge busy' : 'badge neutral'));
 
   function setBadge(state, label) {
@@ -58,18 +64,55 @@
     if (badge) { badge.textContent = label; badge.className = badgeClass(state); }
   }
 
-  function render(state, label, peerPresent) {
+  function delayedHint(next) {
+    if (next === hint) return;
+    clearTimeout(hintTimer);
+    hint = next;
+    setText('peer', '');
+    show('peer', false);
+    if (next) hintTimer = setTimeout(() => {
+      setText('peer', next);
+      show('peer', true);
+    }, 2500);
+  }
+
+  function contextHint(state) {
+    if (state === 'interrupted') return 'The screen connection was interrupted. Check that both devices are still online.';
+    if (role === 'technician') {
+      if (state === 'created' || state === 'waiting') return 'Send the participant the invitation link or code.';
+      if (state === 'authorizing') return 'Ask the participant to review the request on their support page.';
+      if (state === 'awaiting_helper') return 'Ask the participant to open the downloaded helper and review its request.';
+    }
+    if (state !== 'connecting') return '';
+    if (!peerPresent) return 'Waiting for the other side. Check that they still have the session open.';
+    if (role === 'technician' && pc?.connectionState === 'connected' && !frameReady)
+      return 'Waiting for the first frame. Ask the participant to check their shared screen.';
+    return 'The screen connection is still starting. Keep the session open on both devices.';
+  }
+
+  function render() {
     if (ended) return;
+    let state = sessionState;
+    let label = sessionLabel;
+    const live = state === 'connecting' || state === 'connected';
+    if (live && (pc?.connectionState === 'disconnected' || pc?.connectionState === 'failed')) {
+      state = 'interrupted';
+      label = 'Screen interrupted';
+    } else if (state === 'connected' && !(control && role === 'participant')
+      && (pc?.connectionState !== 'connected' || (role === 'technician' && !frameReady))) {
+      state = 'connecting';
+      label = 'Waiting for the screen';
+    }
     root.dataset.state = state;
     setText('state', label);
     setBadge(state, label);
+    delayedHint(contextHint(state));
     if (role === 'participant') {
       show('decide', state === 'authorizing');
       show('helper-box', control && state === 'awaiting_helper');
-      show('end', state === 'connecting' || state === 'connected');
+      show('end', live);
     } else {
-      setText('peer', peerPresent ? 'The other person has this session open.' : 'The other person does not have this session open yet.');
-      show('viewer', state === 'connecting' || state === 'connected');
+      show('viewer', live);
     }
   }
 
@@ -86,6 +129,7 @@
     stopMedia();
     if (ended) return;
     ended = true;
+    delayedHint('');
     root.dataset.state = 'ended';
     setText('state', label);
     setBadge(state, label);
@@ -170,22 +214,60 @@
     const conn = pc;
     const mine = epoch;
     let shown = false;
+    let reported = false;
+    let frameGeneration = 0;
+    // Once interrupted, an already decoded frame may still be visible in the element.
+    // A fresh frame confirms recovery even if the server still has both original reports.
+    let framesAtInterruption = null;
+    const video = $('remote');
+    function reportReady() {
+      if (!reported && conn.connectionState === 'connected' && (role === 'participant' || frameReady)) {
+        reported = true;
+        send({ type: 'media', state: 'connected' });
+      }
+    }
+    function watchFrame() {
+      if (!video?.srcObject || conn.connectionState !== 'connected' || frameReady) return;
+      const check = ++frameGeneration;
+      const received = () => {
+        if (stale(conn, mine) || check !== frameGeneration || conn.connectionState !== 'connected') return;
+        frameReady = true;
+        video.onloadeddata = video.ontimeupdate = null;
+        reportReady();
+        render();
+      };
+      if (framesAtInterruption === null && video.videoWidth > 0 && video.readyState >= 2) {
+        received();
+      } else if (video.requestVideoFrameCallback) {
+        video.requestVideoFrameCallback(received);
+      } else {
+        video.onloadeddata = received;
+        video.ontimeupdate = () => {
+          if (video.videoWidth > 0 && video.getVideoPlaybackQuality?.().totalVideoFrames > (framesAtInterruption ?? 0)) received();
+        };
+      }
+    }
     pc.onicecandidate = (e) => { if (e.candidate && !stale(conn, mine)) send({ type: 'signal', data: { candidate: e.candidate.toJSON() } }); };
     pc.onconnectionstatechange = () => {
       if (stale(conn, mine)) return;
       if (conn.connectionState === 'connected') {
-        send({ type: 'media', state: 'connected' });
+        watchFrame();
+        reportReady();
         securityCheck(conn, mine);
-      } else if (conn.connectionState === 'failed') {
-        send({ type: 'media', state: 'failed' });
+      } else if (conn.connectionState === 'disconnected' || conn.connectionState === 'failed') {
+        frameGeneration += 1;
+        frameReady = false;
+        framesAtInterruption = video?.getVideoPlaybackQuality?.().totalVideoFrames ?? 0;
+        if (conn.connectionState === 'failed') send({ type: 'media', state: 'failed' });
       }
+      render();
     };
     pc.ontrack = (e) => {
       if (stale(conn, mine)) return;
       if (shown || e.track.kind !== 'video') { refuseTopology(); return; }
       shown = true;
-      const video = $('remote');
       if (video) video.srcObject = e.streams[0] || new MediaStream([e.track]);
+      watchFrame();
     };
   }
 
@@ -236,7 +318,11 @@
   }
 
   async function onState(msg) {
-    render(msg.state, msg.label, msg.peer_present);
+    if (ended) return;
+    sessionState = msg.state;
+    sessionLabel = msg.label;
+    peerPresent = msg.peer_present;
+    render();
     if (msg.state !== 'connecting') return;
     if (role === 'technician' && !committed) {
       committed = true;
@@ -251,8 +337,10 @@
   }
 
   function connect() {
+    delayedHint('Waiting for the support server. Check your network connection.');
     ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`);
     ws.onmessage = async (event) => {
+      if (ended) return;
       const msg = JSON.parse(event.data);
       if (msg.type === 'state') {
         await onState(msg);
@@ -260,6 +348,10 @@
         await onSignal(msg.data || {});
       } else if (msg.type === 'ended') {
         finish(msg.state, msg.label);
+        if (msg.state === 'connection_failed') {
+          setText('peer', 'Check that both devices are online before starting a new session.');
+          show('peer', true);
+        }
       } else if (msg.type === 'helper' && control && role === 'participant') {
         // Only a helper download from this server ever goes into the link.
         const link = $('helper-link');

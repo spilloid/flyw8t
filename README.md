@@ -18,6 +18,39 @@ flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP 
 - **JSON API** with scoped bearer tokens and idempotency keys, for integrations such as AnchorDesk.
 - **Self-hosted:** one binary plus PostgreSQL. No Redis, no broker, no SaaS.
 
+## Native Windows technician preview
+
+`flyw8t-technician` offers three ways to work with a Windows computer.
+
+- **Help someone** lists the host's Windows sessions under your current Windows credentials.
+  Pick the account and desktop, then choose **View session** or **Request control**.
+  Flyw8t rechecks the session identity and opens Windows' shadow client. The target's
+  Windows permissions and consent policy apply. Discovery requires Windows session-query
+  access over RPC, which can differ from permission to sign in over RDP.
+- **Share a screen** opens your flyw8t Support console for an attended, view-only
+  invitation. The person opens it inside the intended desktop and chooses the screen.
+  Set `FLYW8T_PUBLIC_URL` to prefill the server address, or enter it in the window.
+- **Windows sign-in** opens an RDP desktop embedded in the native viewer. Enter a
+  computer name, IP address, or `host:port` and choose whether to share the clipboard.
+  Windows handles credentials and certificates. A sign-in can lock the physical
+  console or transfer an existing session. Concurrent independent desktops depend
+  on the Windows host's edition, licensing and configuration.
+
+For a local Windows x64 build, install the Rust MSVC toolchain, Visual C++ build tools,
+and a Windows SDK, then launch the viewer with Cargo.
+
+```powershell
+cargo run --release -p flyw8t-technician
+```
+
+An address argument prefills the field. `--assist HOST` opens the session picker.
+`--share HOST` opens attended sharing. `--connect HOST[:PORT]` starts one Windows sign-in attempt.
+Cancel stays available while the network is being checked. A refusal or timeout explains
+what happened, and the next attempt starts when you choose **Connect** again.
+Clipboard sharing uses Windows RDP redirection and the remote host's policy.
+This preview uses the endpoint's RDP permissions. Flyw8t's enrolled-device Take control
+and consented shared-screen workflows have their own authorization and release gates.
+
 ## Network operations (unreleased)
 
 **Unreleased network operations:** the current source adds NetViz site collectors,
