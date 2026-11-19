@@ -12,3 +12,33 @@ Adoption of corporate-strategy `standards/STD-*.md`, as of 2026-10-29.
 | STD-006 Secret handling | adopted (a, b) | (a) no deployment secrets committed; `.env` is git-ignored, `.env.example` holds placeholders, stated in `SECURITY.md`. (b) passwords Argon2id; session, API and enrollment tokens and support invitations SHA-256 only, shown once with `Cache-Control: no-store`; device private keys never leave devices. |
 | STD-007 Repo metadata | adopted | MIT `LICENSE` (`Joseph Spillers`); `CHANGELOG.md`. AI attribution: none, per the operator's standing preference. |
 | STD-008 UI capture & overflow validation | adopted, **mechanism deviates** | `crates/flyw8t-server/tests/ui_capture.rs` drives headless Chrome over DevTools from Rust (as PortGlass does): 16 pages × 3 widths × 2 themes, failing on horizontal overflow or browser errors; plus `support_browser.rs` for the attended-support flow. Wired into CI. `standards/check.sh` looks for `docs/scripts/capture-*.mjs` and will not detect this shape. |
+
+## Proposed MCP integration for the technician tools
+
+Implementation review, 2026-11-18, against preview `2a3a0b8`, kvm-it 0.7.0 and the corporate STD-005 reference for identity, attribution and approval. [kvm-it adapter guide](https://github.com/spilloid/kvm-it/blob/v0.7.0/docs/mcp.md)
+
+Ship a small Rust executable, `flyw8t-mcp`, alongside the technician tools. A local MCP client launches it over stdio. The operator selects one flyw8t server and authorizes a revocable technician credential through a local profile. Keep secrets out of tool arguments, client command lines and stdout. The adapter calls the control plane over HTTPS. The enrolled agent continues using its authenticated outbound connection, including behind NAT. The GUI and MCP share server-side authorization, jobs and audit. This follows the ownership model in kvm-it, where the GUI and MCP use the same console controller. [MCP stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+
+### First tool set
+
+| Proposed tools | Existing operation and result |
+|---|---|
+| `device_search`, `device_get` | Search accessible organizations, then select an explicit device UUID. Summarize live connection state separately from the timestamp on cached inventory. The current list API caps results at 2,000. Expose possible truncation until the server supplies a cursor. |
+| `diagnostic_catalog`, `device_jobs`, `job_status` | Use the existing catalog, history and outcome APIs. Return bounded structured results. Return full diagnostic output only on explicit request. Treat endpoint text as untrusted data. |
+| `diagnostic_start`, `job_cancel` | Use the existing bounded actions and effective `jobs:run` permission. For start, map a caller-provided `request_id` to `Idempotency-Key` and return a job ID and console link immediately. For cancellation, report the request and read the final outcome from the job. |
+
+The server already owns these operations. Preserve its execution state, verification and `outcome_unknown` result across client disconnects. A status check reads the existing job. [Operator API](anchordesk-integration.md) · [Job lifecycle](job-lifecycle.md)
+
+### Server work before publishing the tools
+
+- Add an authenticated effective-capabilities response for the configured principal. Filter discovery by role and credential scope. Check current authorization, organization and target on every call, including calls from a cached catalog. When capabilities cannot be retrieved, return an actionable connection or authentication status.
+- Bind MCP attribution to a server-issued credential purpose or authenticated MCP entry point. Today bearer calls record `api`. Carry principal, credential identifier, organization, tool/version, request ID and decision into the audit record. Keep the existing transaction boundary for accepted jobs. [Principal](../crates/flyw8t-server/src/auth.rs) · [Audit](../crates/flyw8t-server/src/audit.rs)
+- Fix create replay before exposing diagnostic starts. Today the replay check compares device and action and omits the effective timeout. Two matching creates can race and one can receive a unique-key conflict. Identical concurrent requests should return the same authorized receipt. A change to device, action parameters or effective timeout should produce a conflict without disclosing the previous job. [Job creation](../crates/flyw8t-server/src/jobs.rs)
+
+### Desktop integration
+
+Begin with a support request, its status, and a link for the technician to open the viewer. These require new scoped server operations. Deliver the participant's one-use invitation through the human console. The current technician socket belongs to the session creator, and the Windows picker rechecks the selected logon before requesting shadow. Preserve both properties. Bind any future model-visible frame to an explicit grant for that participant, device and logon. Keep viewing, input, clipboard and file transfer separately authorized. An operator taking over, a changed logon or participant revocation must invalidate outstanding observations and pending input. Windows sign-in stays interactive. [Attended support](attended-support.md) · [Session validation](../crates/flyw8t-technician/src/sessions.rs)
+
+### Acceptance
+
+Launch the packaged executable from a real MCP client and exercise discovery and a bounded diagnostic against a test device. Verify read-only discovery, rejection of a cached tool after revocation, cross-organization isolation, identical concurrent creates, changed-timeout conflicts, audit attribution and reconnecting to the same receipt. For desktop support, separately verify participant consent, correct Windows logon, human takeover and immediate revocation before advertising those tools.
