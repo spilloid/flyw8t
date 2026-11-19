@@ -10,6 +10,9 @@ All notable changes to flyw8t. Dates are UTC.
   status and returns control to the technician.
 - In browser support, wait for a displayable remote frame before reporting a
   connected viewer. Slow connections show a single reason for the wait.
+- Show the selected WebRTC route in the technician viewer's connection details.
+  The Compose deployment accepts the server's existing `FLYW8T_ICE_SERVERS`
+  setting for direct connectivity and TURN relay fallback.
 
 ## 0.1.5 — 2026-11-16 (pre-release)
 

@@ -80,8 +80,10 @@ operator rebooted it, the listener accepted a connection and the embedded Window
 control reported successful logon. The operator confirmed interactive use and a
 clipboard round trip. The finished session picker returned three Windows sessions.
 The operator selected their active RDP session and confirmed that Windows shadow
-view showed the same desktop. Identifiers, clipboard contents and credentials
-were excluded from this record.
+view showed the same desktop. The operator subsequently reported that Windows
+prompted the user for consent before shadow control, that control worked after
+consent, and that a file copy succeeded. The transfer mechanism and direction
+were not recorded. Identifiers, clipboard contents and credentials were excluded.
 
 The local preview at `b8f4939` passed the Windows technician tests and a packaged
 GUI test of the refused-port status. Native control activation and event
@@ -89,9 +91,24 @@ subscription were tested against the installed Windows control. Browser
 regressions covered transport readiness before the first frame, stale frames
 after revocation and delayed connection hints. A local Chrome test used
 synthetic video. Implementation and review used same-family Codex agents.
-This exercise covered direct LAN sign-in and shadow viewing. Shadow input,
+This exercise covered direct LAN sign-in, shadow viewing and operator-tested shadow control.
 WAN/relay behavior, independent concurrent sign-ins, the full database-backed
 suite and production signing remain outside this evidence.
+
+## Browser media route verification
+
+On November 18, 2026, two headless Chrome peers ran the preview's browser
+viewer with an animated 320 × 180 test screen and a disposable Pion TURN
+server restricted to loopback. Separate runs forced UDP and TCP between
+the clients and the relay. In both, the selected candidate pairs showed a
+relay, the technician received decoded video, the displayed route was
+**TURN relay**, and the six-digit security codes matched. The fixture used
+synthetic signaling. TURN/TLS, enterprise proxy behavior, physical WAN
+connections and concurrent-session capacity remain unmeasured.
+
+Docker Compose 2.39.4 rendered the relay configuration for unset, empty and
+supplied JSON values. The configured synthetic credential retained its
+punctuation. No relay or console deployment was changed.
 
 ## Release foundation sprint: 2026-11-12
 

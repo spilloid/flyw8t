@@ -2126,6 +2126,10 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
             <section id="viewer" class="card" hidden=true>
                 <h2>"Their shared screen"</h2>
                 <video id="remote" autoplay=true muted=true playsinline=true></video>
+                <details id="connection-details">
+                    <summary>"Connection details"</summary>
+                    <dl class="facts"><dt>"Route"</dt><dd id="connection-route">"Unavailable"</dd></dl>
+                </details>
             </section>
             {end_form}
             <noscript><p class="flash bad">"Viewing a shared screen needs JavaScript."</p></noscript>

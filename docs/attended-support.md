@@ -126,6 +126,14 @@ The commitment is what makes six digits enough. Someone in the middle must choos
 
 `FLYW8T_ICE_SERVERS` defaults to empty (LAN only), so **no third party is contacted unless an operator configures one.** Changing relays never touches agent identities: attended sessions do not involve agents.
 
+In the technician's live viewer, open **Connection details** to see the route
+chosen by the browser. **Direct** and **TURN relay** describe the selected ICE
+candidate pair. **Unavailable** means the browser has not supplied enough
+information to identify it. The panel shows no peer addresses or relay credentials.
+The [Compose deployment guide](deployment.md#attended-screen-sharing-across-networks)
+covers relay configuration. This route applies to the WebRTC screen share.
+Windows sign-in and Windows shadow in the native preview still use Windows networking.
+
 ## Threats specific to attended support
 
 | Threat | Control |
@@ -170,7 +178,7 @@ The operator decided (2026-10-30) that attended remote control is a distinct pro
 | Cross-site WebSocket handshakes refused (Origin, scheme included) | Implemented | `access_control_and_cross_site_sockets`, `sockets_check_the_scheme_and_floods_are_cut_off` |
 | Per-technician session cap (race-free), per-IP and global code-guess limits, per-socket message limit | Implemented | `the_live_session_cap_holds_under_concurrent_creation`, `invitations_expire_and_guessing_is_limited`, `sockets_check_…` |
 | Opening a link spends nothing; one browser, one session | Implemented | `opening_a_link_spends_nothing_and_one_browser_holds_one_session` |
-| STUN/TURN through `FLYW8T_ICE_SERVERS` | Implemented (config); **only LAN/loopback tested** | no NAT or TURN path has been exercised |
+| STUN/TURN through `FLYW8T_ICE_SERVERS` | Configurable; forced TURN tested on loopback with UDP and TCP client-to-relay connections | Two Chrome peers selected relay candidates, a synthetic screen reached the viewer, and the peers' security codes matched. TURN/TLS, physical WAN and carrier-grade NAT tests are still open. |
 | Cross-family security review of the support code | **Done** (Codex gpt-5.6-sol, 2026-10-29): 13 findings, 12 fixed, 1 partly fixed (no global cap on concurrent sockets yet) | [dev-process.md](dev-process.md) rows 10 and 12 |
 | Re-review of the fixes | **Done** (Codex gpt-6.1-sol): 11 findings, 10 fixed; open: two link posts racing in one browser can bind two sessions | row 15 |
 | A review of the re-review fixes | **Not done** | |
@@ -187,3 +195,11 @@ The operator decided (2026-10-30) that attended remote control is a distinct pro
 6. Either side clicks **End**. Both pages say it ended, and the link or code no longer works.
 
 For two machines on different networks, set `FLYW8T_ICE_SERVERS` (for example `[{"urls":"stun:stun.example.org:3478"}]`, plus a TURN server for restrictive networks) and serve over HTTPS: browsers allow screen capture only in secure contexts (`https://` or `localhost`).
+
+The automated `support_browser` integration test checks the selected route
+with Chrome, a disposable database, and the real flyw8t consent flow.
+With `FLYW8T_TEST_TURN_SERVERS` unset it expects **Direct**. Provide an
+`RTCIceServer` JSON array with a reachable TURN server and temporary client
+credentials to force relay-only ICE on both peers and expect **TURN relay**.
+Run `cargo test -p flyw8t-server --test support_browser -- --ignored` with
+`FLYW8T_TEST_DATABASE_URL` set to a test PostgreSQL instance.

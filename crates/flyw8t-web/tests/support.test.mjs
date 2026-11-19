@@ -76,7 +76,7 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
   }
   const windowHandlers = {};
   const context = {
-    document: { getElementById: el },
+    document: { getElementById: el, addEventListener() {} },
     location: { protocol: 'https:', host: 'rmm.example' },
     WebSocket, RTCPeerConnection, MediaStream: class {},
     crypto: webcrypto, TextEncoder,
@@ -112,6 +112,92 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
 }
 
 const state = (s) => ({ type: 'state', state: s, label: s, peer_present: true });
+
+function routeStats(local, remote, selected = 'using') {
+  return new Map([
+    ['transport', { type: 'transport', selectedCandidatePairId: selected }],
+    ['unused', { type: 'candidate-pair', nominated: true, localCandidateId: 'another', remoteCandidateId: 'r' }],
+    ['another', { type: 'local-candidate', candidateType: 'relay' }],
+    ['using', { type: 'candidate-pair', localCandidateId: 'l', remoteCandidateId: 'r' }],
+    ['l', { type: 'local-candidate', candidateType: local, address: '192.0.2.100' }],
+    ['r', { type: 'remote-candidate', candidateType: remote, address: '198.51.100.42' }],
+  ]);
+}
+
+test('route disclosure reads the selected pair on demand and tracks path changes while open', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  const details = t.el('connection-details');
+  const route = t.el('connection-route');
+  const ice = new EventTarget();
+  ice.onselectedcandidatepairchange = null;
+  const dtls = pc.getReceivers()[0].transport;
+  pc.getReceivers = () => [{ transport: { ...dtls, iceTransport: ice } }];
+  let lookups = 0;
+  let stats = routeStats('srflx', 'host');
+  pc.getStats = async () => { lookups++; return stats; };
+  pc.connect();
+  assert.equal(lookups, 0);
+  details.open = true;
+  await details.handlers.toggle();
+  assert.equal(route.textContent, 'Direct');
+  for (const [local, remote, selected, label] of [
+    ['host', 'relay', 'using', 'TURN relay'],
+    ['relay', 'host', 'using', 'TURN relay'],
+    ['host', undefined, 'using', 'Unavailable'],
+    ['host', 'host', 'missing', 'Unavailable'],
+  ]) {
+    stats = routeStats(local, remote, selected);
+    ice.dispatchEvent(new Event('selectedcandidatepairchange'));
+    await tick();
+    assert.equal(route.textContent, label);
+  }
+  details.open = false;
+  await details.handlers.toggle();
+  ice.dispatchEvent(new Event('selectedcandidatepairchange'));
+  await tick();
+  assert.equal(lookups, 5);
+  // When the browser exposes the actual pair on the ICE transport, no stats lookup is needed.
+  ice.getSelectedCandidatePair = () => ({ local: { type: 'host' }, remote: { type: 'relay' } });
+  details.open = true;
+  await details.handlers.toggle();
+  assert.equal(route.textContent, 'TURN relay');
+  assert.equal(lookups, 5);
+});
+
+test('late route stats cannot overwrite a newer selected pair, disconnect, or revocation', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  const details = t.el('connection-details');
+  const route = t.el('connection-route');
+  pc.connect();
+  details.open = true;
+  let release;
+  const slow = () => new Promise(r => { release = () => r(routeStats('host', 'relay')); });
+  pc.getStats = slow;
+  const pending = details.handlers.toggle();
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange();
+  assert.equal(route.textContent, 'Unavailable');
+  pc.getStats = async () => routeStats('host', 'srflx');
+  pc.connect();
+  await tick();
+  assert.equal(route.textContent, 'Direct');
+  release();
+  await pending;
+  assert.equal(route.textContent, 'Direct');
+  pc.getStats = slow;
+  const lastLookup = details.handlers.toggle();
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Ended' });
+  release();
+  await lastLookup;
+  assert.equal(route.textContent, 'Unavailable');
+  assert.equal(t.el('viewer').hidden, true);
+});
 
 test('a normal connection stays quiet; repeated waiting updates keep one actionable hint', async () => {
   const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });

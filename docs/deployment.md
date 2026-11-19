@@ -25,6 +25,20 @@ Agents refuse plaintext to any non-loopback host, and the server refuses to star
 
 For a private CA, give agents the CA certificate at enrollment (`--ca-cert ca.pem`); it is stored in the agent's configuration and trusted alongside public roots.
 
+### Attended screen sharing across networks
+
+HTTPS and the tunnel carry the support page and WebSocket signaling. The browsers
+make a separate WebRTC media connection. To use a relay, run a TURN service
+reachable by both browsers and set `FLYW8T_ICE_SERVERS` in `deploy/compose/.env`.
+An example with STUN, TURN over UDP, and TURN over TLS appears in
+[`.env.example`](../deploy/compose/.env.example). Configure the relay to listen on
+the protocols and ports you advertise. Recreate the server after changing the value.
+
+Both participants receive the configured ICE URLs and relay client credentials.
+Use credentials intended for relay clients. Keep the TURN shared secret that
+mints client credentials on the issuing service. This setting supplies one
+static list to participants, so expiring client credentials require rotation.
+
 ### The published image
 
 Each tagged release publishes the server as `ghcr.io/spilloid/flyw8t-server:<version>` (for example `:0.1.3`), built from `deploy/compose/Dockerfile`. The release notes give its digest; the image is not signed, so pin the digest (`ghcr.io/spilloid/flyw8t-server:0.1.2@sha256:…`) wherever a registry or a tag you do not control could otherwise change what runs. It listens on `0.0.0.0:8080`, runs as UID 10001, keeps nothing on disk, and needs only the variables below and a PostgreSQL database (18 is what the tests and the Compose file use). `flyw8t-server healthcheck` exits 0 when this server is ready, `flyw8t-server --version` prints the version, and `/readyz` answers 200 once the database is reachable and migrated.
@@ -52,6 +66,7 @@ Everything else is the console and may sit behind the proxy. Keep `/metrics` off
 | `FLYW8T_DATABASE_URL` (or `DATABASE_URL`) | yes | — | PostgreSQL URL |
 | `FLYW8T_PUBLIC_URL` | yes | — | URL technicians and agents use; `https://` unless loopback. Use a **host name**, not an IP address (`http://localhost:8080` locally): browsers refuse passkeys for an IP address, and sudo mode (field definitions, users, API tokens) needs one. It must also be the address people actually open, since passkeys are bound to it |
 | `FLYW8T_BIND` | no | `127.0.0.1:8080` (image: `0.0.0.0:8080`) | listen address |
+| `FLYW8T_ICE_SERVERS` | no | `[]` | JSON array of STUN/TURN servers sent to the browsers for attended screen sharing. An empty array uses local ICE candidates. |
 | `FLYW8T_TLS_CERT`, `FLYW8T_TLS_KEY` | together | — | PEM chain and key for native TLS |
 | `FLYW8T_BOOTSTRAP_ADMIN_EMAIL`, `…_PASSWORD` | together | — | first administrator, created only while no users exist; password ≥ 12 characters |
 | `FLYW8T_REQUIRE_MFA` | no | `true` | every console user sets up two-step verification (TOTP) before reaching the console; `false` makes it optional per user |

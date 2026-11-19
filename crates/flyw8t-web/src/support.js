@@ -43,6 +43,10 @@
   let frameReady = false;
   let hint = '';
   let hintTimer;
+  const routeDetails = role === 'technician' && $('connection-details');
+  let routeTransport = null;
+  let routeGeneration = 0;
+  let routeTimer;
 
   const send = (msg) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); };
   const hex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -120,6 +124,7 @@
   function stopMedia() {
     epoch += 1; // anything still in flight (a screen picker, an offer, an answer) is now stale
     if (pc) { pc.close(); pc = null; }
+    refreshRoute();
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
     const video = $('remote');
     if (video) video.srcObject = null;
@@ -161,6 +166,51 @@
   function mediaTransport() {
     const ends = role === 'participant' ? pc.getSenders() : pc.getReceivers();
     return ends.length === 1 ? ends[0].transport : null;
+  }
+
+  function routeLabel(local, remote) {
+    if (local === 'relay' || remote === 'relay') return 'TURN relay';
+    const direct = ['host', 'srflx', 'prflx'];
+    return direct.includes(local) && direct.includes(remote) ? 'Direct' : 'Unavailable';
+  }
+
+  async function selectedRoute(conn, transport) {
+    const pair = transport?.getSelectedCandidatePair?.();
+    if (pair) return routeLabel(pair.local?.type, pair.remote?.type);
+    // A nominated or successful pair can be idle. Follow the transport's selected pair.
+    const stats = await conn.getStats();
+    for (const entry of stats.values()) {
+      if (entry.type !== 'transport' || !entry.selectedCandidatePairId) continue;
+      const active = stats.get(entry.selectedCandidatePairId);
+      if (active?.type === 'candidate-pair') {
+        return routeLabel(stats.get(active.localCandidateId)?.candidateType,
+          stats.get(active.remoteCandidateId)?.candidateType);
+      }
+    }
+    return 'Unavailable';
+  }
+
+  async function refreshRoute() {
+    if (!routeDetails) return;
+    const generation = ++routeGeneration;
+    clearTimeout(routeTimer);
+    const conn = pc;
+    const visible = routeDetails.open && !document.hidden && !ended && conn?.connectionState === 'connected';
+    const ice = visible ? mediaTransport()?.iceTransport : null;
+    const observable = ice && 'onselectedcandidatepairchange' in ice ? ice : null;
+    if (observable !== routeTransport) {
+      routeTransport?.removeEventListener('selectedcandidatepairchange', refreshRoute);
+      routeTransport = observable;
+      routeTransport?.addEventListener('selectedcandidatepairchange', refreshRoute);
+    }
+    if (!visible) { setText('connection-route', 'Unavailable'); return; }
+    let label = 'Unavailable';
+    try { label = await selectedRoute(conn, ice); } catch (_) { /* browser statistics unavailable */ }
+    if (generation !== routeGeneration || ended || conn !== pc || !routeDetails.open || document.hidden
+        || conn.connectionState !== 'connected') return;
+    setText('connection-route', label);
+    // A few browsers expose selection only through stats. Sample while the details are visible.
+    if (!observable) routeTimer = setTimeout(refreshRoute, 5000);
   }
 
   async function securityCheck(conn, mine0) {
@@ -250,6 +300,7 @@
     pc.onicecandidate = (e) => { if (e.candidate && !stale(conn, mine)) send({ type: 'signal', data: { candidate: e.candidate.toJSON() } }); };
     pc.onconnectionstatechange = () => {
       if (stale(conn, mine)) return;
+      refreshRoute();
       if (conn.connectionState === 'connected') {
         watchFrame();
         reportReady();
@@ -413,6 +464,10 @@
     });
     $('end').addEventListener('click', () => endHere('closed', 'You ended the session.'));
   } else {
+    if (routeDetails) {
+      routeDetails.addEventListener('toggle', refreshRoute);
+      document.addEventListener('visibilitychange', refreshRoute);
+    }
     const endLive = $('end-live');
     // With a live socket, end at once; otherwise the form posts as usual.
     if (endLive) {

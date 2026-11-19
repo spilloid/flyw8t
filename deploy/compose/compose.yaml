@@ -45,6 +45,7 @@ services:
       FLYW8T_FIELD_KEY: ${FLYW8T_FIELD_KEY:-}
       FLYW8T_CLIENT_IP_HEADER: ${FLYW8T_CLIENT_IP_HEADER:-cf-connecting-ip}
       FLYW8T_HELPER_PATH: ${FLYW8T_HELPER_PATH:-}
+      FLYW8T_ICE_SERVERS: "${FLYW8T_ICE_SERVERS:-[]}"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     ports:
       # Loopback only by default. Behind the tunnel nothing needs publishing at all; to expose
