@@ -190,6 +190,15 @@ a.button:hover { background: var(--btn-hover); }
 .sas #sas { font-size: 1.4rem; font-weight: 700; letter-spacing: 0.1em; }
 #remote { width: 100%; max-height: 75vh; background: #000; border-radius: 8px; }
 #error:empty { display: none; }
+#screenshot-panel { margin: 1rem 0; padding: 1rem; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+#screenshot-panel h2 { margin: 0 0 0.3rem; }
+#screenshot-panel p { margin: 0.45rem 0 0.75rem; }
+.screenshot-client { color: var(--muted); overflow-wrap: anywhere; }
+.screenshot-client strong { color: var(--text); }
+.screenshot-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.screenshot-actions button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
+.screenshot-actions button.secondary:hover { border-color: var(--accent); }
+#screenshot-status { overflow-wrap: anywhere; }
 [hidden] { display: none !important; }
 .live { border-left: 4px solid var(--accent); padding-left: 0.8rem; margin: 1rem 0; }
 

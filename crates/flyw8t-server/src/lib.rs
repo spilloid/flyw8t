@@ -289,6 +289,20 @@ pub fn router(state: Shared) -> Router {
         .route("/metrics", get(metrics_handler))
         .route("/api/agent/ws", get(gateway::agent_ws))
         .route("/api/v1/catalog", get(api::catalog))
+        .route(
+            "/api/v1/mcp/capabilities",
+            get(support::screenshot::capabilities),
+        )
+        .route(
+            "/api/v1/support/{id}/screenshot",
+            post(support::screenshot::request).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/support/{id}/screenshot/{request_id}",
+            post(support::screenshot::submit).layer(axum::extract::DefaultBodyLimit::max(
+                support::screenshot::BODY_LIMIT,
+            )),
+        )
         .route("/api/v1/devices", get(api::devices))
         .route("/api/v1/devices/{id}", get(api::device))
         .route(
@@ -497,7 +511,14 @@ async fn whole_body(State(state): State<Shared>, req: Request, next: Next) -> Re
         )
             .into_response();
     };
-    let limit = if is_script_save(req.uri().path()) {
+    let limit = if req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|path| path.as_str())
+        == Some("/support/{id}/screenshot/{request_id}")
+    {
+        support::screenshot::BODY_LIMIT
+    } else if is_script_save(req.uri().path()) {
         SCRIPT_BODY_LIMIT
     } else if req.uri().path() == "/probe/devices" {
         1024 * 1024

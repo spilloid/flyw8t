@@ -1936,6 +1936,7 @@ pub fn admin_page(
                 <label>"Name"<input type="text" name="name" required=true maxlength="100" placeholder="AnchorDesk"/></label>
                 <label class="inline"><input type="checkbox" name="scope" value="read" checked=true/>" read"</label>
                 <label class="inline"><input type="checkbox" name="scope" value="jobs:run"/>" jobs:run"</label>
+                <label class="inline"><input type="checkbox" name="scope" value="support:screenshot"/>" Attended screenshots (participant permission required)"</label>
                 <label>"Expires in"<select name="ttl_days">
                     <option value="30">"30 days"</option>
                     <option value="90" selected=true>"90 days"</option>
@@ -2091,6 +2092,11 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
         .join(", ")
         .replace("view_screen", "view screen")
         .replace("control_input", "keyboard and mouse (through the helper)");
+    let control = if s.capabilities.iter().any(|c| c == "control_input") {
+        "1"
+    } else {
+        "0"
+    };
     // Only the technician who created the session receives its signaling. Anyone else allowed
     // to see it (an administrator) gets its state and an End button, and no script.
     let observer = s.observer.then(|| view! {
@@ -2106,7 +2112,7 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
     let body = view! {
         <p class="crumbs"><a href="/support">"Support"</a>" / "</p>
         <h1>{title.clone()}" "<span id="state-badge" class=support_badge_class(state)>{label}</span></h1>
-        <div id="support" data-role="technician" data-session=s.id.to_string() data-ice=ice_servers.to_string() data-state=data_state>
+        <div id="support" data-role="technician" data-session=s.id.to_string() data-control=control data-csrf=ctx.csrf.clone() data-ice=ice_servers.to_string() data-state=data_state>
             <p class="lead" id="state" aria-live="polite">{label}</p>
             <p class="muted" id="peer" aria-live="polite" hidden=true></p>
             <p class="flash bad" id="error" aria-live="assertive"></p>
@@ -2126,9 +2132,13 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
             <section id="viewer" class="card" hidden=true>
                 <h2>"Their shared screen"</h2>
                 <video id="remote" autoplay=true muted=true playsinline=true></video>
+                <p id="screenshot-status" class="muted" role="status" hidden=true></p>
                 <details id="connection-details">
                     <summary>"Connection details"</summary>
-                    <dl class="facts"><dt>"Route"</dt><dd id="connection-route">"Unavailable"</dd></dl>
+                    <dl class="facts">
+                        <dt>"Route"</dt><dd id="connection-route">"Unavailable"</dd>
+                        <dt>"Session ID"</dt><dd class="mono">{s.id.to_string()}</dd>
+                    </dl>
                 </details>
             </section>
             {end_form}
@@ -2209,6 +2219,12 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         v.technician_name, v.technician_email, v.server_host
     );
     let deciding = v.state == "authorizing";
+    let live_heading = format!("Support with {}", v.technician_name);
+    let page_heading = if deciding {
+        heading
+    } else {
+        live_heading.clone()
+    };
     let awaiting = v.state == "awaiting_helper";
     let allow_label = if v.control {
         "Allow, and get the flyw8t helper"
@@ -2249,7 +2265,7 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         true,
         view! {
             <div id="support" data-role="participant" data-session=v.session_id.to_string() data-ice=ice_servers.to_string() data-state=state data-control=control>
-                <h1>{heading}</h1>
+                <h1 id="participant-heading" data-live=live_heading>{page_heading}</h1>
                 <p>{who}</p>
                 // Live status and the way out come first, so ending is always one tap away.
                 <div class="live">
@@ -2257,6 +2273,16 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
                     <p class="muted" id="peer" aria-live="polite" hidden=true></p>
                     <p class="flash bad" id="error" aria-live="assertive"></p>
                     <button type="button" id="end" class="bad" hidden=true>"Stop sharing and end the session"</button>
+                    <section id="screenshot-panel" aria-labelledby="screenshot-title" hidden=true>
+                        <h2 id="screenshot-title" aria-live="polite">"Allow screenshots?"</h2>
+                        <p class="screenshot-client">"AI client · "<strong id="screenshot-recipient"></strong></p>
+                        <p id="screenshot-description"></p>
+                        <div class="screenshot-actions">
+                            <button type="button" id="screenshot-allow">"Allow screenshots"</button>
+                            <button type="button" id="screenshot-decline" class="secondary">"Decline"</button>
+                            <button type="button" id="screenshot-revoke" class="secondary" hidden=true>"Turn off screenshots"</button>
+                        </div>
+                    </section>
                     <div id="sas-box" class="sas" hidden=true>
                         <strong>"Security code: "</strong><span id="sas" class="mono"></span>
                         <p class="muted">"Your technician should read you the same code. If it is different, end the session."</p>
@@ -2270,10 +2296,12 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
                         <button type="button" id="cancel-helper" class="bad">"Cancel"</button>
                     </div>
                 </div>
-                <h2>"If you allow, they can"</h2>
-                <ul>{caps}</ul>
-                <h2>"They cannot"</h2>
-                {cannot}
+                <div id="screen-permissions" hidden=!deciding>
+                    <h2>"If you allow, they can"</h2>
+                    <ul>{caps}</ul>
+                    <h2>"They cannot"</h2>
+                    {cannot}
+                </div>
                 <div id="decide" class="stack" hidden=!deciding>
                     <button type="button" id="allow">{allow_label}</button>
                     <button type="button" id="decline" class="bad">"Decline"</button>

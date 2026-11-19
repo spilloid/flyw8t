@@ -7,7 +7,8 @@ import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 
-const SOURCE = readFileSync(new URL('../src/support.js', import.meta.url), 'utf8');
+const SOURCE = ['support-screenshot.js', 'support.js']
+  .map(file => readFileSync(new URL('../src/' + file, import.meta.url), 'utf8')).join('\n');
 const SID = '11111111-2222-3333-4444-555555555555';
 const CRLF = String.fromCharCode(13, 10);
 const VIDEO_SDP = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 96', 'a=mid:0', ''].join(CRLF);
@@ -22,7 +23,7 @@ const commitOf = async (d) => sha(`flyw8t-sas-commit-v1|${SID}|${await sha(d)}`)
 
 // A page with support.js loaded. `localDer` is this browser's certificate, `remoteDer` the
 // one the other end presents over DTLS.
-async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, control = false, beforeRemote }) {
+async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, control = false, beforeRemote, newCanvas, post }) {
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) {
@@ -79,10 +80,10 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
   }
   const windowHandlers = {};
   const context = {
-    document: { getElementById: el, addEventListener() {} },
+    document: { getElementById: el, addEventListener() {}, createElement: newCanvas },
     location: { protocol: 'https:', host: 'rmm.example' },
     WebSocket, RTCPeerConnection, MediaStream: class {},
-    crypto: webcrypto, TextEncoder,
+    crypto: webcrypto, TextEncoder, AbortController, atob, btoa, fetch: post,
     setTimeout(fn, delay) {
       if (delay < 2500) return setTimeout(fn, delay);
       const token = {};
@@ -96,7 +97,7 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
   vm.runInNewContext(SOURCE, context);
   await settle();
   const ws = sockets[0];
-  const track = { kind: 'video', stopped: false, stop() { this.stopped = true; } };
+  const track = { kind: 'video', readyState: 'live', stopped: false, stop() { this.stopped = true; } };
   return {
     el, ws, peers, windowHandlers, track,
     showDelayedHint() {
@@ -116,6 +117,147 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
 
 const state = (s) => ({ type: 'state', state: s, label: s, peer_present: true });
 const candidate = (name) => ({ type: 'signal', data: { candidate: { candidate: name } } });
+
+const screenshotGrant = 'e6894a0b-e580-47d4-abd9-2459e0311001';
+const screenshotRequest = 'e6894a0b-e580-47d4-abd9-2459e0311002';
+const recipient = 'Support copilot';
+const screenshotAllowed = { type: 'screenshot_allowed', grant_id: screenshotGrant, recipient };
+
+async function screenshotViewer(encode = callback => callback(new Blob(['test pixels'], { type: 'image/png' }))) {
+  const draws = [], responses = [];
+  const t = await page({
+    role: 'technician', localDer: der('technician'), remoteDer: der('participant'),
+    newCanvas() {
+      return { width: 0, height: 0, getContext: () => ({ drawImage: (...args) => draws.push(args) }), toBlob: encode };
+    },
+    post(url, options) { responses.push({ url, body: JSON.parse(options.body) }); return Promise.resolve({ ok: true }); },
+  });
+  t.el('support').dataset.csrf = 'viewer-form-token';
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0], video = t.el('remote');
+  const track = Object.assign(new EventTarget(), { kind: 'video', readyState: 'live' });
+  const stream = Object.assign(new EventTarget(), { getVideoTracks: () => [track] });
+  Object.assign(video, { videoWidth: 640, videoHeight: 360, readyState: 2 });
+  pc.connect();
+  pc.ontrack({ track, streams: [stream] });
+  await t.recv(state('connected'));
+  let next;
+  video.requestVideoFrameCallback = cb => { next = cb; return 1; };
+  video.cancelVideoFrameCallback = () => { next = undefined; };
+  const curve = { name: 'ECDH', namedCurve: 'P-256' };
+  const clientKey = await webcrypto.subtle.generateKey(curve, false, ['deriveKey']);
+  const rawKey = await webcrypto.subtle.exportKey('raw', clientKey.publicKey);
+  const msg = { type: 'screenshot_capture', grant_id: screenshotGrant, request_id: screenshotRequest,
+    public_key: Buffer.from(rawKey).toString('base64'), crop: { x: 0.25, y: 0.5, width: 0.5, height: 0.5 } };
+  return { t, video, track, msg, curve, clientKey, responses, draws, frame: (receiveTime = 5000) => next(5000, { receiveTime }) };
+}
+
+test('screenshots require a separate named participant grant and can be switched off while the share continues', async () => {
+  const { p, tDer } = await consentedParticipant();
+  await p.recv({ type: 'signal', data: { commit: await commitOf(tDer) } });
+  p.peers[0].connect();
+  await p.recv(state('connected'));
+  await p.recv(screenshotAllowed);
+  assert.equal(p.sent('screenshot_permission').length, 0);
+  await p.recv({ ...screenshotAllowed, type: 'screenshot_consent' });
+  assert.equal(p.el('screenshot-panel').hidden, false);
+  assert.equal(p.el('screenshot-recipient').textContent, recipient);
+  assert.equal(p.el('screenshot-revoke').hidden, true);
+  p.el('screenshot-allow').click();
+  assert.deepEqual(p.sent('screenshot_permission').at(-1), { type: 'screenshot_permission', grant_id: screenshotGrant, allow: true });
+  await p.recv(screenshotAllowed);
+  assert.equal(p.el('screenshot-revoke').hidden, false);
+  p.el('screenshot-revoke').click();
+  assert.deepEqual(p.sent('screenshot_permission').at(-1), { type: 'screenshot_permission', grant_id: screenshotGrant, allow: false });
+  assert.equal(p.el('screenshot-panel').hidden, true);
+  assert.equal(p.track.stopped, false);
+  await p.recv(screenshotAllowed);
+  assert.equal(p.el('screenshot-panel').hidden, true, 'a late acknowledgement cannot reinstate permission');
+});
+
+test('one authorized fresh frame is cropped and encrypted to the requesting MCP key', async () => {
+  const { t, msg, curve, clientKey, draws, responses, frame } = await screenshotViewer();
+  await t.recv(msg);
+  assert.equal(responses.length, 0);
+  await t.recv(screenshotAllowed);
+  const capturing = t.recv(msg);
+  frame();
+  await capturing;
+  assert.equal(draws.length, 1);
+  assert.deepEqual(draws[0].slice(1), [160, 180, 320, 180, 0, 0, 320, 180]);
+  const [{ url, body }] = responses;
+  assert.equal(url, '/support/' + SID + '/screenshot/' + screenshotRequest);
+  assert.equal(body.csrf, 'viewer-form-token');
+  assert.equal(body.grant_id, screenshotGrant);
+  assert.equal(body.error, undefined);
+  const { public_key, iv, ciphertext } = body.envelope;
+  const peer = await webcrypto.subtle.importKey('raw', Buffer.from(public_key, 'base64'), curve, false, []);
+  const key = await webcrypto.subtle.deriveKey({ name: 'ECDH', public: peer }, clientKey.privateKey, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const aad = new TextEncoder().encode(['flyw8t-screenshot-v1', SID, screenshotRequest].join('\n'));
+  const decrypted = await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: Buffer.from(iv, 'base64'), additionalData: aad }, key, Buffer.from(ciphertext, 'base64'));
+  const bytes = Buffer.from(decrypted);
+  assert.equal(bytes.readUInt32BE(8), 320);
+  assert.equal(bytes.readUInt32BE(12), 180);
+  assert.ok(Math.abs(Date.now() - Number(bytes.readBigUInt64BE(0))) < 3000);
+  assert.equal(bytes.subarray(16).toString(), 'test pixels');
+  await t.recv(msg);
+  assert.equal(responses.length, 1);
+});
+
+test('stale picture produces only an actionable error, even with WebRTC still connected', async () => {
+  const { t, msg, frame, draws, responses } = await screenshotViewer();
+  await t.recv(screenshotAllowed);
+  const capturing = t.recv(msg);
+  frame(500);
+  await capturing;
+  assert.equal(draws.length, 0);
+  assert.equal(responses[0].body.error, 'no_fresh_frame');
+  assert.equal(responses[0].body.envelope, undefined);
+  assert.match(t.el('screenshot-status').textContent, /keep the viewer visible/i);
+});
+
+test('an invalid crop discloses no pixels; resizing for the PNG limit reuses the captured frame', async () => {
+  let encodes = 0;
+  const { t, msg, frame, draws, responses } = await screenshotViewer(callback => {
+    const data = ++encodes === 1 ? new Uint8Array(600 * 1024) : 'smaller';
+    callback(new Blob([data], { type: 'image/png' }));
+  });
+  await t.recv(screenshotAllowed);
+  const outside = t.recv({ ...msg, crop: { x: 0.8, y: 0, width: 0.5, height: 1 } });
+  frame();
+  await outside;
+  assert.equal(draws.length, 0);
+  assert.equal(responses[0].body.error, 'capture_failed');
+  assert.equal(responses[0].body.envelope, undefined);
+
+  const inside = t.recv({ ...msg, request_id: '00223344-0000-0000-0000-000000000003' });
+  frame();
+  await inside;
+  assert.equal(encodes, 2);
+  assert.equal(draws.length, 2);
+  assert.equal(draws[0][0], t.el('remote'));
+  assert.notEqual(draws[1][0], t.el('remote'), 'the resize must not sample a later image');
+  assert.ok(responses[1].body.envelope.ciphertext);
+});
+
+test('revocation or a changed source during PNG encoding discards the capture', async () => {
+  for (const revoke of ['grant', 'source']) {
+    let finish;
+    const { t, msg, frame, track, responses } = await screenshotViewer(callback => { finish = callback; });
+    await t.recv(screenshotAllowed);
+    const capturing = t.recv(msg);
+    frame();
+    await tick();
+    if (revoke === 'grant') await t.recv({ type: 'screenshot_revoked', grant_id: screenshotGrant });
+    else track.dispatchEvent(new Event('mute'));
+    finish(new Blob(['old frame'], { type: 'image/png' }));
+    await capturing;
+    assert.equal(responses.length, 0);
+    assert.equal(t.el('screenshot-status').hidden, true);
+    if (revoke === 'source') assert.equal(t.sent('screenshot_permission').at(-1).allow, false);
+  }
+});
 
 test('ICE received before the peer and during setRemoteDescription is applied in arrival order', async () => {
   let start, release;

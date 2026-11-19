@@ -8,6 +8,7 @@ members = [
     "crates/flyw8t-agent",
     "crates/flyw8t-helper",
     "crates/flyw8t-technician",
+    "crates/flyw8t-mcp",
     "crates/flyw8t-sign",
 ]
 

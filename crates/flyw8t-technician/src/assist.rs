@@ -1,6 +1,6 @@
 //! Session selection runs in its own short-lived UI process. Windows RPC
 //! discovery may block. Closing this window cancels the pending local request.
-use crate::sessions::{self, Session, ShadowMode, ShadowRequest};
+use crate::sessions::{self, ConsoleAccess, Session, ShadowMode, ShadowRequest};
 use crate::target::Target;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{self, Receiver};
@@ -46,10 +46,17 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
 }
 
 enum Reply {
-    Sessions(Vec<Session>),
+    Sessions(Vec<Session>, Option<ConsoleAccess>),
     Prepared(ShadowRequest),
 }
 type Work = Receiver<Result<Reply, String>>;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum Mode {
+    Attend,
+    Share,
+    Console,
+}
 fn worker(op: impl FnOnce() -> Result<Reply, String> + Send + 'static) -> Result<Work, String> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -73,13 +80,15 @@ struct Picker {
     open: HWND,
     status: HWND,
     target: Target,
+    mode: Mode,
+    access: Option<ConsoleAccess>,
     rows: Vec<Session>,
     pending: Option<(Work, Instant)>,
     preparing: bool,
 }
 
 impl Picker {
-    unsafe fn new(window: HWND, target: Target) -> Result<Self, String> {
+    unsafe fn new(window: HWND, target: Target, mode: Mode) -> Result<Self, String> {
         let dpi = GetDpiForWindow(window).max(96) as i32;
         let px = |v: i32| v * dpi / 96;
         let child =
@@ -106,7 +115,11 @@ impl Picker {
             };
         let summary = child(
             "STATIC",
-            "Choose the desktop you want to see.",
+            if mode == Mode::Console {
+                "The computer’s Windows policy determines whether you can view or control its physical console."
+            } else {
+                "Choose the desktop you want to see."
+            },
             0,
             0,
             18,
@@ -124,10 +137,27 @@ impl Picker {
             575,
             195,
         )?;
-        let view = child("BUTTON", "View session", WS_TABSTOP, VIEW, 18, 103, 126, 32)?;
+        let view = child(
+            "BUTTON",
+            if mode == Mode::Console {
+                "View console"
+            } else {
+                "View session"
+            },
+            WS_TABSTOP,
+            VIEW,
+            18,
+            103,
+            126,
+            32,
+        )?;
         let control = child(
             "BUTTON",
-            "Request control",
+            if mode == Mode::Console {
+                "Control console"
+            } else {
+                "Request control"
+            },
             WS_TABSTOP,
             CONTROL,
             152,
@@ -181,6 +211,8 @@ impl Picker {
             open,
             status,
             target,
+            mode,
+            access: None,
             rows: vec![],
             pending: None,
             preparing: false,
@@ -194,14 +226,23 @@ impl Picker {
         for h in [self.url_label, self.url, self.open] {
             visible(h, share);
         }
-        for h in [self.list, self.view, self.control, self.share] {
+        for h in [self.list, self.view, self.control] {
             visible(h, !share);
         }
+        visible(self.share, !share && self.mode != Mode::Console);
     }
 
     unsafe fn discover(&mut self) -> Result<(), String> {
         let target = self.target.clone();
-        let rx = worker(move || sessions::discover(&target).map(Reply::Sessions))?;
+        let mode = self.mode;
+        let rx = worker(move || {
+            if mode == Mode::Console {
+                sessions::discover_console(&target)
+                    .map(|(session, policy)| Reply::Sessions(vec![session], Some(policy)))
+            } else {
+                sessions::discover(&target).map(|rows| Reply::Sessions(rows, None))
+            }
+        })?;
         self.watch(rx)
     }
 
@@ -219,9 +260,16 @@ impl Picker {
     }
 
     unsafe fn update_selection(&self) {
-        let allowed = self.pending.is_none() && self.selected().is_some_and(Session::can_shadow);
+        let allowed = self.pending.is_none()
+            && self.selected().is_some_and(Session::can_shadow)
+            && (self.mode != Mode::Console || self.access.is_some());
         EnableWindow(self.view, allowed.into());
-        EnableWindow(self.control, allowed.into());
+        EnableWindow(
+            self.control,
+            (allowed
+                && (self.mode != Mode::Console || self.access == Some(ConsoleAccess::Control)))
+            .into(),
+        );
     }
 
     unsafe fn request(&mut self, mode: ShadowMode) -> Result<(), String> {
@@ -232,8 +280,17 @@ impl Picker {
             return Ok(());
         };
         let target = self.target.clone();
-        let rx =
-            worker(move || sessions::prepare_shadow(&target, &row, mode).map(Reply::Prepared))?;
+        let console = self.mode == Mode::Console;
+        if console && !self.access.is_some_and(|access| access.permits(mode)) {
+            return Err("The computer has not authorized this action.".into());
+        }
+        let rx = worker(move || {
+            if console {
+                sessions::prepare_console(&target, &row, mode).map(Reply::Prepared)
+            } else {
+                sessions::prepare_shadow(&target, &row, mode).map(Reply::Prepared)
+            }
+        })?;
         self.watch(rx)?;
         self.preparing = true;
         EnableWindow(self.list, 0);
@@ -250,11 +307,12 @@ impl Picker {
             Ok(r) => r,
             Err(mpsc::TryRecvError::Disconnected) => Err("The Windows session query ended early.".into()),
             Err(mpsc::TryRecvError::Empty) if since.elapsed() >= Duration::from_secs(8) => {
-                Err("Windows did not return the session list in time. The remote machine may require additional query permissions or firewall access.".into())
+                Err(if self.mode == Mode::Console { "Windows did not return the console and policy checks in time. Check the management connection and permissions." } else { "Windows did not return the session list in time. The remote machine may require additional query permissions or firewall access." }.into())
             }
             Err(mpsc::TryRecvError::Empty) => {
                 if since.elapsed() > Duration::from_millis(750) {
-                    let text = if self.preparing { "Checking that the selected user is still in that session…" }
+                    let text = if self.mode == Mode::Console { "Checking this computer’s shadow policy and physical console…" }
+                        else if self.preparing { "Checking that the selected user is still in that session…" }
                         else { "Waiting for Windows to return its desktop sessions…" };
                     if GetWindowTextLengthW(self.status) == 0 { label(self.status,text); }
                 }
@@ -265,21 +323,55 @@ impl Picker {
         self.pending = None;
         EnableWindow(self.list, 1);
         match result {
-            Err(e) => label(self.status,&e),
-            Ok(Reply::Sessions(rows)) => {
-                self.rows = rows;
-                for row in &self.rows {
-                    SendMessageW(self.list,CB_ADDSTRING,0,wide(&row.to_string()).as_ptr() as isize);
+            Err(e) => {
+                if self.mode == Mode::Console {
+                    self.access = None;
+                    SendMessageW(self.list, CB_RESETCONTENT, 0, 0);
+                    self.rows.clear();
                 }
-                if self.rows.len() == 1 { SendMessageW(self.list,CB_SETCURSEL,0,0); }
-                label(self.status,if self.rows.is_empty() { "Windows returned no user desktops. If someone is at the machine, they can share their screen." }
-                    else if self.rows.len() > 1 { "Select the user and desktop. A disconnected session cannot receive a shadow request." }
-                    else if self.rows[0].can_shadow() { "Windows will handle the shadow request and the host’s consent policy." }
-                    else { "This desktop is unavailable for shadowing. The user can share a screen from their active desktop." });
+                label(self.status, &e)
+            }
+            Ok(Reply::Sessions(rows, access)) => {
+                self.rows = rows;
+                self.access = access;
+                for row in &self.rows {
+                    SendMessageW(
+                        self.list,
+                        CB_ADDSTRING,
+                        0,
+                        wide(&row.to_string()).as_ptr() as isize,
+                    );
+                }
+                if self.rows.len() == 1 {
+                    SendMessageW(self.list, CB_SETCURSEL, 0, 0);
+                }
+                label(
+                    self.status,
+                    if access == Some(ConsoleAccess::View) {
+                        "This computer permits unattended viewing only."
+                    } else if access == Some(ConsoleAccess::Control) {
+                        "This computer permits unattended viewing and control. Choose how to open the console."
+                    } else if self.rows.is_empty() {
+                        "Windows returned no user desktops. If someone is at the machine, they can share their screen."
+                    } else if self.rows.len() > 1 {
+                        "Select the user and desktop. A disconnected session cannot receive a shadow request."
+                    } else if self.rows[0].can_shadow() {
+                        "Windows will handle the shadow request and the host’s consent policy."
+                    } else {
+                        "This desktop is unavailable for shadowing. The user can share a screen from their active desktop."
+                    },
+                );
             }
             Ok(Reply::Prepared(request)) => match request.launch() {
-                Ok(()) => label(self.status,"Windows opened the shadow request. Its window shows consent and the connection outcome."),
-                Err(e) => label(self.status,&e),
+                Ok(()) => label(
+                    self.status,
+                    if self.mode == Mode::Console {
+                        "Windows opened the console request. Its window shows the connection outcome."
+                    } else {
+                        "Windows opened the shadow request. Its window shows consent and the connection outcome."
+                    },
+                ),
+                Err(e) => label(self.status, &e),
             },
         }
         self.preparing = false;
@@ -348,7 +440,7 @@ fn support_address(raw: &str) -> Result<String, String> {
     Ok(url.into())
 }
 
-pub fn run(target: Target, share: bool) -> Result<(), String> {
+pub fn run(target: Target, mode: Mode) -> Result<(), String> {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let name = wide("Flyw8tAssistPicker");
@@ -364,7 +456,11 @@ pub fn run(target: Target, share: bool) -> Result<(), String> {
             return Err(std::io::Error::last_os_error().to_string());
         }
         let dpi = GetDpiForSystem().max(96) as i32;
-        let title = format!("{} · flyw8t support", target.host);
+        let title = if mode == Mode::Console {
+            format!("{} · Unattended console", target.host)
+        } else {
+            format!("{} · flyw8t support", target.host)
+        };
         let window = CreateWindowExW(
             0,
             name.as_ptr(),
@@ -382,9 +478,9 @@ pub fn run(target: Target, share: bool) -> Result<(), String> {
         if window.is_null() {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        let mut picker = Picker::new(window, target)?;
+        let mut picker = Picker::new(window, target, mode)?;
         ShowWindow(window, SW_SHOW);
-        if share {
+        if mode == Mode::Share {
             picker.share_mode();
         } else {
             picker.discover()?;
@@ -406,7 +502,7 @@ pub fn run(target: Target, share: bool) -> Result<(), String> {
                     let result = match id {
                         VIEW => picker.request(ShadowMode::View),
                         CONTROL => picker.request(ShadowMode::RequestControl),
-                        SHARE => {
+                        SHARE if mode != Mode::Console => {
                             picker.share_mode();
                             Ok(())
                         }

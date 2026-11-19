@@ -12,6 +12,8 @@
 6. The technician sees the shared content. Both sides see the connection state, the granted capabilities, and an *End session* button that works at any moment.
 7. Ending (by either side, by expiry, or by revocation) closes the media, invalidates every credential for the session, and records why.
 
+An optional screenshot request asks the participant to allow the named AI client to receive still images. Turning screenshots off leaves ordinary screen sharing available. Each screenshot goes from the owning technician's video element to the MCP adapter in an encrypted one-shot response through the control plane. [MCP setup and data handling](mcp.md)
+
 ## Two kinds of attended help, never confused
 
 | | **Browser screen view** (Phase B) | **Temporary native helper** (Phase C, proposed) |

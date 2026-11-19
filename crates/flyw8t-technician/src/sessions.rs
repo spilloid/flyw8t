@@ -63,6 +63,44 @@ pub enum ShadowMode {
     RequestControl,
 }
 
+/// Explicit computer policy from Microsoft's TerminalServer.admx, TS_RemoteControl_2.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsoleAccess {
+    View,
+    Control,
+}
+
+impl ConsoleAccess {
+    fn policy(value: Option<u32>) -> Result<Self, String> {
+        match value {
+            Some(2) => Ok(Self::Control),
+            Some(4) => Ok(Self::View),
+            Some(0) => Err("This computer’s Windows policy disables shadow access.".into()),
+            Some(1 | 3) => Err("This computer requires the user’s permission. Choose Help someone for an attended request.".into()),
+            None => Err("This computer has no explicit Windows policy for unattended shadow access.".into()),
+            Some(_) => Err("Windows returned an unrecognized remote-control policy. Unattended access is unavailable.".into()),
+        }
+    }
+
+    pub fn permits(self, mode: ShadowMode) -> bool {
+        self == Self::Control || mode == ShadowMode::View
+    }
+}
+
+fn physical_console(rows: Vec<Session>) -> Result<Session, String> {
+    let mut active = rows
+        .into_iter()
+        .filter(|s| s.kind == SessionKind::Console && s.state == SessionState::Active);
+    let selected = active.next().ok_or("No active physical console was found. Windows sign-in is available as a separate session choice.")?;
+    if active.next().is_some() {
+        return Err("Windows reported multiple active physical consoles. Unattended access needs one unambiguous console.".into());
+    }
+    if !selected.can_shadow() {
+        return Err("Windows could not verify the signed-in user on the physical console.".into());
+    }
+    Ok(selected)
+}
+
 fn session(
     target: &Target,
     id: u32,
@@ -134,8 +172,27 @@ fn shadow_args(target: &Target, id: u32, mode: ShadowMode) -> Vec<String> {
     args
 }
 
+fn console_args(
+    target: &Target,
+    selected: &Session,
+    current: &Session,
+    access: ConsoleAccess,
+    mode: ShadowMode,
+) -> Result<Vec<String>, String> {
+    if current.kind != SessionKind::Console {
+        return Err("The selected desktop is no longer the physical console.".into());
+    }
+    check_selection(target, selected, Some(current))?;
+    if !access.permits(mode) {
+        return Err("This computer allows unattended viewing only.".into());
+    }
+    let mut args = shadow_args(target, selected.id, mode);
+    args.push("/noConsentPrompt".into());
+    Ok(args)
+}
+
 #[cfg(windows)]
-pub use platform::{discover, prepare_shadow, ShadowRequest};
+pub use platform::{discover, discover_console, prepare_console, prepare_shadow, ShadowRequest};
 
 #[cfg(windows)]
 mod platform {
@@ -147,6 +204,10 @@ mod platform {
     use std::ptr::{self, NonNull};
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegConnectRegistryW, RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD,
+        RRF_SUBKEY_WOW6464KEY,
+    };
     use windows_sys::Win32::System::RemoteDesktop::*;
     use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 
@@ -260,6 +321,58 @@ mod platform {
             .collect();
         sessions.sort_by_key(|s| s.id);
         Ok(sessions)
+    }
+
+    fn machine_policy(target: &Target) -> Result<ConsoleAccess, String> {
+        check_target(target)?;
+        // Read only the applied machine-level policy. An unavailable management
+        // interface cannot establish the owner's intent. Windows still enforces access on launch.
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<_>>();
+        let machine = wide(&format!(r"\\{}", target.host));
+        let mut key = ptr::null_mut();
+        let status = unsafe { RegConnectRegistryW(machine.as_ptr(), HKEY_LOCAL_MACHINE, &mut key) };
+        if status != 0 {
+            return Err(format!("Could not verify this computer’s Windows policy. Check Remote Registry reachability and read permission (Windows error {status})."));
+        }
+        let subkey = wide(r"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services");
+        let name = wide("Shadow");
+        let mut value = 0u32;
+        let mut bytes = std::mem::size_of::<u32>() as u32;
+        let status = unsafe {
+            RegGetValueW(
+                key,
+                subkey.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY,
+                ptr::null_mut(),
+                (&mut value as *mut u32).cast(),
+                &mut bytes,
+            )
+        };
+        unsafe { RegCloseKey(key) };
+        match status {
+            0 if bytes == 4 => ConsoleAccess::policy(Some(value)),
+            2 | 3 => ConsoleAccess::policy(None),
+            code => Err(format!("Could not read this computer’s Windows remote-control policy (Windows error {code}).")),
+        }
+    }
+
+    pub fn discover_console(target: &Target) -> Result<(Session, ConsoleAccess), String> {
+        let policy = machine_policy(target)?;
+        Ok((physical_console(discover(target)?)?, policy))
+    }
+
+    pub fn prepare_console(
+        target: &Target,
+        selected: &Session,
+        mode: ShadowMode,
+    ) -> Result<ShadowRequest, String> {
+        let (current, access) = discover_console(target)?;
+        let args = console_args(target, selected, &current, access, mode)?;
+        Ok(ShadowRequest {
+            checked: Instant::now(),
+            args,
+        })
     }
 
     /// Prepare on a worker. Only the UI that still owns this particular request can launch it.
@@ -389,6 +502,75 @@ mod tests {
         assert_eq!(
             shadow_args(&Target::parse("::1").unwrap(), 8, ShadowMode::View),
             ["/v:[::1]", "/shadow:8"]
+        );
+    }
+
+    #[test]
+    fn unattended_console_needs_one_known_active_physical_logon() {
+        let console = row(1, 0, Some(0), "A");
+        let remote = row(2, 0, Some(2), "B");
+        let disconnected = row(3, 4, Some(0), "C");
+        assert_eq!(
+            physical_console(vec![remote.clone(), console.clone(), disconnected.clone()]).unwrap(),
+            console
+        );
+        assert!(physical_console(vec![remote.clone(), disconnected]).is_err());
+        let missing_user = Session {
+            account: None,
+            ..console.clone()
+        };
+        assert!(physical_console(vec![console.clone(), missing_user.clone()]).is_err());
+        assert!(physical_console(vec![missing_user]).is_err());
+        for changed in [
+            row(1, 0, Some(0), "Other"),
+            Session {
+                logon_time: Some(999),
+                ..console.clone()
+            },
+            remote,
+            row(1, 4, Some(0), "A"),
+        ] {
+            assert!(console_args(
+                &host(),
+                &console,
+                &changed,
+                ConsoleAccess::Control,
+                ShadowMode::View
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn machine_policy_limits_each_human_console_request() {
+        for policy in [None, Some(0), Some(1), Some(3), Some(5)] {
+            assert!(ConsoleAccess::policy(policy).is_err());
+        }
+        let row = row(1, 0, Some(0), "A");
+        let args = |policy, mode| {
+            console_args(
+                &host(),
+                &row,
+                &row,
+                ConsoleAccess::policy(Some(policy)).unwrap(),
+                mode,
+            )
+        };
+        for v in [2, 4] {
+            assert_eq!(
+                args(v, ShadowMode::View).unwrap(),
+                ["/v:workstation.example", "/shadow:1", "/noConsentPrompt"]
+            );
+        }
+        assert!(args(4, ShadowMode::RequestControl).is_err());
+        assert_eq!(
+            args(2, ShadowMode::RequestControl).unwrap(),
+            [
+                "/v:workstation.example",
+                "/shadow:1",
+                "/control",
+                "/noConsentPrompt"
+            ]
         );
     }
 }

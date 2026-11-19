@@ -12,6 +12,7 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Ole::{OleInitialize, OleUninitialize};
+use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, SetFocus, VK_RETURN,
@@ -24,6 +25,8 @@ const RDP_EVENT: u32 = WM_APP + 40;
 const WAKE: u32 = WM_APP + 41;
 const TIMER: usize = 1;
 const DISPLAY_TIMER: usize = 2;
+const MIN_CARD_WIDTH: i32 = 572;
+const INITIAL_CARD_HEIGHT: i32 = 204;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -79,8 +82,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             let dpi = GetDpiForWindow(hwnd).max(96) as i32;
             let limits = &mut *(l as *mut MINMAXINFO);
             limits.ptMinTrackSize = POINT {
-                x: 530 * dpi / 96,
-                y: 288 * dpi / 96,
+                x: MIN_CARD_WIDTH * dpi / 96,
+                y: INITIAL_CARD_HEIGHT * dpi / 96,
             };
             return 0;
         }
@@ -150,7 +153,7 @@ pub fn run(prefill: Option<String>, connect_now: bool) -> Result<(), String> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             730 * GetDpiForSystem().max(96) as i32 / 96,
-            294 * GetDpiForSystem().max(96) as i32 / 96,
+            INITIAL_CARD_HEIGHT * GetDpiForSystem().max(96) as i32 / 96,
             null_mut(),
             null_mut(),
             instance,
@@ -253,6 +256,7 @@ enum Intent {
     Assist,
     Share,
     SignIn,
+    Console,
 }
 
 struct Chooser {
@@ -319,7 +323,12 @@ impl Ui {
             WS_TABSTOP | CBS_DROPDOWNLIST as u32,
             INTENT,
         )?;
-        for name in ["Help someone", "Share a screen", "Windows sign-in"] {
+        for name in [
+            "Help someone",
+            "Share a screen",
+            "Windows sign-in",
+            "Unattended console",
+        ] {
             if SendMessageW(intent, CB_ADDSTRING, 0, wide(name).as_ptr() as isize) < 0 {
                 return Err("Could not set up the session choices.".into());
             }
@@ -344,15 +353,8 @@ impl Ui {
         SendMessageW(clipboard, BM_SETCHECK, 1, 0);
         let surface = child(hwnd, "STATIC", "", 0, WS_CLIPCHILDREN, 0)?;
         ShowWindow(surface, SW_HIDE);
-        let hint = child(
-            hwnd,
-            "STATIC",
-            "Sign in with your Windows account when prompted.",
-            0,
-            0,
-            0,
-        )?;
-        let status = child(hwnd, "STATIC", "Ready", 0, 0, 104)?;
+        let hint = child(hwnd, "STATIC", "", 0, SS_NOPREFIX, 0)?;
+        let status = child(hwnd, "STATIC", "", 0, SS_NOPREFIX, 104)?;
         let generation = Arc::new(AtomicU64::new(0));
         let latest = generation.clone();
         let (requests, jobs) = mpsc::channel::<(u64, Target)>();
@@ -432,6 +434,35 @@ impl Ui {
         self.font = font;
     }
 
+    unsafe fn text_height(&self, control: HWND, width: i32, dpi: i32) -> i32 {
+        let mut text = vec![0u16; GetWindowTextLengthW(control) as usize + 1];
+        let count = GetWindowTextW(control, text.as_mut_ptr(), text.len() as i32);
+        if count == 0 {
+            return 0;
+        }
+        let dc = GetDC(control);
+        if dc.is_null() {
+            return 36 * dpi / 96;
+        }
+        let old = SelectObject(dc, SendMessageW(control, WM_GETFONT, 0, 0) as HGDIOBJ);
+        let mut bounds = RECT {
+            right: width,
+            ..Default::default()
+        };
+        let height = DrawTextW(
+            dc,
+            text.as_mut_ptr(),
+            count,
+            &mut bounds,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        );
+        if !old.is_null() {
+            SelectObject(dc, old);
+        }
+        ReleaseDC(control, dc);
+        height.max(18 * dpi / 96)
+    }
+
     unsafe fn layout(&self) {
         let mut r = RECT::default();
         GetClientRect(self.hwnd, &mut r);
@@ -441,25 +472,27 @@ impl Ui {
         MoveWindow(self.label, s(16), s(19), s(77), s(22), 1);
         MoveWindow(self.address, s(96), s(12), (w - s(112)).max(1), s(32), 1);
         MoveWindow(self.intent_label, s(16), s(65), s(76), s(22), 1);
-        MoveWindow(self.intent, s(96), s(56), s(146), s(128), 1);
-        MoveWindow(self.button, s(254), s(54), s(120), s(34), 1);
-        MoveWindow(self.clipboard, s(386), s(55), s(126), s(32), 1);
+        MoveWindow(self.intent, s(96), s(56), s(166), s(154), 1);
+        MoveWindow(self.button, s(274), s(54), s(120), s(34), 1);
+        MoveWindow(self.clipboard, s(406), s(55), s(126), s(32), 1);
         let y = s(100);
         let height = (h - y - s(33)).max(1);
         MoveWindow(self.surface, 0, y, w, height, 1);
         let text_width = (w - s(32)).max(1);
-        if IsWindowVisible(self.surface) != 0 {
+        if GetWindowLongW(self.surface, GWL_STYLE) as u32 & WS_VISIBLE != 0 {
             MoveWindow(self.status, s(16), h - s(26), text_width, s(25), 1);
         } else {
+            let hint_height = self.text_height(self.hint, text_width, dpi);
+            MoveWindow(self.hint, s(16), y, text_width, hint_height, 1);
+            let status_y = y + hint_height + s(8);
             MoveWindow(
                 self.status,
                 s(16),
-                y + s(14),
+                status_y,
                 text_width,
-                (h - y - s(65)).max(1),
+                (h - status_y - s(12)).max(1),
                 1,
             );
-            MoveWindow(self.hint, s(16), h - s(45), text_width, s(40), 1);
         }
         if let Some(session) = &self.session {
             session.resize(0, 0, w.max(1), height);
@@ -542,10 +575,46 @@ impl Ui {
 
     unsafe fn message(&self, text: &str) {
         SetWindowTextW(self.status, wide(text).as_ptr());
+        ShowWindow(
+            self.status,
+            if text.is_empty() { SW_HIDE } else { SW_SHOWNA },
+        );
+        if text.is_empty()
+            || IsZoomed(self.hwnd) != 0
+            || IsIconic(self.hwnd) != 0
+            || GetWindowLongW(self.surface, GWL_STYLE) as u32 & WS_VISIBLE != 0
+        {
+            return;
+        }
+        // Grow the compact card only when an actual status needs more lines.
+        let dpi = GetDpiForWindow(self.hwnd).max(96) as i32;
+        let mut client = RECT::default();
+        GetClientRect(self.hwnd, &mut client);
+        let width = (client.right - 32 * dpi / 96).max(1);
+        let required = 120 * dpi / 96
+            + self.text_height(self.hint, width, dpi)
+            + self
+                .text_height(self.status, width, dpi)
+                .min(150 * dpi / 96);
+        if required > client.bottom {
+            let mut rect = RECT::default();
+            if GetWindowRect(self.hwnd, &mut rect) != 0 {
+                SetWindowPos(
+                    self.hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top + required - client.bottom,
+                    SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER,
+                );
+            }
+        }
     }
 
     unsafe fn selected(&self) -> Intent {
         match SendMessageW(self.intent, CB_GETCURSEL, 0, 0) {
+            3 => Intent::Console,
             2 => Intent::SignIn,
             1 => Intent::Share,
             _ => Intent::Assist,
@@ -556,8 +625,9 @@ impl Ui {
         let intent = self.selected();
         let (button, hint) = match intent {
             Intent::Assist => ("Find sessions", "Choose the signed-in person whose current Windows session you want to help."),
-            Intent::Share => ("Share a screen", "Open an attended screen-sharing provider with the person at the computer."),
+            Intent::Share => ("Share a screen", "Open flyw8t Support in your browser. The person chooses which screen to share."),
             Intent::SignIn => ("Connect", "Sign in with a Windows account. The person at this computer may see a lock screen."),
+            Intent::Console => ("Check console", "Open the signed-in physical console when the computer’s Windows policy permits unattended access."),
         };
         SetWindowTextW(self.button, wide(button).as_ptr());
         SetWindowTextW(self.hint, wide(hint).as_ptr());
@@ -569,7 +639,8 @@ impl Ui {
                 SW_HIDE
             },
         );
-        self.message("Ready");
+        self.message("");
+        self.layout();
     }
 
     unsafe fn open_chooser(&mut self, intent: Intent, target: &Target) {
@@ -587,6 +658,7 @@ impl Ui {
         }
         let flag = match intent {
             Intent::Assist => "--assist",
+            Intent::Console => "--console",
             Intent::Share => "--share",
             Intent::SignIn => return,
         };
@@ -847,11 +919,13 @@ mod tests {
             );
             assert!(!host.is_null());
             let _window = Window(host);
-            let ui = Ui::new(host, "example.test").unwrap();
+            let mut ui = Ui::new(host, "example.test").unwrap();
+            ui.update_font();
             for (index, expected, clipboard) in [
                 (0, "Find sessions", false),
                 (1, "Share a screen", false),
                 (2, "Connect", true),
+                (3, "Check console", false),
             ] {
                 if index != 0 {
                     SendMessageW(ui.intent, CB_SETCURSEL, index, 0);
@@ -861,12 +935,48 @@ mod tests {
                 let n = GetWindowTextW(ui.button, text.as_mut_ptr(), text.len() as i32);
                 assert_eq!(String::from_utf16_lossy(&text[..n as usize]), expected);
                 assert_eq!(
+                    GetWindowTextLengthW(ui.status),
+                    0,
+                    "an idle card needs no status"
+                );
+                assert_eq!(
                     (GetWindowLongW(ui.clipboard, GWL_STYLE) as u32 & WS_VISIBLE) != 0,
                     clipboard
                 );
             }
             assert!(ui.choosers.is_empty());
             assert!(ui.session.is_none() && ui.active.is_none());
+            let dpi = GetDpiForWindow(host).max(96) as i32;
+            let rect = |control| {
+                let mut bounds = RECT::default();
+                assert_ne!(GetWindowRect(control, &mut bounds), 0);
+                bounds
+            };
+            SendMessageW(ui.intent, CB_SETCURSEL, 2, 0);
+            for width in [MIN_CARD_WIDTH, 730] {
+                SetWindowPos(
+                    host,
+                    null_mut(),
+                    0,
+                    0,
+                    width * dpi / 96,
+                    INITIAL_CARD_HEIGHT * dpi / 96,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                ui.select_intent();
+                assert!(rect(ui.clipboard).right <= rect(ui.address).right);
+                let gap = rect(ui.hint).top - rect(ui.button).bottom;
+                assert!(
+                    gap >= 0 && gap <= 16 * dpi / 96,
+                    "guidance follows the actionable controls"
+                );
+                let reason = "Windows could not reach workstation.example. Check the computer’s network, VPN, and Remote Desktop configuration. Close this session and try again when the computer is available. ";
+                ui.message(&reason.repeat(2));
+                ui.layout();
+                let b = rect(ui.status);
+                assert!(b.top >= rect(ui.hint).bottom);
+                assert!(b.bottom - b.top >= ui.text_height(ui.status, b.right - b.left, dpi));
+            }
         }
     }
 }

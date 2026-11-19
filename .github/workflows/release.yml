@@ -1,6 +1,7 @@
 name: release
 
-# A pushed tag `vX.Y.Z` builds the server and agent for Windows and Linux and publishes them,
+# A pushed tag `vX.Y.Z` builds the server, agent and MCP adapter for Windows and Linux,
+# including the native technician app on Windows, and publishes them
 # with SHA-256 sums, as a GitHub pre-release whose notes are that version's CHANGELOG section.
 # It also pushes the server image to ghcr.io/<owner>/flyw8t-server:X.Y.Z (unsigned; the release
 # notes carry its digest).
@@ -36,12 +37,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
-      - run: cargo build --release --locked --target ${{ matrix.target }} -p flyw8t-server -p flyw8t-agent
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p flyw8t-server -p flyw8t-agent -p flyw8t-mcp
+      - name: Build the native Windows technician client
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p flyw8t-technician
       - name: Collect binaries
         shell: bash
         run: |
           mkdir dist
-          for b in flyw8t-server flyw8t-agent; do
+          binaries=(flyw8t-server flyw8t-agent flyw8t-mcp)
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            binaries+=(flyw8t-technician)
+          fi
+          for b in "${binaries[@]}"; do
             cp "target/${{ matrix.target }}/release/$b${{ matrix.ext }}" "dist/$b-${GITHUB_REF_NAME}-${{ matrix.target }}${{ matrix.ext }}"
           done
       - name: Sign and verify Windows binaries

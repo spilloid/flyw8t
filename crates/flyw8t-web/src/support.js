@@ -53,6 +53,11 @@
   let routeTimer;
 
   const send = (msg) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); };
+  const screenshots = attendedScreenshots({
+    root, role, session: sessionId, element: $, send,
+    source: () => role === 'technician' ? $('remote')?.srcObject : stream,
+    usable: () => !ended && !control && pc?.connectionState === 'connected' && (role === 'participant' || frameReady),
+  });
   const hex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
   const sha256 = async (data) => hex(await crypto.subtle.digest('SHA-256',
     typeof data === 'string' ? new TextEncoder().encode(data) : data));
@@ -116,6 +121,9 @@
     setBadge(state, label);
     delayedHint(contextHint(state));
     if (role === 'participant') {
+      const heading = $('participant-heading');
+      if (state !== 'authorizing' && heading?.dataset.live) setText('participant-heading', heading.dataset.live);
+      show('screen-permissions', state === 'authorizing');
       show('decide', state === 'authorizing');
       show('helper-box', control && state === 'awaiting_helper');
       show('end', live);
@@ -126,6 +134,7 @@
 
   // Stop every local media resource. Safe to call any number of times.
   function stopMedia() {
+    screenshots.clear();
     epoch += 1; // anything still in flight (a screen picker, an offer, an answer) is now stale
     pendingIce.length = 0;
     iceReadyPeer = drainingIce = null;
@@ -144,6 +153,8 @@
     root.dataset.state = 'ended';
     setText('state', label);
     setBadge(state, label);
+    if (role === 'participant') setText('participant-heading', 'Session ended');
+    show('screen-permissions', false);
     show('decide', false);
     show('end', false);
     show('end-live', false);
@@ -331,6 +342,7 @@
         reportReady();
         securityCheck(conn, mine);
       } else if (conn.connectionState === 'disconnected' || conn.connectionState === 'failed') {
+        screenshots.clear(true);
         frameGeneration += 1;
         frameReady = false;
         framesAtInterruption = video?.getVideoPlaybackQuality?.().totalVideoFrames ?? 0;
@@ -342,7 +354,10 @@
       if (stale(conn, mine)) return;
       if (shown || e.track.kind !== 'video') { refuseTopology(); return; }
       shown = true;
-      if (video) video.srcObject = e.streams[0] || new MediaStream([e.track]);
+      if (video) {
+        video.srcObject = e.streams[0] || new MediaStream([e.track]);
+        screenshots.watchSource(video.srcObject, e.track);
+      }
       watchFrame();
     };
   }
@@ -429,6 +444,8 @@
         await onState(msg);
       } else if (msg.type === 'signal') {
         await onSignal(msg.data || {});
+      } else if (typeof msg.type === 'string' && msg.type.startsWith('screenshot_') && !control) {
+        await screenshots.message(msg);
       } else if (msg.type === 'ended') {
         finish(msg.state, msg.label);
         if (msg.state === 'connection_failed') {
@@ -466,7 +483,7 @@
       let chosen;
       try {
         // The browser's own picker: the person chooses exactly what to share, or nothing.
-        chosen = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        chosen = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false, surfaceSwitching: 'exclude' });
       } catch (_) {
         if (mine === epoch && !ended) {
           allow.disabled = false;
@@ -480,6 +497,7 @@
         return;
       }
       stream = chosen;
+      screenshots.watchSource(stream, stream.getVideoTracks()[0]);
       // The browser's own "Stop sharing" button ends the session.
       stream.getTracks().forEach((t) => { t.onended = () => endHere('closed', 'You stopped sharing. The session has ended.'); });
       send({ type: 'approve' });

@@ -15,6 +15,11 @@ All notable changes to flyw8t. Dates are UTC.
   setting for direct connectivity and TURN relay fallback.
 - Preserve network candidates that arrive while the browsers are still
   negotiating the screen share. Ending the session discards pending candidates.
+- Add the `flyw8t-mcp` stdio adapter and a separately revocable participant
+  grant for screenshots from the active attended web viewer.
+- Add a distinct **Unattended console** choice to the native Windows client.
+  The picker verifies the existing host policy and the physical login before
+  offering the allowed view or control action.
 
 ## 0.1.5 — 2026-11-16 (pre-release)
 

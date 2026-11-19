@@ -8,18 +8,20 @@ Adoption of corporate-strategy `standards/STD-*.md`, as of 2026-10-29.
 | STD-002 PR template | adopted | `.github/PULL_REQUEST_TEMPLATE.md`, checked by the `standards` CI job. |
 | STD-003 Documentation freshness | adopted | README states the Cargo workspace version and `CHANGELOG.md`'s latest entry matches it, both checked in CI; dated quarantine list in `CLAUDE.md`. |
 | STD-004 Identity architecture | adopted (partial) | Local accounts, TOTP, passkeys and prefixed scoped bearer tokens (`fw8_`, hashed, revocable) are built; **OIDC remains open**, required by roadmap 0.7 before the 0.8 feature freeze. Devices have a separate Ed25519 plane (ADR-0002) that cannot satisfy user checks, and vice versa. |
-| STD-005 Agent-facing surface | partial | API authorization and tenancy match the console; token scopes only narrow; unattended create needs an idempotency key; collisions return 409 without leaking the other request. Diagnostics are C1. No MCP server; signed script execution/approvals follow ADR-0015 and the 0.3 remediation gate, with independent review required. |
+| STD-005 Agent-facing surface | partial | API authorization and tenancy match the console. The MCP preview supports attended screenshots with a dedicated token scope, participant grant and request receipts. The proposed diagnostic tools still require the replay and attribution work below. |
 | STD-006 Secret handling | adopted (a, b) | (a) no deployment secrets committed; `.env` is git-ignored, `.env.example` holds placeholders, stated in `SECURITY.md`. (b) passwords Argon2id; session, API and enrollment tokens and support invitations SHA-256 only, shown once with `Cache-Control: no-store`; device private keys never leave devices. |
 | STD-007 Repo metadata | adopted | MIT `LICENSE` (`Joseph Spillers`); `CHANGELOG.md`. AI attribution: none, per the operator's standing preference. |
 | STD-008 UI capture & overflow validation | adopted, **mechanism deviates** | `crates/flyw8t-server/tests/ui_capture.rs` drives headless Chrome over DevTools from Rust (as PortGlass does): 16 pages × 3 widths × 2 themes, failing on horizontal overflow or browser errors; plus `support_browser.rs` for the attended-support flow. Wired into CI. `standards/check.sh` looks for `docs/scripts/capture-*.mjs` and will not detect this shape. |
 
-## Proposed MCP integration for the technician tools
+## MCP integration for the technician tools
 
 Implementation review, 2026-11-18, against preview `2a3a0b8`, kvm-it 0.7.0 and the corporate STD-005 reference for identity, attribution and approval. [kvm-it adapter guide](https://github.com/spilloid/kvm-it/blob/v0.7.0/docs/mcp.md)
 
 Ship a small Rust executable, `flyw8t-mcp`, alongside the technician tools. A local MCP client launches it over stdio. The operator selects one flyw8t server and authorizes a revocable technician credential through a local profile. Keep secrets out of tool arguments, client command lines and stdout. The adapter calls the control plane over HTTPS. The enrolled agent continues using its authenticated outbound connection, including behind NAT. The GUI and MCP share server-side authorization, jobs and audit. This follows the ownership model in kvm-it, where the GUI and MCP use the same console controller. [MCP stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 
-### First tool set
+The screenshot adapter and its browser integration are implemented in this preview. The management tools below are proposed. [Connect an MCP client](mcp.md)
+
+### Proposed management tools
 
 | Proposed tools | Existing operation and result |
 |---|---|
@@ -45,7 +47,7 @@ Begin with a support request, its status, and a link for the technician to open 
 
 The participant grants screenshots separately from ordinary viewing. Show the recipient in the prompt, for example **Allow screenshots for this session to be sent to [AI client]?** Keep a visible switch to turn this off. The grant is bound to the owner, organization, participant, recipient and current shared source. A browser share identifies that source through its active media track. A native Windows provider must also verify the endpoint and logon.
 
-The first provider would take pixels from the technician viewer's decoded remote video and deliver them through a new authenticated one-shot channel to the adapter. Check the grant and source before capture and again before releasing the encoded frame. If the participant revokes, the source changes, or the connection has no fresh frame, return the reason with no image. Retrying a request ID must not trigger a second capture. Audit request and delivery metadata only. An image already delivered is available to the receiving client. [Viewer frame handling](../crates/flyw8t-web/src/support.js)
+The browser provider takes pixels from the technician viewer's decoded remote video and delivers an encrypted one-shot response to the adapter. It checks the grant and source before capture and before releasing the frame. An issued request ID is consumed once. Audit records contain request metadata. An image already delivered is available to the receiving client. [Viewer frame handling](../crates/flyw8t-web/src/support-screenshot.js)
 
 Verify with a synthetic shared window containing a known color pattern. Check the PNG and crop, denial before consent, loss of a fresh frame, a source switch, revocation during encoding, and an identical request arriving twice.
 

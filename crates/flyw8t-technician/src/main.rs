@@ -19,8 +19,11 @@ fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let result = match args.as_slice() {
         [] => ui::run(None, false),
-        [flag, host] if flag == "--assist" || flag == "--share" => {
-            target::Target::parse(&host.to_string_lossy()).and_then(|t| assist::run(t, flag == "--share"))
+        [flag, host] if flag == "--assist" || flag == "--share" || flag == "--console" => {
+            let mode = if flag == "--console" { assist::Mode::Console }
+                else if flag == "--share" { assist::Mode::Share }
+                else { assist::Mode::Attend };
+            target::Target::parse(&host.to_string_lossy()).and_then(|t| assist::run(t, mode))
         }
         [host] if !host.to_string_lossy().starts_with('-') => {
             ui::run(Some(host.to_string_lossy().into_owned()), false)

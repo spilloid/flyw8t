@@ -16,11 +16,12 @@ flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP 
 - **Web console** (server-rendered Leptos, works without JavaScript): devices with live-vs-cached labelling, jobs with their full lifecycle, organizations and enrollment, audit history, administration.
 - **Attended support:** send a code, the person consents in their browser, and you see the tab or screen they choose, with no install. Screen view only; no control.
 - **JSON API** with scoped bearer tokens and idempotency keys, for integrations such as AnchorDesk.
+- **Technician MCP preview.** A named AI client can request one screenshot from the attended web viewer after the participant grants screenshot access. [Setup and tool contract](docs/mcp.md)
 - **Self-hosted:** one binary plus PostgreSQL. No Redis, no broker, no SaaS.
 
 ## Native Windows technician preview
 
-`flyw8t-technician` offers three ways to work with a Windows computer.
+`flyw8t-technician` offers four ways to work with a Windows computer.
 
 - **Help someone** lists the host's Windows sessions under your current Windows credentials.
   Pick the account and desktop, then choose **View session** or **Request control**.
@@ -30,6 +31,13 @@ flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP 
 - **Share a screen** opens your flyw8t Support console for an attended, view-only
   invitation. The person opens it inside the intended desktop and chooses the screen.
   Set `FLYW8T_PUBLIC_URL` to prefill the server address, or enter it in the window.
+- **Unattended console** checks the owner's existing Windows computer policy and
+  the active physical console login. Choose view or control within the policy's
+  permission. Flyw8t rechecks both before handing the request to Windows.
+  The workstation needs a routed path to the host, WTS session-query access and
+  read access to its computer policy through Windows Remote Registry. A host
+  that requires consent stays on the **Help someone** path. A computer with
+  nobody signed in can still offer **Windows sign-in**. [Windows remote control policy](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-admx-terminalserver#ts-remotecontrol-2)
 - **Windows sign-in** opens an RDP desktop embedded in the native viewer. Enter a
   computer name, IP address, or `host:port` and choose whether to share the clipboard.
   Windows handles credentials and certificates. A sign-in can lock the physical
@@ -44,6 +52,7 @@ cargo run --release -p flyw8t-technician
 ```
 
 An address argument prefills the field. `--assist HOST` opens the session picker.
+`--console HOST` opens the preauthorized physical-console picker.
 `--share HOST` opens attended sharing. `--connect HOST[:PORT]` starts one Windows sign-in attempt.
 Cancel stays available while the network is being checked. A refusal or timeout explains
 what happened, and the next attempt starts when you choose **Connect** again.

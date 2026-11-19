@@ -95,6 +95,28 @@ This exercise covered direct LAN sign-in, shadow viewing and operator-tested sha
 WAN/relay behavior, independent concurrent sign-ins, the full database-backed
 suite and production signing remain outside this evidence.
 
+## Technician MCP and Windows console preview
+
+The Windows smoke run used a local flyw8t server, disposable PostgreSQL instance,
+the actual stdio MCP executable and two Chrome tabs. The entire workflow passed
+once with direct ICE and again with relay-only ICE and a TCP-only loopback TURN
+listener. A participant shared an
+animated 640 × 360 synthetic screen. Before screenshot consent the tool returned
+an explanation. After consent, the test decoded the actual returned PNG and
+checked both colors and the dimensions of a 160 × 90 crop. A repeated request ID
+and a fresh request after revocation both returned no image. The 390-pixel-wide
+consent UI was inspected. Separate database tests exercised tenant/owner selection
+and credential revocation during a pending capture.
+
+The native Windows chooser was inspected at 150% scaling. The executable embeds
+Common Controls 6 and runs as the invoking user. Native tests covered the four
+session choices, the physical-console-only selection, policy-limited view/control,
+and rejection of a changed logon. A read-only check on the operator's Windows
+host found a reachable RDP port and an active physical console. Its computer
+policy could not be verified as preauthorizing unattended access. No host policy
+was changed or unattended control session started. A physical preauthorized
+shadow run is still open.
+
 ## Browser media route verification
 
 On November 18, 2026, two headless Chrome peers ran the preview's browser

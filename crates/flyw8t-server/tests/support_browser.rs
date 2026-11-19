@@ -4,11 +4,14 @@
 //! Set FLYW8T_TEST_TURN_SERVERS to an RTCIceServer JSON array with disposable
 //! TURN client credentials to exercise the relayed path instead of local ICE.
 //! FLYW8T_TEST_SYNTHETIC_CAPTURE=1 substitutes animated test pixels for the OS picker.
+//! With synthetic capture, set FLYW8T_TEST_MCP_BINARY to the built adapter to test screenshots.
 //!
 //! Chrome is told to auto-select the tab titled `flyw8t-share-target` in the screen picker;
 //! the participant's Allow click is a trusted input event, as browsers require.
 
 mod common;
+#[path = "support_browser/screenshot.rs"]
+mod screenshot;
 
 use axum::http::StatusCode;
 use base64::Engine;
@@ -105,6 +108,8 @@ impl Cdp {
                         ctx.font = '32px sans-serif';
                         ctx.fillText('Shared test screen', 32, 75);
                         ctx.fillRect(32 + (performance.now() / 10) % 520, 112, 40, 8);
+                        ctx.fillStyle = '#d84f3b';
+                        ctx.fillRect(480, 270, 80, 90);
                     }
                     draw();
                     const stream = screen.captureStream(10);
@@ -461,6 +466,23 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         .await;
     cdp.screenshot(&part, out_dir.join("support-participant-connected.png"))
         .await;
+
+    if let Some(binary) = std::env::var_os("FLYW8T_TEST_MCP_BINARY") {
+        assert_eq!(
+            std::env::var("FLYW8T_TEST_SYNTHETIC_CAPTURE").as_deref(),
+            Ok("1")
+        );
+        screenshot::exercise(
+            &server,
+            &mut cdp,
+            &tech,
+            &part,
+            &session_id,
+            &out_dir,
+            binary,
+        )
+        .await;
+    }
 
     // The participant ends it; the technician's view goes dark and says so.
     cdp.click(&part, "#end").await;
