@@ -22,7 +22,7 @@ const commitOf = async (d) => sha(`flyw8t-sas-commit-v1|${SID}|${await sha(d)}`)
 
 // A page with support.js loaded. `localDer` is this browser's certificate, `remoteDer` the
 // one the other end presents over DTLS.
-async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, control = false }) {
+async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, control = false, beforeRemote }) {
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) {
@@ -56,7 +56,7 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
     }
     constructor(cfg) {
       this.cfg = cfg; this.closed = false; this.connectionState = 'new'; this.tracks = [];
-      this.remoteDescription = null; this.localDescription = null; peers.push(this);
+      this.remoteDescription = null; this.localDescription = null; this.appliedIce = []; peers.push(this);
     }
     addTrack(t) { this.tracks.push(t); }
     ends() {
@@ -69,8 +69,11 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
     async createOffer() { return { type: 'offer', sdp: VIDEO_SDP }; }
     async createAnswer() { return { type: 'answer', sdp: VIDEO_SDP }; }
     async setLocalDescription(d) { this.localDescription = d; }
-    async setRemoteDescription(d) { this.remoteDescription = d; }
-    async addIceCandidate() {}
+    async setRemoteDescription(d) { if (beforeRemote) await beforeRemote(); this.remoteDescription = d; }
+    async addIceCandidate(c) {
+      if (!this.remoteDescription) throw new Error('InvalidStateError');
+      this.appliedIce.push(c.candidate);
+    }
     close() { this.closed = true; }
     connect() { this.connectionState = 'connected'; this.onconnectionstatechange(); }
   }
@@ -112,6 +115,81 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
 }
 
 const state = (s) => ({ type: 'state', state: s, label: s, peer_present: true });
+const candidate = (name) => ({ type: 'signal', data: { candidate: { candidate: name } } });
+
+test('ICE received before the peer and during setRemoteDescription is applied in arrival order', async () => {
+  let start, release;
+  const started = new Promise(r => { start = r; });
+  const gate = new Promise(r => { release = r; });
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p'),
+    beforeRemote() { start(); return gate; } });
+  await t.recv(state('connecting'));
+  await t.recv(candidate('before-peer'));
+  const applying = t.recv(offer());
+  await started;
+  await t.recv(candidate('during-sdp'));
+  assert.deepEqual(t.peers[0].appliedIce, []);
+  release();
+  await applying;
+  await t.recv(candidate('after-sdp'));
+  assert.deepEqual(t.peers[0].appliedIce, ['before-peer', 'during-sdp', 'after-sdp']);
+});
+
+test('the participant applies queued ICE only after receiving its answer', async () => {
+  const { p, tDer } = await consentedParticipant();
+  await p.recv({ type: 'signal', data: { commit: await commitOf(tDer) } });
+  await p.recv(candidate('before-answer'));
+  assert.deepEqual(p.peers[0].appliedIce, []);
+  await p.recv({ type: 'signal', data: { sdp: { type: 'answer', sdp: VIDEO_SDP } } });
+  assert.deepEqual(p.peers[0].appliedIce, ['before-answer']);
+});
+
+test('an SDP operation completing after revocation cannot flush early ICE or answer', async () => {
+  let started, release;
+  const entered = new Promise(r => { started = r; });
+  const gate = new Promise(r => { release = r; });
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p'),
+    beforeRemote() { started(); return gate; } });
+  await t.recv(state('connecting'));
+  await t.recv(candidate('early'));
+  const applying = t.recv(offer());
+  await entered;
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Ended' });
+  assert.equal(t.peers[0].closed, true);
+  release();
+  await applying;
+  assert.deepEqual(t.peers[0].appliedIce, []);
+  assert.equal(t.sent('signal').filter(m => m.data.sdp).length, 0);
+});
+
+test('revocation interrupts an ICE drain without waiting for the browser operation', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  let release, start;
+  const began = new Promise(r => { start = r; });
+  const gate = new Promise(r => { release = r; });
+  pc.addIceCandidate = async c => { pc.appliedIce.push(c.candidate); start(); await gate; };
+  const first = t.recv(candidate('in-progress'));
+  await began;
+  const later = t.recv(candidate('queued'));
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Ended' });
+  assert.equal(pc.closed, true);
+  release();
+  await Promise.all([first, later]);
+  assert.deepEqual(pc.appliedIce, ['in-progress']);
+});
+
+test('excess pending ICE ends the attempt and a later offer cannot reopen it', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  for (let i = 0; i < 150; i++) await t.ws.onmessage({ data: JSON.stringify(candidate(String(i))) });
+  assert.equal(t.el('support').dataset.state, 'ended');
+  assert.equal(t.sent('end').length, 1);
+  await t.recv(offer());
+  assert.equal(t.peers.length, 0);
+});
 
 function routeStats(local, remote, selected = 'using') {
   return new Map([

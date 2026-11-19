@@ -201,5 +201,10 @@ with Chrome, a disposable database, and the real flyw8t consent flow.
 With `FLYW8T_TEST_TURN_SERVERS` unset it expects **Direct**. Provide an
 `RTCIceServer` JSON array with a reachable TURN server and temporary client
 credentials to force relay-only ICE on both peers and expect **TURN relay**.
+When the entire relay fixture is bound to loopback, also set
+`FLYW8T_TEST_LOOPBACK_TURN=1` to enable that interface in test Chrome.
 Run `cargo test -p flyw8t-server --test support_browser -- --ignored` with
 `FLYW8T_TEST_DATABASE_URL` set to a test PostgreSQL instance.
+For deterministic media, set `FLYW8T_TEST_SYNTHETIC_CAPTURE=1`. After the
+participant clicks Allow, Chrome shares an animated canvas. Omit the setting
+to exercise the platform's normal test capture source and picker behavior.

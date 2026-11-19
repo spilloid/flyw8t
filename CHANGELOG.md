@@ -13,6 +13,8 @@ All notable changes to flyw8t. Dates are UTC.
 - Show the selected WebRTC route in the technician viewer's connection details.
   The Compose deployment accepts the server's existing `FLYW8T_ICE_SERVERS`
   setting for direct connectivity and TURN relay fallback.
+- Preserve network candidates that arrive while the browsers are still
+  negotiating the screen share. Ending the session discards pending candidates.
 
 ## 0.1.5 — 2026-11-16 (pre-release)
 

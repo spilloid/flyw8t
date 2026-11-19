@@ -35,7 +35,11 @@
   let cert = null;
   let commitment = null; // participant: the technician's commitment, from signaling
   let committed = false; // technician: commitment sent
-  let offered = false; // technician: one offer per session, never a renegotiation
+  let acceptedSdp = false; // exactly one remote offer (technician) or answer (participant)
+  const pendingIce = [];
+  const maxPendingIce = 64;
+  let iceReadyPeer = null;
+  let drainingIce = null;
   let epoch = 0; // bumped by every teardown: async work started before it must not act after it
   let sessionState = root.dataset.state;
   let sessionLabel = $('state').textContent;
@@ -123,6 +127,8 @@
   // Stop every local media resource. Safe to call any number of times.
   function stopMedia() {
     epoch += 1; // anything still in flight (a screen picker, an offer, an answer) is now stale
+    pendingIce.length = 0;
+    iceReadyPeer = drainingIce = null;
     if (pc) { pc.close(); pc = null; }
     refreshRoute();
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
@@ -258,6 +264,25 @@
   // An operation started before an ending, or for a connection since replaced, must not act.
   const stale = (conn, mine) => ended || mine !== epoch || (conn !== undefined && pc !== conn);
 
+  async function drainIce() {
+    const conn = iceReadyPeer;
+    if (!conn || drainingIce === conn) return;
+    const mine = epoch;
+    drainingIce = conn;
+    while (pendingIce.length && !stale(conn, mine)) {
+      const candidate = pendingIce.shift();
+      try { await conn.addIceCandidate(candidate); } catch (_) { /* invalid or obsolete candidate */ }
+    }
+    if (drainingIce === conn) drainingIce = null;
+  }
+
+  async function acceptRemoteSdp(conn, sdp, mine) {
+    await conn.setRemoteDescription(sdp);
+    if (stale(conn, mine)) return;
+    iceReadyPeer = conn;
+    void drainIce(); // Applying candidates must not delay SDP, End, or revocation.
+  }
+
   function newPeerConnection() {
     // One bundled transport for everything: the security code covers exactly that transport.
     pc = new RTCPeerConnection({ iceServers: ice, certificates: [cert], bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
@@ -329,25 +354,32 @@
       if (commitment === null) commitment = String(data.commit);
       await maybeStartSharing();
     } else if (data.sdp && role === 'technician' && data.sdp.type === 'offer') {
-      if (offered) return; // the certificate was committed to once; no renegotiation
-      offered = true;
+      if (acceptedSdp) return; // the certificate was committed to once; no renegotiation
+      acceptedSdp = true;
       if (!oneVideoSection(data.sdp)) { refuseTopology(); return; }
       await certReady;
       if (stale(undefined, mine)) return;
       newPeerConnection();
       const conn = pc;
-      await conn.setRemoteDescription(data.sdp);
+      await acceptRemoteSdp(conn, data.sdp, mine);
       if (stale(conn, mine)) return;
       const answer = await conn.createAnswer();
       if (stale(conn, mine)) return;
       await conn.setLocalDescription(answer);
       if (stale(conn, mine)) return;
       send({ type: 'signal', data: { sdp: conn.localDescription } });
-    } else if (data.sdp && role === 'participant' && data.sdp.type === 'answer' && pc && !pc.remoteDescription) {
+    } else if (data.sdp && role === 'participant' && data.sdp.type === 'answer' && pc && !acceptedSdp) {
+      acceptedSdp = true;
       if (!oneVideoSection(data.sdp)) { refuseTopology(); return; }
-      await pc.setRemoteDescription(data.sdp);
-    } else if (data.candidate && pc) {
-      try { await pc.addIceCandidate(data.candidate); } catch (_) { /* stale candidate */ }
+      await acceptRemoteSdp(pc, data.sdp, mine);
+    } else if (data.candidate) {
+      if (role === 'participant' && !stream) return;
+      if (pendingIce.length >= maxPendingIce) {
+        endHere('connection_failed', 'The screen connection stopped after receiving too many pending network candidates.');
+        return;
+      }
+      pendingIce.push(data.candidate);
+      void drainIce();
     }
   }
 

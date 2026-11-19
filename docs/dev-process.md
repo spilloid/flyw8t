@@ -106,6 +106,19 @@ relay, the technician received decoded video, the displayed route was
 synthetic signaling. TURN/TLS, enterprise proxy behavior, physical WAN
 connections and concurrent-session capacity remain unmeasured.
 
+The full support-browser integration also passed twice on the finished
+preview with the real flyw8t server, PostgreSQL and Chrome. Both runs covered
+technician sign-in, the one-use invitation, the participant's Allow click,
+decoded video, matching security codes, and the participant ending the
+session (including the stored closed state). Connection details showed
+**Direct** on one run and **TURN relay** on the forced UDP run. These runs
+used a 640 × 360 animated canvas. An earlier attempt with the Windows tab
+picker reached consent and timed out before the viewer displayed a frame.
+
+Five signaling regressions cover candidates arriving before or during SDP,
+the queue limit, and cancellation on revocation. All 26 browser-model tests
+passed with the bounded candidate queue.
+
 Docker Compose 2.39.4 rendered the relay configuration for unset, empty and
 supplied JSON values. The configured synthetic credential retained its
 punctuation. No relay or console deployment was changed.

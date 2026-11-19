@@ -3,6 +3,7 @@
 //! `cargo test -p flyw8t-server --test support_browser -- --ignored`.
 //! Set FLYW8T_TEST_TURN_SERVERS to an RTCIceServer JSON array with disposable
 //! TURN client credentials to exercise the relayed path instead of local ICE.
+//! FLYW8T_TEST_SYNTHETIC_CAPTURE=1 substitutes animated test pixels for the OS picker.
 //!
 //! Chrome is told to auto-select the tab titled `flyw8t-share-target` in the screen picker;
 //! the participant's Allow click is a trusted input event, as browsers require.
@@ -85,6 +86,33 @@ impl Cdp {
     async fn require_relay(&mut self, tab: &str) {
         self.call(Some(tab), "Page.addScriptToEvaluateOnNewDocument", json!({
             "source": "window.RTCPeerConnection = class extends RTCPeerConnection { constructor(config) { super({...config, iceTransportPolicy: 'relay'}); } };"
+        })).await;
+    }
+
+    async fn use_test_screen(&mut self, tab: &str) {
+        self.call(Some(tab), "Page.addScriptToEvaluateOnNewDocument", json!({
+            "source": r#"
+                navigator.mediaDevices.getDisplayMedia = async () => {
+                    if (!navigator.userActivation.isActive) throw new Error('Expected a participant click');
+                    const screen = document.createElement('canvas');
+                    screen.width = 640;
+                    screen.height = 360;
+                    const ctx = screen.getContext('2d');
+                    function draw() {
+                        ctx.fillStyle = '#17324c';
+                        ctx.fillRect(0, 0, 640, 360);
+                        ctx.fillStyle = 'white';
+                        ctx.font = '32px sans-serif';
+                        ctx.fillText('Shared test screen', 32, 75);
+                        ctx.fillRect(32 + (performance.now() / 10) % 520, 112, 40, 8);
+                    }
+                    draw();
+                    const stream = screen.captureStream(10);
+                    const timer = setInterval(draw, 100);
+                    addEventListener('pagehide', () => clearInterval(timer), {once: true});
+                    return stream;
+                };
+            "#
         })).await;
     }
 
@@ -202,6 +230,9 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
     if cfg!(target_os = "linux") {
         chrome.arg("--use-fake-device-for-media-stream");
     }
+    if require_relay && std::env::var("FLYW8T_TEST_LOOPBACK_TURN").as_deref() == Ok("1") {
+        chrome.arg("--allow-loopback-in-peer-connection");
+    }
     let mut child = chrome
         .arg("--headless=new")
         .arg("--remote-debugging-port=0")
@@ -281,6 +312,9 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
 
     // The participant follows the link, sees who is asking, and allows.
     let part = cdp.open(&format!("{base}/s/{link_token}")).await;
+    if std::env::var("FLYW8T_TEST_SYNTHETIC_CAPTURE").as_deref() == Ok("1") {
+        cdp.use_test_screen(&part).await;
+    }
     if require_relay {
         cdp.require_relay(&part).await;
     }
@@ -311,7 +345,18 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
 
     // If media never connects, say what the participant's page shows (the picker is the
     // usual suspect on a new platform).
+    let mut viewer_in_front = false;
     for _ in 0..150 {
+        if !viewer_in_front
+            && cdp
+                .eval(&tech, "!!document.getElementById('remote')?.srcObject")
+                .await
+                == json!(true)
+        {
+            // A background tab can defer the video frame callback that declares the viewer ready.
+            cdp.call(Some(&tech), "Page.bringToFront", json!({})).await;
+            viewer_in_front = true;
+        }
         if cdp
             .eval(
                 &tech,
@@ -407,6 +452,11 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         );
     }
     tokio::time::sleep(Duration::from_millis(800)).await;
+    cdp.eval(
+        &tech,
+        "document.getElementById('connection-details').scrollIntoView({block: 'end'}); true",
+    )
+    .await;
     cdp.screenshot(&tech, out_dir.join("support-technician-connected.png"))
         .await;
     cdp.screenshot(&part, out_dir.join("support-participant-connected.png"))
