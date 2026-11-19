@@ -72,6 +72,27 @@ SSO validation (rows 48/50): the clean focused baseline has 26 integration tests
 Mutation limits: these are batched guard experiments, not fully isolated proof of every branch. Disabling token verification first admits unsigned `none`; Group direct-ID first fails expected `200` versus `409`; collective creator revocation first fails local disable; create-conflict conversion first fails an injected User audit uniqueness error. Baseline tests cover the later signature, demotion/directory-creator, group rename/reuse and conflict paths. Logs, exact mutations, durable originals and before/restored hashes are in `target/sso-mutations`; full gate logs are in `target/sso-final-validation`. Tokens/cost were not separately measured.
 
 
+## Technician preview on two Windows machines
+
+On November 18, 2026, a technician workstation connected to a second physical
+Windows host on the same LAN. The host initially refused its RDP port. After its
+operator rebooted it, the listener accepted a connection and the embedded Windows
+control reported successful logon. The operator confirmed interactive use and a
+clipboard round trip. The finished session picker returned three Windows sessions.
+The operator selected their active RDP session and confirmed that Windows shadow
+view showed the same desktop. Identifiers, clipboard contents and credentials
+were excluded from this record.
+
+The local preview at `b8f4939` passed the Windows technician tests and a packaged
+GUI test of the refused-port status. Native control activation and event
+subscription were tested against the installed Windows control. Browser
+regressions covered transport readiness before the first frame, stale frames
+after revocation and delayed connection hints. A local Chrome test used
+synthetic video. Implementation and review used same-family Codex agents.
+This exercise covered direct LAN sign-in and shadow viewing. Shadow input,
+WAN/relay behavior, independent concurrent sign-ins, the full database-backed
+suite and production signing remain outside this evidence.
+
 ## Release foundation sprint: 2026-11-12
 
 Operator authorized the roadmap and implementation sprint: Windows/Mac endpoints and native attended/unattended control at 1.0, Linux server/console, Android endpoints and mobile technician administration at 1.5, iOS conditional. The roadmap now records 0.2 through 1.0 evidence gates and distinguishes feature-complete 0.8 from pilot-proven 0.9. Codex implemented this change; **independent adversarial review is pending**, so G02-JOURNAL and the release gate are not signed off.

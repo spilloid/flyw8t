@@ -2,6 +2,15 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## Unreleased
+
+- Add a Windows technician preview with existing-session selection and shadowing,
+  explicit Windows sign-in with optional clipboard sharing, and an attended
+  browser screen-sharing handoff. A failed connection leaves one actionable
+  status and returns control to the technician.
+- In browser support, wait for a displayable remote frame before reporting a
+  connected viewer. Slow connections show a single reason for the wait.
+
 ## 0.1.5 — 2026-11-16 (pre-release)
 
 - Fix OIDC HTTPS discovery/token requests in 0.1.4: its reqwest feature selected an empty
