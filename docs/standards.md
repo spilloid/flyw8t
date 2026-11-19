@@ -37,7 +37,17 @@ The server already owns these operations. Preserve its execution state, verifica
 
 ### Desktop integration
 
-Begin with a support request, its status, and a link for the technician to open the viewer. These require new scoped server operations. Deliver the participant's one-use invitation through the human console. The current technician socket belongs to the session creator, and the Windows picker rechecks the selected logon before requesting shadow. Preserve both properties. Bind any future model-visible frame to an explicit grant for that participant, device and logon. Keep viewing, input, clipboard and file transfer separately authorized. An operator taking over, a changed logon or participant revocation must invalidate outstanding observations and pending input. Windows sign-in stays interactive. [Attended support](attended-support.md) · [Session validation](../crates/flyw8t-technician/src/sessions.rs)
+Begin with a support request, its status, and a link for the technician to open the viewer. These require new scoped server operations. Deliver the participant's one-use invitation through the human console. The current technician socket belongs to the session creator, and the Windows picker rechecks the selected logon before requesting shadow. Preserve both properties. Bind each model-visible frame to the participant and shared source described below. Keep viewing, input, clipboard and file transfer separately authorized. An operator taking over, a changed logon or participant revocation must invalidate outstanding observations and pending input. Windows sign-in stays interactive. [Attended support](attended-support.md) · [Session validation](../crates/flyw8t-technician/src/sessions.rs)
+
+### Attended screenshot tool
+
+`support_screenshot(session_id, request_id, crop?)` returns one fresh frame from the screen, window or tab the participant selected in the active support session. The optional crop uses normalized source coordinates `{x, y, width, height}` within the shared frame. Crop before resizing so a technician can read a small dialog. Return one MCP `image/png` image block, capped at 512 KiB before base64, with the returned dimensions and the time the viewer observed the frame. [MCP image results](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#image-content)
+
+The participant grants screenshots separately from ordinary viewing. Show the recipient in the prompt, for example **Allow screenshots for this session to be sent to [AI client]?** Keep a visible switch to turn this off. The grant is bound to the owner, organization, participant, recipient and current shared source. A browser share identifies that source through its active media track. A native Windows provider must also verify the endpoint and logon.
+
+The first provider would take pixels from the technician viewer's decoded remote video and deliver them through a new authenticated one-shot channel to the adapter. Check the grant and source before capture and again before releasing the encoded frame. If the participant revokes, the source changes, or the connection has no fresh frame, return the reason with no image. Retrying a request ID must not trigger a second capture. Audit request and delivery metadata only. An image already delivered is available to the receiving client. [Viewer frame handling](../crates/flyw8t-web/src/support.js)
+
+Verify with a synthetic shared window containing a known color pattern. Check the PNG and crop, denial before consent, loss of a fresh frame, a source switch, revocation during encoding, and an identical request arriving twice.
 
 ### Acceptance
 
