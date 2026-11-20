@@ -72,6 +72,109 @@ SSO validation (rows 48/50): the clean focused baseline has 26 integration tests
 Mutation limits: these are batched guard experiments, not fully isolated proof of every branch. Disabling token verification first admits unsigned `none`; Group direct-ID first fails expected `200` versus `409`; collective creator revocation first fails local disable; create-conflict conversion first fails an injected User audit uniqueness error. Baseline tests cover the later signature, demotion/directory-creator, group rename/reuse and conflict paths. Logs, exact mutations, durable originals and before/restored hashes are in `target/sso-mutations`; full gate logs are in `target/sso-final-validation`. Tokens/cost were not separately measured.
 
 
+## Technician preview on two Windows machines
+
+On November 18, 2026, a technician workstation connected to a second physical
+Windows host on the same LAN. The host initially refused its RDP port. After its
+operator rebooted it, the listener accepted a connection and the embedded Windows
+control reported successful logon. The operator confirmed interactive use and a
+clipboard round trip. The finished session picker returned three Windows sessions.
+The operator selected their active RDP session and confirmed that Windows shadow
+view showed the same desktop. The operator subsequently reported that Windows
+prompted the user for consent before shadow control, that control worked after
+consent, and that a file copy succeeded. The transfer mechanism and direction
+were not recorded. Identifiers, clipboard contents and credentials were excluded.
+
+The local preview at `b8f4939` passed the Windows technician tests and a packaged
+GUI test of the refused-port status. Native control activation and event
+subscription were tested against the installed Windows control. Browser
+regressions covered transport readiness before the first frame, stale frames
+after revocation and delayed connection hints. A local Chrome test used
+synthetic video. Implementation and review used same-family Codex agents.
+This exercise covered direct LAN sign-in, shadow viewing and operator-tested shadow control.
+WAN/relay behavior, independent concurrent sign-ins, the full database-backed
+suite and production signing remain outside this evidence.
+
+## Windows device-page handoff, 2026-11-19
+
+The device page and Windows picker use the same grammar for a suggested host.
+The Windows smoke registered the local executable twice, dispatched a real
+`flyw8t://` link through the Windows shell, and read the resulting window's
+address, session selection, button and status. It showed the unique synthetic
+computer and waited at **Check console**. Removing the association twice left
+the test user's scheme clear. The final technician passed 20 Windows tests.
+An isolated mutation that accepted alternate numeric IP spellings failed the
+shared validation regression on `0x7f000001`.
+
+A disposable PostgreSQL-backed console, enrolled synthetic Windows device and
+signed-in Chrome profile exercised the complete launch. An actual mouse click
+on **Unattended console** opened the executable with the expected host, mode,
+idle action and empty status. The profile remembered permission for only the
+test's loopback origin and scheme. The first-use prompt on a clean user remains
+part of signed release acceptance. The UI capture suite passed at desktop,
+tablet and phone widths in light and dark themes (210 captures). All six scoped
+device tests passed serially. A parallel run exceeded the existing ten-second
+agent-retirement timeout on this machine. The full Windows workspace run then
+passed all 378 tests it executed, including retirement and two-browser WebRTC.
+UI capture and the authenticated browser launch ran separately. Rust formatting
+and workspace Clippy with warnings denied passed.
+
+Same-family review identified existing Windows default-app choices and modified
+shell verbs as registration conflicts. The app checks both before changing its
+registry entries. Windows CI now runs the shell smoke, and the signing rehearsal
+includes the technician app and MCP adapter. The signed candidate on a clean
+Windows account is a release check.
+
+## Technician MCP and Windows console preview
+
+The Windows smoke run used a local flyw8t server, disposable PostgreSQL instance,
+the actual stdio MCP executable and two Chrome tabs. The entire workflow passed
+once with direct ICE and again with relay-only ICE and a TCP-only loopback TURN
+listener. A participant shared an
+animated 640 × 360 synthetic screen. Before screenshot consent the tool returned
+an explanation. After consent, the test decoded the actual returned PNG and
+checked both colors and the dimensions of a 160 × 90 crop. A repeated request ID
+and a fresh request after revocation both returned no image. The 390-pixel-wide
+consent UI was inspected. Separate database tests exercised tenant/owner selection
+and credential revocation during a pending capture.
+
+The native Windows chooser was inspected at 150% scaling. The executable embeds
+Common Controls 6 and runs as the invoking user. Native tests covered the four
+session choices, the physical-console-only selection, policy-limited view/control,
+and rejection of a changed logon. A read-only check on the operator's Windows
+host found a reachable RDP port and an active physical console. Its computer
+policy could not be verified as preauthorizing unattended access. No host policy
+was changed or unattended control session started. A physical preauthorized
+shadow run is still open.
+
+## Browser media route verification
+
+On November 18, 2026, two headless Chrome peers ran the preview's browser
+viewer with an animated 320 × 180 test screen and a disposable Pion TURN
+server restricted to loopback. Separate runs forced UDP and TCP between
+the clients and the relay. In both, the selected candidate pairs showed a
+relay, the technician received decoded video, the displayed route was
+**TURN relay**, and the six-digit security codes matched. The fixture used
+synthetic signaling. TURN/TLS, enterprise proxy behavior, physical WAN
+connections and concurrent-session capacity remain unmeasured.
+
+The full support-browser integration also passed twice on the finished
+preview with the real flyw8t server, PostgreSQL and Chrome. Both runs covered
+technician sign-in, the one-use invitation, the participant's Allow click,
+decoded video, matching security codes, and the participant ending the
+session (including the stored closed state). Connection details showed
+**Direct** on one run and **TURN relay** on the forced UDP run. These runs
+used a 640 × 360 animated canvas. An earlier attempt with the Windows tab
+picker reached consent and timed out before the viewer displayed a frame.
+
+Five signaling regressions cover candidates arriving before or during SDP,
+the queue limit, and cancellation on revocation. All 26 browser-model tests
+passed with the bounded candidate queue.
+
+Docker Compose 2.39.4 rendered the relay configuration for unset, empty and
+supplied JSON values. The configured synthetic credential retained its
+punctuation. No relay or console deployment was changed.
+
 ## Release foundation sprint: 2026-11-12
 
 Operator authorized the roadmap and implementation sprint: Windows/Mac endpoints and native attended/unattended control at 1.0, Linux server/console, Android endpoints and mobile technician administration at 1.5, iOS conditional. The roadmap now records 0.2 through 1.0 evidence gates and distinguishes feature-complete 0.8 from pilot-proven 0.9. Codex implemented this change; **independent adversarial review is pending**, so G02-JOURNAL and the release gate are not signed off.

@@ -1,0 +1,20 @@
+[package]
+name = "flyw8t-technician"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Native Windows technician console for direct Remote Desktop sessions"
+
+[target.'cfg(windows)'.dependencies]
+url = "2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com",
+    "Win32_System_LibraryLoader", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_UI_HiDpi", "Win32_UI_Shell",
+    "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+cc = "1"

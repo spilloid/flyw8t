@@ -2,6 +2,8 @@
 //! clients standing in for the technician's and the participant's browsers.
 
 mod common;
+#[path = "support/screenshot.rs"]
+mod screenshot;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};

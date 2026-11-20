@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod catalog;
+pub mod desktop_link;
 pub mod display;
 pub mod inventory;
 pub mod messages;

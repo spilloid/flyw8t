@@ -2,6 +2,33 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## 0.1.6 — 2026-11-20 (pre-release)
+
+- Open Flyw8t Technician from an authorized Windows device page. Select an
+  existing session, the physical console or Windows sign-in, review the
+  suggested computer, and start the connection in the desktop app.
+- Add a Windows technician preview with existing-session selection and shadowing,
+  explicit Windows sign-in with optional clipboard sharing, and an attended
+  browser screen-sharing handoff. A failed connection leaves one actionable
+  status and returns control to the technician.
+- In browser support, wait for a displayable remote frame before reporting a
+  connected viewer. Slow connections show a single reason for the wait.
+- Show the selected WebRTC route in the technician viewer's connection details.
+  The Compose deployment accepts the server's existing `FLYW8T_ICE_SERVERS`
+  setting for direct connectivity and TURN relay fallback.
+- Preserve network candidates that arrive while the browsers are still
+  negotiating the screen share. Ending the session discards pending candidates.
+- Add the `flyw8t-mcp` stdio adapter and a separately revocable participant
+  grant for screenshots from the active attended web viewer.
+- Add a distinct **Unattended console** choice to the native Windows client.
+  The picker verifies the existing host policy and the physical login before
+  offering the allowed view or control action.
+- The native client needs a network or VPN route from the technician's Windows
+  workstation to the target. WAN interruption recovery and unattended access
+  to an owner-preauthorized physical console still need field verification.
+- Back up the database before upgrading the server. At startup it applies
+  migration 0015 for screenshot permissions and receipt metadata.
+
 ## 0.1.5 — 2026-11-16 (pre-release)
 
 - Fix OIDC HTTPS discovery/token requests in 0.1.4: its reqwest feature selected an empty

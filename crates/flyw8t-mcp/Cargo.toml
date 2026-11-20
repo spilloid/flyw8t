@@ -1,0 +1,22 @@
+[package]
+name = "flyw8t-mcp"
+description = "Local MCP adapter for the flyw8t technician console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+png = "0.18"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-webpki-roots-no-provider"] }
+ring.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true

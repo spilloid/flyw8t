@@ -1,11 +1,17 @@
 //! Attended support in a real browser: two Chrome tabs (technician and participant) pair,
 //! consent, and stream a third tab over WebRTC. Needs Google Chrome and PostgreSQL:
 //! `cargo test -p flyw8t-server --test support_browser -- --ignored`.
+//! Set FLYW8T_TEST_TURN_SERVERS to an RTCIceServer JSON array with disposable
+//! TURN client credentials to exercise the relayed path instead of local ICE.
+//! FLYW8T_TEST_SYNTHETIC_CAPTURE=1 substitutes animated test pixels for the OS picker.
+//! With synthetic capture, set FLYW8T_TEST_MCP_BINARY to the built adapter to test screenshots.
 //!
 //! Chrome is told to auto-select the tab titled `flyw8t-share-target` in the screen picker;
 //! the participant's Allow click is a trusted input event, as browsers require.
 
 mod common;
+#[path = "support_browser/screenshot.rs"]
+mod screenshot;
 
 use axum::http::StatusCode;
 use base64::Engine;
@@ -78,6 +84,43 @@ impl Cdp {
         session
     }
 
+    /// Before navigating to either live support page, force the browser to use
+    /// a relay. The application still receives its ICE servers from flyw8t.
+    async fn require_relay(&mut self, tab: &str) {
+        self.call(Some(tab), "Page.addScriptToEvaluateOnNewDocument", json!({
+            "source": "window.RTCPeerConnection = class extends RTCPeerConnection { constructor(config) { super({...config, iceTransportPolicy: 'relay'}); } };"
+        })).await;
+    }
+
+    async fn use_test_screen(&mut self, tab: &str) {
+        self.call(Some(tab), "Page.addScriptToEvaluateOnNewDocument", json!({
+            "source": r#"
+                navigator.mediaDevices.getDisplayMedia = async () => {
+                    if (!navigator.userActivation.isActive) throw new Error('Expected a participant click');
+                    const screen = document.createElement('canvas');
+                    screen.width = 640;
+                    screen.height = 360;
+                    const ctx = screen.getContext('2d');
+                    function draw() {
+                        ctx.fillStyle = '#17324c';
+                        ctx.fillRect(0, 0, 640, 360);
+                        ctx.fillStyle = 'white';
+                        ctx.font = '32px sans-serif';
+                        ctx.fillText('Shared test screen', 32, 75);
+                        ctx.fillRect(32 + (performance.now() / 10) % 520, 112, 40, 8);
+                        ctx.fillStyle = '#d84f3b';
+                        ctx.fillRect(480, 270, 80, 90);
+                    }
+                    draw();
+                    const stream = screen.captureStream(10);
+                    const timer = setInterval(draw, 100);
+                    addEventListener('pagehide', () => clearInterval(timer), {once: true});
+                    return stream;
+                };
+            "#
+        })).await;
+    }
+
     async fn wait_for(&mut self, session: &str, what: &str, expr: &str, timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -146,9 +189,18 @@ async fn http_json(port: u16, path: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "launches Google Chrome and needs PostgreSQL"]
 async fn two_browsers_pair_consent_and_share_a_tab() {
-    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-capture");
+    let turn_servers = std::env::var("FLYW8T_TEST_TURN_SERVERS").ok();
+    let require_relay = turn_servers.is_some();
+    let mut out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-capture");
+    if require_relay {
+        out_dir.push("turn-relay");
+    }
     std::fs::create_dir_all(&out_dir).unwrap();
-    let server = start_fresh().await;
+    let mut config = test_config(&fresh_database().await);
+    if let Some(servers) = turn_servers {
+        config.ice_servers = servers;
+    }
+    let server = start(config).await;
     let admin = server.admin().await;
     let org = admin
         .create_org(&server, "Contoso Dental")
@@ -182,6 +234,9 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
     // device stands in. Windows keeps capturing a real tab.
     if cfg!(target_os = "linux") {
         chrome.arg("--use-fake-device-for-media-stream");
+    }
+    if require_relay && std::env::var("FLYW8T_TEST_LOOPBACK_TURN").as_deref() == Ok("1") {
+        chrome.arg("--allow-loopback-in-peer-connection");
     }
     let mut child = chrome
         .arg("--headless=new")
@@ -217,6 +272,9 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
     // cross-origin check (a `no-referrer` policy once made Chrome send `Origin: null` and every
     // console post was refused; only a real browser shows that).
     let tech = cdp.open(&format!("{base}/login")).await;
+    if require_relay {
+        cdp.require_relay(&tech).await;
+    }
     cdp.wait_for(
         &tech,
         "sign-in form",
@@ -259,6 +317,12 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
 
     // The participant follows the link, sees who is asking, and allows.
     let part = cdp.open(&format!("{base}/s/{link_token}")).await;
+    if std::env::var("FLYW8T_TEST_SYNTHETIC_CAPTURE").as_deref() == Ok("1") {
+        cdp.use_test_screen(&part).await;
+    }
+    if require_relay {
+        cdp.require_relay(&part).await;
+    }
     // Opening the link spends nothing; the person continues on purpose.
     cdp.wait_for(
         &part,
@@ -286,7 +350,18 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
 
     // If media never connects, say what the participant's page shows (the picker is the
     // usual suspect on a new platform).
+    let mut viewer_in_front = false;
     for _ in 0..150 {
+        if !viewer_in_front
+            && cdp
+                .eval(&tech, "!!document.getElementById('remote')?.srcObject")
+                .await
+                == json!(true)
+        {
+            // A background tab can defer the video frame callback that declares the viewer ready.
+            cdp.call(Some(&tech), "Page.bringToFront", json!({})).await;
+            viewer_in_front = true;
+        }
         if cdp
             .eval(
                 &tech,
@@ -331,6 +406,19 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         Duration::from_secs(30),
     )
     .await;
+    cdp.click(&tech, "#connection-details summary").await;
+    let expected = if require_relay {
+        "TURN relay"
+    } else {
+        "Direct"
+    };
+    cdp.wait_for(
+        &tech,
+        expected,
+        &format!("document.getElementById('connection-route')?.textContent === '{expected}'"),
+        Duration::from_secs(10),
+    )
+    .await;
     cdp.wait_for(
         &part,
         "security code",
@@ -369,10 +457,32 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         );
     }
     tokio::time::sleep(Duration::from_millis(800)).await;
+    cdp.eval(
+        &tech,
+        "document.getElementById('connection-details').scrollIntoView({block: 'end'}); true",
+    )
+    .await;
     cdp.screenshot(&tech, out_dir.join("support-technician-connected.png"))
         .await;
     cdp.screenshot(&part, out_dir.join("support-participant-connected.png"))
         .await;
+
+    if let Some(binary) = std::env::var_os("FLYW8T_TEST_MCP_BINARY") {
+        assert_eq!(
+            std::env::var("FLYW8T_TEST_SYNTHETIC_CAPTURE").as_deref(),
+            Ok("1")
+        );
+        screenshot::exercise(
+            &server,
+            &mut cdp,
+            &tech,
+            &part,
+            &session_id,
+            &out_dir,
+            binary,
+        )
+        .await;
+    }
 
     // The participant ends it; the technician's view goes dark and says so.
     cdp.click(&part, "#end").await;

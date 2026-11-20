@@ -187,6 +187,22 @@ async fn device_changes_respect_organization_scope_and_role() {
     let (_, b) = org_with_devices(&server, &admin, "Org B", 1).await;
     let tech = technician(&server, &admin, "tech@example.test", org_a).await;
 
+    // Enrollment supplies the platform before the first inventory report. Only visible devices can launch.
+    sqlx::query(
+        "UPDATE devices SET hostname = 'WS-01', os_family = 'windows' WHERE id IN ($1, $2)",
+    )
+    .bind(a[0])
+    .bind(b[0])
+    .execute(&server.state.db)
+    .await
+    .unwrap();
+    let allowed = tech.get(&server, &format!("/devices/{}", a[0])).await;
+    assert_eq!(allowed.status, StatusCode::OK);
+    assert!(allowed.body.contains("flyw8t://open/assist?host=WS-01"));
+    let hidden = tech.get(&server, &format!("/devices/{}", b[0])).await;
+    assert_eq!(hidden.status, StatusCode::NOT_FOUND);
+    assert!(!hidden.body.contains("flyw8t://"));
+
     // Tags used only in another organization are not offered to them.
     let r = admin
         .post(

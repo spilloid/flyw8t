@@ -1,0 +1,22 @@
+name: Check the Windows browser handoff
+description: Exercise first-use registration, three device links and removal on a fresh hosted runner.
+inputs:
+  binaries:
+    description: Directory containing the matching technician and server executables.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 22
+    - name: Start PostgreSQL and check the desktop handoff
+      shell: pwsh
+      env:
+        FLYW8T_TEST_BINARIES: ${{ inputs.binaries }}
+      run: |
+        $service = @(Get-Service -Name 'postgresql-x64-*')
+        if ($service.Count -ne 1) { throw 'Expected one hosted PostgreSQL instance.' }
+        Set-Service $service[0].Name -StartupType Manual
+        Start-Service $service[0].Name
+        node scripts/signed-browser-launch.mjs

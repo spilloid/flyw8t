@@ -1001,6 +1001,40 @@ pub fn bulk_confirm_page(ctx: &PageCtx, c: BulkConfirm) -> String {
     shell(&title, ctx, Nav::Devices, None, body)
 }
 
+fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoView> {
+    if !ctx.can_support || d.row.retired || !d.os_family.eq_ignore_ascii_case("windows") {
+        return None;
+    }
+    let host = flyw8t_protocol::desktop_link::host(&d.row.hostname);
+    let query = host.map(|h| format!("?host={h}")).unwrap_or_default();
+    let target = match host {
+        Some(h) => format!("Review {h} in the app before connecting."),
+        None => "Enter the computer name or IP address in the app before connecting.".into(),
+    };
+    let choices = [
+        ("assist", "Help someone", "Choose a signed-in user’s Windows session. Windows may ask the user for consent."),
+        ("console", "Unattended console", "View or control the physical desktop if a user is signed in and device policy allows it."),
+        ("sign-in", "Windows sign-in", "Sign in to Windows. This can lock the physical desktop or resume an existing session."),
+    ].into_iter().map(|(mode, label, description)| view! {
+        <a class="action desktop-choice" href=format!("flyw8t://open/{mode}{query}")
+            aria-labelledby=format!("desktop-{mode}-label") aria-describedby=format!("desktop-{mode}-hint")>
+            <strong id=format!("desktop-{mode}-label")>{label}</strong>
+            <span class="small" id=format!("desktop-{mode}-hint")>{description}</span>
+        </a>
+    }).collect_view();
+    Some(view! {
+        <section class="card" aria-labelledby="desktop-launch-title">
+            <h2 id="desktop-launch-title">"Open in Flyw8t Technician"</h2>
+            <p class="desktop-target">{target}" Use a Windows PC that can reach this device over the network or VPN."</p>
+            <div class="actions">{choices}</div>
+            <details class="desktop-link-help">
+                <summary>"Set up browser links on Windows"</summary>
+                <p>"If you need the app, ask your administrator for the Windows technician build. Open Flyw8t Technician and choose Browser links → Enable for this Windows user. Then choose a session here and confirm the browser prompt if it appears."</p>
+            </details>
+        </section>
+    })
+}
+
 pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     let now = ctx.now;
     let connected = matches!(d.row.connection, Connection::Connected { .. });
@@ -1062,6 +1096,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     let glance = glance_section(&d, now);
     let title = d.row.name().to_string();
     let manage = manage_section(ctx, &d);
+    let desktop = desktop_launch_section(ctx, &d);
     let tags = tag_chips(&d.row.tags);
     let notes = (!d.notes.is_empty())
         .then(|| view! { <dt>"Notes"</dt><dd class="notes">{d.notes.clone()}</dd> });
@@ -1080,6 +1115,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
         {retired_note}
         <p>{tags}</p>
+        {desktop}
         {glance}
         <div class="grid">
             <section class="card">
@@ -1091,7 +1127,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
                     <dt>"Enrolled"</dt><dd>{fmt::timestamp(d.enrolled_at)}</dd>
                     <dt>"Agent"</dt><dd class="mono">{d.row.agent_version.clone().unwrap_or_else(|| "—".into())}</dd>
                     <dt>"Credential"</dt><dd>{credential}</dd>
-                    <dt>"Remote access"</dt><dd>{d.remote_access.clone()}</dd>
+                    <dt>"External remote access"</dt><dd>{d.remote_access.clone()}</dd>
                     <dt>"Device ID"</dt><dd class="mono">{d.row.id.to_string()}</dd>
                     {notes}
                 </dl>
@@ -1936,6 +1972,7 @@ pub fn admin_page(
                 <label>"Name"<input type="text" name="name" required=true maxlength="100" placeholder="AnchorDesk"/></label>
                 <label class="inline"><input type="checkbox" name="scope" value="read" checked=true/>" read"</label>
                 <label class="inline"><input type="checkbox" name="scope" value="jobs:run"/>" jobs:run"</label>
+                <label class="inline"><input type="checkbox" name="scope" value="support:screenshot"/>" Attended screenshots (participant permission required)"</label>
                 <label>"Expires in"<select name="ttl_days">
                     <option value="30">"30 days"</option>
                     <option value="90" selected=true>"90 days"</option>
@@ -2091,20 +2128,29 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
         .join(", ")
         .replace("view_screen", "view screen")
         .replace("control_input", "keyboard and mouse (through the helper)");
-    let data_state = if s.terminal { "ended" } else { s.state };
+    let control = if s.capabilities.iter().any(|c| c == "control_input") {
+        "1"
+    } else {
+        "0"
+    };
     // Only the technician who created the session receives its signaling. Anyone else allowed
     // to see it (an administrator) gets its state and an End button, and no script.
     let observer = s.observer.then(|| view! {
         <p class="flash">{format!("Only {} can view this session. You can end it.", s.created_by)}</p>
     });
     let script = live && !s.observer;
+    let (state, label) = if script && s.state == "connected" {
+        ("checking", "Checking connection…")
+    } else {
+        (s.state, s.state_label)
+    };
+    let data_state = if s.terminal { "ended" } else { state };
     let body = view! {
         <p class="crumbs"><a href="/support">"Support"</a>" / "</p>
-        // The badge is updated live by support.js; it never shows the load-time state as current.
-        <h1>{title.clone()}" "<span id="state-badge" class=support_badge_class(s.state)>{s.state_label}</span></h1>
-        <div id="support" data-role="technician" data-session=s.id.to_string() data-ice=ice_servers.to_string() data-state=data_state>
-            <p class="lead" id="state" aria-live="polite">{s.state_label}</p>
-            <p class="muted" id="peer"></p>
+        <h1>{title.clone()}" "<span id="state-badge" class=support_badge_class(state)>{label}</span></h1>
+        <div id="support" data-role="technician" data-session=s.id.to_string() data-control=control data-csrf=ctx.csrf.clone() data-ice=ice_servers.to_string() data-state=data_state>
+            <p class="lead" id="state" aria-live="polite">{label}</p>
+            <p class="muted" id="peer" aria-live="polite" hidden=true></p>
             <p class="flash bad" id="error" aria-live="assertive"></p>
             {observer}
             {ended}
@@ -2122,6 +2168,14 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
             <section id="viewer" class="card" hidden=true>
                 <h2>"Their shared screen"</h2>
                 <video id="remote" autoplay=true muted=true playsinline=true></video>
+                <p id="screenshot-status" class="muted" role="status" hidden=true></p>
+                <details id="connection-details">
+                    <summary>"Connection details"</summary>
+                    <dl class="facts">
+                        <dt>"Route"</dt><dd id="connection-route">"Unavailable"</dd>
+                        <dt>"Session ID"</dt><dd class="mono">{s.id.to_string()}</dd>
+                    </dl>
+                </details>
             </section>
             {end_form}
             <noscript><p class="flash bad">"Viewing a shared screen needs JavaScript."</p></noscript>
@@ -2201,6 +2255,12 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         v.technician_name, v.technician_email, v.server_host
     );
     let deciding = v.state == "authorizing";
+    let live_heading = format!("Support with {}", v.technician_name);
+    let page_heading = if deciding {
+        heading
+    } else {
+        live_heading.clone()
+    };
     let awaiting = v.state == "awaiting_helper";
     let allow_label = if v.control {
         "Allow, and get the flyw8t helper"
@@ -2227,6 +2287,11 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         .into_any()
     };
     let control = if v.control { "1" } else { "0" };
+    let (state, label) = if v.state == "connected" {
+        ("checking", "Checking connection…")
+    } else {
+        (v.state, v.state_label)
+    };
     participant_shell(
         if v.control {
             "Remote control request"
@@ -2235,14 +2300,25 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
         },
         true,
         view! {
-            <div id="support" data-role="participant" data-session=v.session_id.to_string() data-ice=ice_servers.to_string() data-state=v.state data-control=control>
-                <h1>{heading}</h1>
+            <div id="support" data-role="participant" data-session=v.session_id.to_string() data-ice=ice_servers.to_string() data-state=state data-control=control>
+                <h1 id="participant-heading" data-live=live_heading>{page_heading}</h1>
                 <p>{who}</p>
                 // Live status and the way out come first, so ending is always one tap away.
                 <div class="live">
-                    <p class="lead" id="state" aria-live="polite">{v.state_label}</p>
+                    <p class="lead" id="state" aria-live="polite">{label}</p>
+                    <p class="muted" id="peer" aria-live="polite" hidden=true></p>
                     <p class="flash bad" id="error" aria-live="assertive"></p>
                     <button type="button" id="end" class="bad" hidden=true>"Stop sharing and end the session"</button>
+                    <section id="screenshot-panel" aria-labelledby="screenshot-title" hidden=true>
+                        <h2 id="screenshot-title" aria-live="polite">"Allow screenshots?"</h2>
+                        <p class="screenshot-client">"AI client · "<strong id="screenshot-recipient"></strong></p>
+                        <p id="screenshot-description"></p>
+                        <div class="screenshot-actions">
+                            <button type="button" id="screenshot-allow">"Allow screenshots"</button>
+                            <button type="button" id="screenshot-decline" class="secondary">"Decline"</button>
+                            <button type="button" id="screenshot-revoke" class="secondary" hidden=true>"Turn off screenshots"</button>
+                        </div>
+                    </section>
                     <div id="sas-box" class="sas" hidden=true>
                         <strong>"Security code: "</strong><span id="sas" class="mono"></span>
                         <p class="muted">"Your technician should read you the same code. If it is different, end the session."</p>
@@ -2256,10 +2332,12 @@ pub fn support_consent_page(v: SupportConsentView, ice_servers: &str) -> String 
                         <button type="button" id="cancel-helper" class="bad">"Cancel"</button>
                     </div>
                 </div>
-                <h2>"If you allow, they can"</h2>
-                <ul>{caps}</ul>
-                <h2>"They cannot"</h2>
-                {cannot}
+                <div id="screen-permissions" hidden=!deciding>
+                    <h2>"If you allow, they can"</h2>
+                    <ul>{caps}</ul>
+                    <h2>"They cannot"</h2>
+                    {cannot}
+                </div>
                 <div id="decide" class="stack" hidden=!deciding>
                     <button type="button" id="allow">{allow_label}</button>
                     <button type="button" id="decline" class="bad">"Decline"</button>

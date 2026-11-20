@@ -78,6 +78,10 @@ Beyond the milestone:
 | AT-57 | SCIM credential isolation, directory-only identity, exact Authentik metadata/removal fixtures, atomic membership/revocation and last-admin guards, direct immutable-ID create retries with no mutable-name adoption | `tests/scim.rs` (14 tests), SCIM parser tests |
 | AT-58 | Valid first-key answers need recent provider proof; later key changes recheck session/sudo after lock waits; manual disables persist; cleanup faults close every affected support socket | `tests/directory_races.rs` (4 tests) |
 
+| AT-59 | Authorized Windows device links open the local client with the selected computer and mode. Connection requires another click. | Web fleet and server device tests, native URI and picker tests, `scripts/test-technician-handoff.ps1` |
+| AT-60 | The viewer waits for a displayable frame, retains early ICE candidates and reports the selected connection route. | `support.test.mjs` and `tests/support_browser.rs` |
+| AT-61 | An MCP screenshot requires its own participant grant and an authorized requester. Revocation takes effect before image release. | `tests/support/screenshot.rs`, MCP framing and API tests, two-browser screenshot checks |
+
 ## Manual checks still owed
 
 - **AT-06 as a service:** on a Windows machine, as Administrator, run `flyw8t-agent enroll …` then `flyw8t-agent service install`. Confirm the service starts, survives a reboot, restarts after `taskkill /f`, and that `%ProgramData%\flyw8t\agent` is not readable by a standard user.

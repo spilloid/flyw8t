@@ -22,7 +22,7 @@
   const sessionId = root.dataset.session || '';
   const ice = JSON.parse(root.dataset.ice || '[]');
   const $ = (id) => document.getElementById(id);
-  const setText = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+  const setText = (id, text) => { const el = $(id); if (el && el.textContent !== text) el.textContent = text; };
   const show = (id, on) => { const el = $(id); if (el) el.hidden = !on; };
   const path = role === 'technician'
     ? `/api/support/${sessionId}/ws`
@@ -35,10 +35,29 @@
   let cert = null;
   let commitment = null; // participant: the technician's commitment, from signaling
   let committed = false; // technician: commitment sent
-  let offered = false; // technician: one offer per session, never a renegotiation
+  let acceptedSdp = false; // exactly one remote offer (technician) or answer (participant)
+  const pendingIce = [];
+  const maxPendingIce = 64;
+  let iceReadyPeer = null;
+  let drainingIce = null;
   let epoch = 0; // bumped by every teardown: async work started before it must not act after it
+  let sessionState = root.dataset.state;
+  let sessionLabel = $('state').textContent;
+  let peerPresent = false;
+  let frameReady = false;
+  let hint = '';
+  let hintTimer;
+  const routeDetails = role === 'technician' && $('connection-details');
+  let routeTransport = null;
+  let routeGeneration = 0;
+  let routeTimer;
 
   const send = (msg) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); };
+  const screenshots = attendedScreenshots({
+    root, role, session: sessionId, element: $, send,
+    source: () => role === 'technician' ? $('remote')?.srcObject : stream,
+    usable: () => !ended && !control && pc?.connectionState === 'connected' && (role === 'participant' || frameReady),
+  });
   const hex = (buf) => Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
   const sha256 = async (data) => hex(await crypto.subtle.digest('SHA-256',
     typeof data === 'string' ? new TextEncoder().encode(data) : data));
@@ -50,7 +69,7 @@
   };
   const commitTo = (fp) => sha256(`flyw8t-sas-commit-v1|${sessionId}|${fp}`);
 
-  const badgeClass = (state) => ({ connected: 'badge good', connection_failed: 'badge bad' }[state]
+  const badgeClass = (state) => ({ connected: 'badge good', interrupted: 'badge busy', connection_failed: 'badge bad' }[state]
     || (['connecting', 'waiting', 'authorizing', 'created'].includes(state) ? 'badge busy' : 'badge neutral'));
 
   function setBadge(state, label) {
@@ -58,25 +77,69 @@
     if (badge) { badge.textContent = label; badge.className = badgeClass(state); }
   }
 
-  function render(state, label, peerPresent) {
+  function delayedHint(next) {
+    if (next === hint) return;
+    clearTimeout(hintTimer);
+    hint = next;
+    setText('peer', '');
+    show('peer', false);
+    if (next) hintTimer = setTimeout(() => {
+      setText('peer', next);
+      show('peer', true);
+    }, 2500);
+  }
+
+  function contextHint(state) {
+    if (state === 'interrupted') return 'The screen connection was interrupted. Check that both devices are still online.';
+    if (role === 'technician') {
+      if (state === 'created' || state === 'waiting') return 'Send the participant the invitation link or code.';
+      if (state === 'authorizing') return 'Ask the participant to review the request on their support page.';
+      if (state === 'awaiting_helper') return 'Ask the participant to open the downloaded helper and review its request.';
+    }
+    if (state !== 'connecting') return '';
+    if (!peerPresent) return 'Waiting for the other side. Check that they still have the session open.';
+    if (role === 'technician' && pc?.connectionState === 'connected' && !frameReady)
+      return 'Waiting for the first frame. Ask the participant to check their shared screen.';
+    return 'The screen connection is still starting. Keep the session open on both devices.';
+  }
+
+  function render() {
     if (ended) return;
+    let state = sessionState;
+    let label = sessionLabel;
+    const live = state === 'connecting' || state === 'connected';
+    if (live && (pc?.connectionState === 'disconnected' || pc?.connectionState === 'failed')) {
+      state = 'interrupted';
+      label = 'Screen interrupted';
+    } else if (state === 'connected' && !(control && role === 'participant')
+      && (pc?.connectionState !== 'connected' || (role === 'technician' && !frameReady))) {
+      state = 'connecting';
+      label = 'Waiting for the screen';
+    }
     root.dataset.state = state;
     setText('state', label);
     setBadge(state, label);
+    delayedHint(contextHint(state));
     if (role === 'participant') {
+      const heading = $('participant-heading');
+      if (state !== 'authorizing' && heading?.dataset.live) setText('participant-heading', heading.dataset.live);
+      show('screen-permissions', state === 'authorizing');
       show('decide', state === 'authorizing');
       show('helper-box', control && state === 'awaiting_helper');
-      show('end', state === 'connecting' || state === 'connected');
+      show('end', live);
     } else {
-      setText('peer', peerPresent ? 'The other person has this session open.' : 'The other person does not have this session open yet.');
-      show('viewer', state === 'connecting' || state === 'connected');
+      show('viewer', live);
     }
   }
 
   // Stop every local media resource. Safe to call any number of times.
   function stopMedia() {
+    screenshots.clear();
     epoch += 1; // anything still in flight (a screen picker, an offer, an answer) is now stale
+    pendingIce.length = 0;
+    iceReadyPeer = drainingIce = null;
     if (pc) { pc.close(); pc = null; }
+    refreshRoute();
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
     const video = $('remote');
     if (video) video.srcObject = null;
@@ -86,9 +149,12 @@
     stopMedia();
     if (ended) return;
     ended = true;
+    delayedHint('');
     root.dataset.state = 'ended';
     setText('state', label);
     setBadge(state, label);
+    if (role === 'participant') setText('participant-heading', 'Session ended');
+    show('screen-permissions', false);
     show('decide', false);
     show('end', false);
     show('end-live', false);
@@ -117,6 +183,51 @@
   function mediaTransport() {
     const ends = role === 'participant' ? pc.getSenders() : pc.getReceivers();
     return ends.length === 1 ? ends[0].transport : null;
+  }
+
+  function routeLabel(local, remote) {
+    if (local === 'relay' || remote === 'relay') return 'TURN relay';
+    const direct = ['host', 'srflx', 'prflx'];
+    return direct.includes(local) && direct.includes(remote) ? 'Direct' : 'Unavailable';
+  }
+
+  async function selectedRoute(conn, transport) {
+    const pair = transport?.getSelectedCandidatePair?.();
+    if (pair) return routeLabel(pair.local?.type, pair.remote?.type);
+    // A nominated or successful pair can be idle. Follow the transport's selected pair.
+    const stats = await conn.getStats();
+    for (const entry of stats.values()) {
+      if (entry.type !== 'transport' || !entry.selectedCandidatePairId) continue;
+      const active = stats.get(entry.selectedCandidatePairId);
+      if (active?.type === 'candidate-pair') {
+        return routeLabel(stats.get(active.localCandidateId)?.candidateType,
+          stats.get(active.remoteCandidateId)?.candidateType);
+      }
+    }
+    return 'Unavailable';
+  }
+
+  async function refreshRoute() {
+    if (!routeDetails) return;
+    const generation = ++routeGeneration;
+    clearTimeout(routeTimer);
+    const conn = pc;
+    const visible = routeDetails.open && !document.hidden && !ended && conn?.connectionState === 'connected';
+    const ice = visible ? mediaTransport()?.iceTransport : null;
+    const observable = ice && 'onselectedcandidatepairchange' in ice ? ice : null;
+    if (observable !== routeTransport) {
+      routeTransport?.removeEventListener('selectedcandidatepairchange', refreshRoute);
+      routeTransport = observable;
+      routeTransport?.addEventListener('selectedcandidatepairchange', refreshRoute);
+    }
+    if (!visible) { setText('connection-route', 'Unavailable'); return; }
+    let label = 'Unavailable';
+    try { label = await selectedRoute(conn, ice); } catch (_) { /* browser statistics unavailable */ }
+    if (generation !== routeGeneration || ended || conn !== pc || !routeDetails.open || document.hidden
+        || conn.connectionState !== 'connected') return;
+    setText('connection-route', label);
+    // A few browsers expose selection only through stats. Sample while the details are visible.
+    if (!observable) routeTimer = setTimeout(refreshRoute, 5000);
   }
 
   async function securityCheck(conn, mine0) {
@@ -164,28 +275,90 @@
   // An operation started before an ending, or for a connection since replaced, must not act.
   const stale = (conn, mine) => ended || mine !== epoch || (conn !== undefined && pc !== conn);
 
+  async function drainIce() {
+    const conn = iceReadyPeer;
+    if (!conn || drainingIce === conn) return;
+    const mine = epoch;
+    drainingIce = conn;
+    while (pendingIce.length && !stale(conn, mine)) {
+      const candidate = pendingIce.shift();
+      try { await conn.addIceCandidate(candidate); } catch (_) { /* invalid or obsolete candidate */ }
+    }
+    if (drainingIce === conn) drainingIce = null;
+  }
+
+  async function acceptRemoteSdp(conn, sdp, mine) {
+    await conn.setRemoteDescription(sdp);
+    if (stale(conn, mine)) return;
+    iceReadyPeer = conn;
+    void drainIce(); // Applying candidates must not delay SDP, End, or revocation.
+  }
+
   function newPeerConnection() {
     // One bundled transport for everything: the security code covers exactly that transport.
     pc = new RTCPeerConnection({ iceServers: ice, certificates: [cert], bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
     const conn = pc;
     const mine = epoch;
     let shown = false;
+    let reported = false;
+    let frameGeneration = 0;
+    // Once interrupted, an already decoded frame may still be visible in the element.
+    // A fresh frame confirms recovery even if the server still has both original reports.
+    let framesAtInterruption = null;
+    const video = $('remote');
+    function reportReady() {
+      if (!reported && conn.connectionState === 'connected' && (role === 'participant' || frameReady)) {
+        reported = true;
+        send({ type: 'media', state: 'connected' });
+      }
+    }
+    function watchFrame() {
+      if (!video?.srcObject || conn.connectionState !== 'connected' || frameReady) return;
+      const check = ++frameGeneration;
+      const received = () => {
+        if (stale(conn, mine) || check !== frameGeneration || conn.connectionState !== 'connected') return;
+        frameReady = true;
+        video.onloadeddata = video.ontimeupdate = null;
+        reportReady();
+        render();
+      };
+      if (framesAtInterruption === null && video.videoWidth > 0 && video.readyState >= 2) {
+        received();
+      } else if (video.requestVideoFrameCallback) {
+        video.requestVideoFrameCallback(received);
+      } else {
+        video.onloadeddata = received;
+        video.ontimeupdate = () => {
+          if (video.videoWidth > 0 && video.getVideoPlaybackQuality?.().totalVideoFrames > (framesAtInterruption ?? 0)) received();
+        };
+      }
+    }
     pc.onicecandidate = (e) => { if (e.candidate && !stale(conn, mine)) send({ type: 'signal', data: { candidate: e.candidate.toJSON() } }); };
     pc.onconnectionstatechange = () => {
       if (stale(conn, mine)) return;
+      refreshRoute();
       if (conn.connectionState === 'connected') {
-        send({ type: 'media', state: 'connected' });
+        watchFrame();
+        reportReady();
         securityCheck(conn, mine);
-      } else if (conn.connectionState === 'failed') {
-        send({ type: 'media', state: 'failed' });
+      } else if (conn.connectionState === 'disconnected' || conn.connectionState === 'failed') {
+        screenshots.clear(true);
+        frameGeneration += 1;
+        frameReady = false;
+        framesAtInterruption = video?.getVideoPlaybackQuality?.().totalVideoFrames ?? 0;
+        if (conn.connectionState === 'failed') send({ type: 'media', state: 'failed' });
       }
+      render();
     };
     pc.ontrack = (e) => {
       if (stale(conn, mine)) return;
       if (shown || e.track.kind !== 'video') { refuseTopology(); return; }
       shown = true;
-      const video = $('remote');
-      if (video) video.srcObject = e.streams[0] || new MediaStream([e.track]);
+      if (video) {
+        video.srcObject = e.streams[0] || new MediaStream([e.track]);
+        screenshots.watchSource(video.srcObject, e.track);
+      }
+      watchFrame();
     };
   }
 
@@ -196,25 +369,32 @@
       if (commitment === null) commitment = String(data.commit);
       await maybeStartSharing();
     } else if (data.sdp && role === 'technician' && data.sdp.type === 'offer') {
-      if (offered) return; // the certificate was committed to once; no renegotiation
-      offered = true;
+      if (acceptedSdp) return; // the certificate was committed to once; no renegotiation
+      acceptedSdp = true;
       if (!oneVideoSection(data.sdp)) { refuseTopology(); return; }
       await certReady;
       if (stale(undefined, mine)) return;
       newPeerConnection();
       const conn = pc;
-      await conn.setRemoteDescription(data.sdp);
+      await acceptRemoteSdp(conn, data.sdp, mine);
       if (stale(conn, mine)) return;
       const answer = await conn.createAnswer();
       if (stale(conn, mine)) return;
       await conn.setLocalDescription(answer);
       if (stale(conn, mine)) return;
       send({ type: 'signal', data: { sdp: conn.localDescription } });
-    } else if (data.sdp && role === 'participant' && data.sdp.type === 'answer' && pc && !pc.remoteDescription) {
+    } else if (data.sdp && role === 'participant' && data.sdp.type === 'answer' && pc && !acceptedSdp) {
+      acceptedSdp = true;
       if (!oneVideoSection(data.sdp)) { refuseTopology(); return; }
-      await pc.setRemoteDescription(data.sdp);
-    } else if (data.candidate && pc) {
-      try { await pc.addIceCandidate(data.candidate); } catch (_) { /* stale candidate */ }
+      await acceptRemoteSdp(pc, data.sdp, mine);
+    } else if (data.candidate) {
+      if (role === 'participant' && !stream) return;
+      if (pendingIce.length >= maxPendingIce) {
+        endHere('connection_failed', 'The screen connection stopped after receiving too many pending network candidates.');
+        return;
+      }
+      pendingIce.push(data.candidate);
+      void drainIce();
     }
   }
 
@@ -236,7 +416,11 @@
   }
 
   async function onState(msg) {
-    render(msg.state, msg.label, msg.peer_present);
+    if (ended) return;
+    sessionState = msg.state;
+    sessionLabel = msg.label;
+    peerPresent = msg.peer_present;
+    render();
     if (msg.state !== 'connecting') return;
     if (role === 'technician' && !committed) {
       committed = true;
@@ -251,15 +435,23 @@
   }
 
   function connect() {
+    delayedHint('Waiting for the support server. Check your network connection.');
     ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`);
     ws.onmessage = async (event) => {
+      if (ended) return;
       const msg = JSON.parse(event.data);
       if (msg.type === 'state') {
         await onState(msg);
       } else if (msg.type === 'signal') {
         await onSignal(msg.data || {});
+      } else if (typeof msg.type === 'string' && msg.type.startsWith('screenshot_') && !control) {
+        await screenshots.message(msg);
       } else if (msg.type === 'ended') {
         finish(msg.state, msg.label);
+        if (msg.state === 'connection_failed') {
+          setText('peer', 'Check that both devices are online before starting a new session.');
+          show('peer', true);
+        }
       } else if (msg.type === 'helper' && control && role === 'participant') {
         // Only a helper download from this server ever goes into the link.
         const link = $('helper-link');
@@ -291,7 +483,7 @@
       let chosen;
       try {
         // The browser's own picker: the person chooses exactly what to share, or nothing.
-        chosen = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        chosen = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false, surfaceSwitching: 'exclude' });
       } catch (_) {
         if (mine === epoch && !ended) {
           allow.disabled = false;
@@ -305,6 +497,7 @@
         return;
       }
       stream = chosen;
+      screenshots.watchSource(stream, stream.getVideoTracks()[0]);
       // The browser's own "Stop sharing" button ends the session.
       stream.getTracks().forEach((t) => { t.onended = () => endHere('closed', 'You stopped sharing. The session has ended.'); });
       send({ type: 'approve' });
@@ -321,6 +514,10 @@
     });
     $('end').addEventListener('click', () => endHere('closed', 'You ended the session.'));
   } else {
+    if (routeDetails) {
+      routeDetails.addEventListener('toggle', refreshRoute);
+      document.addEventListener('visibilitychange', refreshRoute);
+    }
     const endLive = $('end-live');
     // With a live socket, end at once; otherwise the form posts as usual.
     if (endLive) {

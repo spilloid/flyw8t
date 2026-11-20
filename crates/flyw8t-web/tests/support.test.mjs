@@ -7,7 +7,8 @@ import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 
-const SOURCE = readFileSync(new URL('../src/support.js', import.meta.url), 'utf8');
+const SOURCE = ['support-screenshot.js', 'support.js']
+  .map(file => readFileSync(new URL('../src/' + file, import.meta.url), 'utf8')).join('\n');
 const SID = '11111111-2222-3333-4444-555555555555';
 const CRLF = String.fromCharCode(13, 10);
 const VIDEO_SDP = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 96', 'a=mid:0', ''].join(CRLF);
@@ -22,7 +23,7 @@ const commitOf = async (d) => sha(`flyw8t-sas-commit-v1|${SID}|${await sha(d)}`)
 
 // A page with support.js loaded. `localDer` is this browser's certificate, `remoteDer` the
 // one the other end presents over DTLS.
-async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, control = false }) {
+async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, control = false, beforeRemote, newCanvas, post }) {
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) {
@@ -37,6 +38,7 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
   el('support').dataset = { role, session: SID, ice: '[]', state: role === 'participant' ? 'authorizing' : 'waiting', control: control ? '1' : '0' };
   const sockets = [];
   const peers = [];
+  const hintTimers = new Map();
   let pickerCalls = 0;
   let releaseCert = () => {};
   const certGate = delayCert ? new Promise((r) => { releaseCert = r; }) : Promise.resolve();
@@ -55,7 +57,7 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
     }
     constructor(cfg) {
       this.cfg = cfg; this.closed = false; this.connectionState = 'new'; this.tracks = [];
-      this.remoteDescription = null; this.localDescription = null; peers.push(this);
+      this.remoteDescription = null; this.localDescription = null; this.appliedIce = []; peers.push(this);
     }
     addTrack(t) { this.tracks.push(t); }
     ends() {
@@ -68,26 +70,41 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
     async createOffer() { return { type: 'offer', sdp: VIDEO_SDP }; }
     async createAnswer() { return { type: 'answer', sdp: VIDEO_SDP }; }
     async setLocalDescription(d) { this.localDescription = d; }
-    async setRemoteDescription(d) { this.remoteDescription = d; }
-    async addIceCandidate() {}
+    async setRemoteDescription(d) { if (beforeRemote) await beforeRemote(); this.remoteDescription = d; }
+    async addIceCandidate(c) {
+      if (!this.remoteDescription) throw new Error('InvalidStateError');
+      this.appliedIce.push(c.candidate);
+    }
     close() { this.closed = true; }
     connect() { this.connectionState = 'connected'; this.onconnectionstatechange(); }
   }
   const windowHandlers = {};
   const context = {
-    document: { getElementById: el },
+    document: { getElementById: el, addEventListener() {}, createElement: newCanvas },
     location: { protocol: 'https:', host: 'rmm.example' },
     WebSocket, RTCPeerConnection, MediaStream: class {},
-    crypto: webcrypto, TextEncoder, setTimeout,
+    crypto: webcrypto, TextEncoder, AbortController, atob, btoa, fetch: post,
+    setTimeout(fn, delay) {
+      if (delay < 2500) return setTimeout(fn, delay);
+      const token = {};
+      hintTimers.set(token, fn);
+      return token;
+    },
+    clearTimeout(token) { if (!hintTimers.delete(token)) clearTimeout(token); },
     navigator: { mediaDevices: { getDisplayMedia: () => { pickerCalls += 1; return new Promise((res, rej) => { resolvePicker = res; rejectPicker = rej; }); } } },
     window: { addEventListener: (t, f) => { windowHandlers[t] = f; } },
   };
   vm.runInNewContext(SOURCE, context);
   await settle();
   const ws = sockets[0];
-  const track = { kind: 'video', stopped: false, stop() { this.stopped = true; } };
+  const track = { kind: 'video', readyState: 'live', stopped: false, stop() { this.stopped = true; } };
   return {
     el, ws, peers, windowHandlers, track,
+    showDelayedHint() {
+      const callbacks = [...hintTimers.values()];
+      hintTimers.clear();
+      callbacks.forEach(fn => fn());
+    },
     pickerCalls: () => pickerCalls,
     pick: async () => { resolvePicker({ getTracks: () => [track], getVideoTracks: () => [track] }); await settle(); },
     releaseCert: async () => { releaseCert(); await settle(); },
@@ -99,6 +116,375 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
 }
 
 const state = (s) => ({ type: 'state', state: s, label: s, peer_present: true });
+const candidate = (name) => ({ type: 'signal', data: { candidate: { candidate: name } } });
+
+const screenshotGrant = 'e6894a0b-e580-47d4-abd9-2459e0311001';
+const screenshotRequest = 'e6894a0b-e580-47d4-abd9-2459e0311002';
+const recipient = 'Support copilot';
+const screenshotAllowed = { type: 'screenshot_allowed', grant_id: screenshotGrant, recipient };
+
+async function screenshotViewer(encode = callback => callback(new Blob(['test pixels'], { type: 'image/png' }))) {
+  const draws = [], responses = [];
+  const t = await page({
+    role: 'technician', localDer: der('technician'), remoteDer: der('participant'),
+    newCanvas() {
+      return { width: 0, height: 0, getContext: () => ({ drawImage: (...args) => draws.push(args) }), toBlob: encode };
+    },
+    post(url, options) { responses.push({ url, body: JSON.parse(options.body) }); return Promise.resolve({ ok: true }); },
+  });
+  t.el('support').dataset.csrf = 'viewer-form-token';
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0], video = t.el('remote');
+  const track = Object.assign(new EventTarget(), { kind: 'video', readyState: 'live' });
+  const stream = Object.assign(new EventTarget(), { getVideoTracks: () => [track] });
+  Object.assign(video, { videoWidth: 640, videoHeight: 360, readyState: 2 });
+  pc.connect();
+  pc.ontrack({ track, streams: [stream] });
+  await t.recv(state('connected'));
+  let next;
+  video.requestVideoFrameCallback = cb => { next = cb; return 1; };
+  video.cancelVideoFrameCallback = () => { next = undefined; };
+  const curve = { name: 'ECDH', namedCurve: 'P-256' };
+  const clientKey = await webcrypto.subtle.generateKey(curve, false, ['deriveKey']);
+  const rawKey = await webcrypto.subtle.exportKey('raw', clientKey.publicKey);
+  const msg = { type: 'screenshot_capture', grant_id: screenshotGrant, request_id: screenshotRequest,
+    public_key: Buffer.from(rawKey).toString('base64'), crop: { x: 0.25, y: 0.5, width: 0.5, height: 0.5 } };
+  return { t, video, track, msg, curve, clientKey, responses, draws, frame: (receiveTime = 5000) => next(5000, { receiveTime }) };
+}
+
+test('screenshots require a separate named participant grant and can be switched off while the share continues', async () => {
+  const { p, tDer } = await consentedParticipant();
+  await p.recv({ type: 'signal', data: { commit: await commitOf(tDer) } });
+  p.peers[0].connect();
+  await p.recv(state('connected'));
+  await p.recv(screenshotAllowed);
+  assert.equal(p.sent('screenshot_permission').length, 0);
+  await p.recv({ ...screenshotAllowed, type: 'screenshot_consent' });
+  assert.equal(p.el('screenshot-panel').hidden, false);
+  assert.equal(p.el('screenshot-recipient').textContent, recipient);
+  assert.equal(p.el('screenshot-revoke').hidden, true);
+  p.el('screenshot-allow').click();
+  assert.deepEqual(p.sent('screenshot_permission').at(-1), { type: 'screenshot_permission', grant_id: screenshotGrant, allow: true });
+  await p.recv(screenshotAllowed);
+  assert.equal(p.el('screenshot-revoke').hidden, false);
+  p.el('screenshot-revoke').click();
+  assert.deepEqual(p.sent('screenshot_permission').at(-1), { type: 'screenshot_permission', grant_id: screenshotGrant, allow: false });
+  assert.equal(p.el('screenshot-panel').hidden, true);
+  assert.equal(p.track.stopped, false);
+  await p.recv(screenshotAllowed);
+  assert.equal(p.el('screenshot-panel').hidden, true, 'a late acknowledgement cannot reinstate permission');
+});
+
+test('one authorized fresh frame is cropped and encrypted to the requesting MCP key', async () => {
+  const { t, msg, curve, clientKey, draws, responses, frame } = await screenshotViewer();
+  await t.recv(msg);
+  assert.equal(responses.length, 0);
+  await t.recv(screenshotAllowed);
+  const capturing = t.recv(msg);
+  frame();
+  await capturing;
+  assert.equal(draws.length, 1);
+  assert.deepEqual(draws[0].slice(1), [160, 180, 320, 180, 0, 0, 320, 180]);
+  const [{ url, body }] = responses;
+  assert.equal(url, '/support/' + SID + '/screenshot/' + screenshotRequest);
+  assert.equal(body.csrf, 'viewer-form-token');
+  assert.equal(body.grant_id, screenshotGrant);
+  assert.equal(body.error, undefined);
+  const { public_key, iv, ciphertext } = body.envelope;
+  const peer = await webcrypto.subtle.importKey('raw', Buffer.from(public_key, 'base64'), curve, false, []);
+  const key = await webcrypto.subtle.deriveKey({ name: 'ECDH', public: peer }, clientKey.privateKey, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const aad = new TextEncoder().encode(['flyw8t-screenshot-v1', SID, screenshotRequest].join('\n'));
+  const decrypted = await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: Buffer.from(iv, 'base64'), additionalData: aad }, key, Buffer.from(ciphertext, 'base64'));
+  const bytes = Buffer.from(decrypted);
+  assert.equal(bytes.readUInt32BE(8), 320);
+  assert.equal(bytes.readUInt32BE(12), 180);
+  assert.ok(Math.abs(Date.now() - Number(bytes.readBigUInt64BE(0))) < 3000);
+  assert.equal(bytes.subarray(16).toString(), 'test pixels');
+  await t.recv(msg);
+  assert.equal(responses.length, 1);
+});
+
+test('stale picture produces only an actionable error, even with WebRTC still connected', async () => {
+  const { t, msg, frame, draws, responses } = await screenshotViewer();
+  await t.recv(screenshotAllowed);
+  const capturing = t.recv(msg);
+  frame(500);
+  await capturing;
+  assert.equal(draws.length, 0);
+  assert.equal(responses[0].body.error, 'no_fresh_frame');
+  assert.equal(responses[0].body.envelope, undefined);
+  assert.match(t.el('screenshot-status').textContent, /keep the viewer visible/i);
+});
+
+test('an invalid crop discloses no pixels; resizing for the PNG limit reuses the captured frame', async () => {
+  let encodes = 0;
+  const { t, msg, frame, draws, responses } = await screenshotViewer(callback => {
+    const data = ++encodes === 1 ? new Uint8Array(600 * 1024) : 'smaller';
+    callback(new Blob([data], { type: 'image/png' }));
+  });
+  await t.recv(screenshotAllowed);
+  const outside = t.recv({ ...msg, crop: { x: 0.8, y: 0, width: 0.5, height: 1 } });
+  frame();
+  await outside;
+  assert.equal(draws.length, 0);
+  assert.equal(responses[0].body.error, 'capture_failed');
+  assert.equal(responses[0].body.envelope, undefined);
+
+  const inside = t.recv({ ...msg, request_id: '00223344-0000-0000-0000-000000000003' });
+  frame();
+  await inside;
+  assert.equal(encodes, 2);
+  assert.equal(draws.length, 2);
+  assert.equal(draws[0][0], t.el('remote'));
+  assert.notEqual(draws[1][0], t.el('remote'), 'the resize must not sample a later image');
+  assert.ok(responses[1].body.envelope.ciphertext);
+});
+
+test('revocation or a changed source during PNG encoding discards the capture', async () => {
+  for (const revoke of ['grant', 'source']) {
+    let finish;
+    const { t, msg, frame, track, responses } = await screenshotViewer(callback => { finish = callback; });
+    await t.recv(screenshotAllowed);
+    const capturing = t.recv(msg);
+    frame();
+    await tick();
+    if (revoke === 'grant') await t.recv({ type: 'screenshot_revoked', grant_id: screenshotGrant });
+    else track.dispatchEvent(new Event('mute'));
+    finish(new Blob(['old frame'], { type: 'image/png' }));
+    await capturing;
+    assert.equal(responses.length, 0);
+    assert.equal(t.el('screenshot-status').hidden, true);
+    if (revoke === 'source') assert.equal(t.sent('screenshot_permission').at(-1).allow, false);
+  }
+});
+
+test('ICE received before the peer and during setRemoteDescription is applied in arrival order', async () => {
+  let start, release;
+  const started = new Promise(r => { start = r; });
+  const gate = new Promise(r => { release = r; });
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p'),
+    beforeRemote() { start(); return gate; } });
+  await t.recv(state('connecting'));
+  await t.recv(candidate('before-peer'));
+  const applying = t.recv(offer());
+  await started;
+  await t.recv(candidate('during-sdp'));
+  assert.deepEqual(t.peers[0].appliedIce, []);
+  release();
+  await applying;
+  await t.recv(candidate('after-sdp'));
+  assert.deepEqual(t.peers[0].appliedIce, ['before-peer', 'during-sdp', 'after-sdp']);
+});
+
+test('the participant applies queued ICE only after receiving its answer', async () => {
+  const { p, tDer } = await consentedParticipant();
+  await p.recv({ type: 'signal', data: { commit: await commitOf(tDer) } });
+  await p.recv(candidate('before-answer'));
+  assert.deepEqual(p.peers[0].appliedIce, []);
+  await p.recv({ type: 'signal', data: { sdp: { type: 'answer', sdp: VIDEO_SDP } } });
+  assert.deepEqual(p.peers[0].appliedIce, ['before-answer']);
+});
+
+test('an SDP operation completing after revocation cannot flush early ICE or answer', async () => {
+  let started, release;
+  const entered = new Promise(r => { started = r; });
+  const gate = new Promise(r => { release = r; });
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p'),
+    beforeRemote() { started(); return gate; } });
+  await t.recv(state('connecting'));
+  await t.recv(candidate('early'));
+  const applying = t.recv(offer());
+  await entered;
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Ended' });
+  assert.equal(t.peers[0].closed, true);
+  release();
+  await applying;
+  assert.deepEqual(t.peers[0].appliedIce, []);
+  assert.equal(t.sent('signal').filter(m => m.data.sdp).length, 0);
+});
+
+test('revocation interrupts an ICE drain without waiting for the browser operation', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  let release, start;
+  const began = new Promise(r => { start = r; });
+  const gate = new Promise(r => { release = r; });
+  pc.addIceCandidate = async c => { pc.appliedIce.push(c.candidate); start(); await gate; };
+  const first = t.recv(candidate('in-progress'));
+  await began;
+  const later = t.recv(candidate('queued'));
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Ended' });
+  assert.equal(pc.closed, true);
+  release();
+  await Promise.all([first, later]);
+  assert.deepEqual(pc.appliedIce, ['in-progress']);
+});
+
+test('excess pending ICE ends the attempt and a later offer cannot reopen it', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  for (let i = 0; i < 150; i++) await t.ws.onmessage({ data: JSON.stringify(candidate(String(i))) });
+  assert.equal(t.el('support').dataset.state, 'ended');
+  assert.equal(t.sent('end').length, 1);
+  await t.recv(offer());
+  assert.equal(t.peers.length, 0);
+});
+
+function routeStats(local, remote, selected = 'using') {
+  return new Map([
+    ['transport', { type: 'transport', selectedCandidatePairId: selected }],
+    ['unused', { type: 'candidate-pair', nominated: true, localCandidateId: 'another', remoteCandidateId: 'r' }],
+    ['another', { type: 'local-candidate', candidateType: 'relay' }],
+    ['using', { type: 'candidate-pair', localCandidateId: 'l', remoteCandidateId: 'r' }],
+    ['l', { type: 'local-candidate', candidateType: local, address: '192.0.2.100' }],
+    ['r', { type: 'remote-candidate', candidateType: remote, address: '198.51.100.42' }],
+  ]);
+}
+
+test('route disclosure reads the selected pair on demand and tracks path changes while open', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  const details = t.el('connection-details');
+  const route = t.el('connection-route');
+  const ice = new EventTarget();
+  ice.onselectedcandidatepairchange = null;
+  const dtls = pc.getReceivers()[0].transport;
+  pc.getReceivers = () => [{ transport: { ...dtls, iceTransport: ice } }];
+  let lookups = 0;
+  let stats = routeStats('srflx', 'host');
+  pc.getStats = async () => { lookups++; return stats; };
+  pc.connect();
+  assert.equal(lookups, 0);
+  details.open = true;
+  await details.handlers.toggle();
+  assert.equal(route.textContent, 'Direct');
+  for (const [local, remote, selected, label] of [
+    ['host', 'relay', 'using', 'TURN relay'],
+    ['relay', 'host', 'using', 'TURN relay'],
+    ['host', undefined, 'using', 'Unavailable'],
+    ['host', 'host', 'missing', 'Unavailable'],
+  ]) {
+    stats = routeStats(local, remote, selected);
+    ice.dispatchEvent(new Event('selectedcandidatepairchange'));
+    await tick();
+    assert.equal(route.textContent, label);
+  }
+  details.open = false;
+  await details.handlers.toggle();
+  ice.dispatchEvent(new Event('selectedcandidatepairchange'));
+  await tick();
+  assert.equal(lookups, 5);
+  // When the browser exposes the actual pair on the ICE transport, no stats lookup is needed.
+  ice.getSelectedCandidatePair = () => ({ local: { type: 'host' }, remote: { type: 'relay' } });
+  details.open = true;
+  await details.handlers.toggle();
+  assert.equal(route.textContent, 'TURN relay');
+  assert.equal(lookups, 5);
+});
+
+test('late route stats cannot overwrite a newer selected pair, disconnect, or revocation', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  const details = t.el('connection-details');
+  const route = t.el('connection-route');
+  pc.connect();
+  details.open = true;
+  let release;
+  const slow = () => new Promise(r => { release = () => r(routeStats('host', 'relay')); });
+  pc.getStats = slow;
+  const pending = details.handlers.toggle();
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange();
+  assert.equal(route.textContent, 'Unavailable');
+  pc.getStats = async () => routeStats('host', 'srflx');
+  pc.connect();
+  await tick();
+  assert.equal(route.textContent, 'Direct');
+  release();
+  await pending;
+  assert.equal(route.textContent, 'Direct');
+  pc.getStats = slow;
+  const lastLookup = details.handlers.toggle();
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Ended' });
+  release();
+  await lastLookup;
+  assert.equal(route.textContent, 'Unavailable');
+  assert.equal(t.el('viewer').hidden, true);
+});
+
+test('a normal connection stays quiet; repeated waiting updates keep one actionable hint', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv({ ...state('waiting'), peer_present: false });
+  assert.equal(t.el('peer').textContent, '');
+  t.showDelayedHint();
+  assert.match(t.el('peer').textContent, /invitation/i);
+  await t.recv({ ...state('waiting'), peer_present: false });
+  assert.match(t.el('peer').textContent, /invitation/i);
+  await t.recv(state('connecting'));
+  assert.equal(t.el('peer').textContent, '');
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Access ended' });
+  t.showDelayedHint();
+  assert.equal(t.el('state').textContent, 'Access ended');
+  assert.equal(t.el('peer').textContent, '');
+});
+
+test('a technician reports connected only after a displayable frame and a connected transport', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  const video = t.el('remote');
+  let frame;
+  video.requestVideoFrameCallback = cb => { frame = cb; };
+  pc.ontrack({ track: { kind: 'video' }, streams: [{}] });
+  pc.connect();
+  assert.equal(t.sent('media').length, 0);
+  await t.recv(state('connected'));
+  assert.notEqual(t.el('support').dataset.state, 'connected');
+  t.showDelayedHint();
+  assert.match(t.el('peer').textContent, /first frame/i);
+  frame();
+  assert.equal(t.sent('media').length, 1);
+  assert.equal(t.el('support').dataset.state, 'connected');
+  assert.equal(t.el('peer').textContent, '');
+  pc.connectionState = 'disconnected';
+  pc.onconnectionstatechange();
+  await t.recv(state('connected'));
+  assert.equal(t.el('support').dataset.state, 'interrupted');
+  t.showDelayedHint();
+  assert.match(t.el('peer').textContent, /connection/i);
+  pc.connect();
+  assert.notEqual(t.el('support').dataset.state, 'connected');
+  frame();
+  assert.equal(t.el('support').dataset.state, 'connected');
+  assert.equal(t.sent('media').length, 1);
+  assert.equal(t.peers.length, 1);
+});
+
+test('a frame delivered after revocation cannot reopen the viewer or report media', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), remoteDer: der('p') });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  const video = t.el('remote');
+  pc.connect();
+  pc.ontrack({ track: { kind: 'video' }, streams: [{}] });
+  const lateFrame = video.onloadeddata;
+  await t.recv({ type: 'ended', state: 'revoked', label: 'Access ended' });
+  lateFrame();
+  t.showDelayedHint();
+  assert.equal(t.sent('media').length, 0);
+  assert.equal(t.el('support').dataset.state, 'ended');
+  assert.equal(t.el('viewer').hidden, true);
+  assert.equal(t.el('peer').textContent, '');
+});
 
 async function consentedParticipant(opts = {}) {
   const tDer = der('technician');
@@ -186,6 +572,8 @@ test('both sides derive the same code from the certificates in use', async () =>
   assert.equal(commits[0].data.commit, await commitOf(tDer), 'the commitment is to its own certificate');
   await t.recv(offer());
   t.peers[0].connect();
+  t.peers[0].ontrack({ track: { kind: 'video' }, streams: [{}] });
+  t.el('remote').onloadeddata();
   await settle();
   assert.equal(t.sas(), p.sas());
   assert.equal(t.sent('media').length, 1);

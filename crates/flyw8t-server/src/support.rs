@@ -32,6 +32,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+pub(crate) mod screenshot;
+
 const MAX_SIGNAL_BYTES: usize = 64 * 1024;
 const PEER_BUFFER: usize = 64;
 /// Concurrent live sessions per technician.
@@ -109,6 +111,7 @@ impl Who {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum In {
+    ScreenshotPermission { grant_id: Uuid, allow: bool },
     Approve,
     Decline,
     Signal { data: Value },
@@ -119,6 +122,23 @@ enum In {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Out {
+    ScreenshotConsent {
+        recipient: String,
+        grant_id: Uuid,
+    },
+    ScreenshotAllowed {
+        recipient: String,
+        grant_id: Uuid,
+    },
+    ScreenshotRevoked {
+        grant_id: Uuid,
+    },
+    ScreenshotCapture {
+        request_id: Uuid,
+        public_key: String,
+        crop: Option<screenshot::Crop>,
+        grant_id: Uuid,
+    },
     State {
         state: &'static str,
         label: &'static str,
@@ -155,6 +175,7 @@ enum Out {
 
 struct Peer {
     conn_id: Uuid,
+    browser_session: Option<(Uuid, Vec<u8>)>,
     tx: mpsc::Sender<Out>,
     close: CancellationToken,
     /// The final notice, set before `close` is cancelled. Kept out of `tx` so a full queue
@@ -168,6 +189,7 @@ struct Peer {
 
 #[derive(Default)]
 struct Peers {
+    screenshots: screenshot::Grants,
     technician: Option<Peer>,
     participant: Option<Peer>,
     helper: Option<Peer>,
@@ -234,6 +256,9 @@ impl SupportHub {
     fn attach(&self, session: Uuid, side: Side, control: bool, peer: Peer) -> bool {
         let mut s = self.sessions.lock().unwrap();
         let peers = s.entry(session).or_default();
+        if peers.side(side).is_some() {
+            peers.revoke_screenshots();
+        }
         // A session's capabilities never change; no socket can turn control off for it.
         peers.control |= control;
         match peers.side(side).replace(peer) {
@@ -253,6 +278,7 @@ impl SupportHub {
                 .as_ref()
                 .is_some_and(|p| p.conn_id == conn_id)
             {
+                peers.revoke_screenshots();
                 *peers.side(side) = None;
             }
             if peers.technician.is_none() && peers.participant.is_none() && peers.helper.is_none() {
@@ -335,6 +361,7 @@ impl SupportHub {
         if let Some(p) = self.sessions.lock().unwrap().get_mut(&session) {
             p.sealed = true;
             p.relay_open = false;
+            p.revoke_screenshots();
         }
     }
 
@@ -1415,6 +1442,7 @@ async fn run_socket(
         control,
         Peer {
             conn_id,
+            browser_session: signed_in.as_ref().map(|(_, session)| session.clone()),
             tx,
             close: close.clone(),
             last: last.clone(),
@@ -1518,7 +1546,7 @@ async fn run_socket(
                     state.support.send(id, side, Out::Error { message: "malformed message".into() });
                     continue;
                 };
-                if let Err(e) = on_message(&state, id, side, &who, msg).await {
+                if let Err(e) = on_message(&state, id, side, conn_id, &who, msg).await {
                     tracing::warn!(session = %id, error = %format!("{e:#}"), "support message failed");
                     break;
                 }
@@ -1554,6 +1582,7 @@ async fn on_message(
     state: &Shared,
     id: Uuid,
     side: Side,
+    conn_id: Uuid,
     who: &Who,
     msg: In,
 ) -> anyhow::Result<()> {
@@ -1568,6 +1597,9 @@ async fn on_message(
         );
     };
     match (side, msg) {
+        (_, In::ScreenshotPermission { grant_id, allow }) => {
+            screenshot::permission(state, id, side, conn_id, who, grant_id, allow).await?;
+        }
         // The browser's Allow: straight to media for a view session; for a control session,
         // to the helper step, which still needs the helper's own Allow.
         (Side::Participant, In::Approve) => {
@@ -2023,12 +2055,13 @@ mod tests {
         assert_eq!(a.len(), 32);
     }
 
-    fn peer() -> (Peer, mpsc::Receiver<Out>, Arc<Mutex<Option<Out>>>) {
+    pub(super) fn peer() -> (Peer, mpsc::Receiver<Out>, Arc<Mutex<Option<Out>>>) {
         let (tx, rx) = mpsc::channel(PEER_BUFFER);
         let last = Arc::new(Mutex::new(None));
         (
             Peer {
                 conn_id: Uuid::new_v4(),
+                browser_session: None,
                 tx,
                 close: CancellationToken::new(),
                 last: last.clone(),

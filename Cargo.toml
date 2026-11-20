@@ -7,11 +7,13 @@ members = [
     "crates/flyw8t-server",
     "crates/flyw8t-agent",
     "crates/flyw8t-helper",
+    "crates/flyw8t-technician",
+    "crates/flyw8t-mcp",
     "crates/flyw8t-sign",
 ]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 license = "MIT"
 authors = ["Joseph Spillers"]

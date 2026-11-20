@@ -250,13 +250,14 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
     .await?;
     let Some(row) = row else { return Ok(None) };
     let row = device_row(state, row);
-    let (enrolled_at, notes, site_id, org_id): (OffsetDateTime, String, Option<Uuid>, Uuid) =
-        sqlx::query_as(
-            "SELECT enrolled_at, notes, site_id, organization_id FROM devices WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_one(&state.db)
-        .await?;
+    let org_id = row.organization.id;
+    let (enrolled_at, notes, site_id, os_family): (OffsetDateTime, String, Option<Uuid>, String) = sqlx::query_as(
+        "SELECT enrolled_at, notes, site_id, os_family FROM devices WHERE id = $1 AND organization_id = $2",
+    )
+    .bind(id)
+    .bind(org_id)
+    .fetch_one(&state.db)
+    .await?;
     let sites = sites(state, org_id).await?;
     let fields = crate::fields::resolve(state, p, org_id, site_id, Some(id)).await?;
     let inv: Option<(OffsetDateTime, String, Value)> = sqlx::query_as(
@@ -298,6 +299,7 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
     .await?;
     Ok(Some(DeviceDetail {
         row,
+        os_family,
         enrolled_at,
         inventory,
         credential,

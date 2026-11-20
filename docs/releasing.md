@@ -1,20 +1,41 @@
 # Releasing
 
-1. `main` is green in CI.
-2. `CHANGELOG.md` has a section `## X.Y.Z — YYYY-MM-DD (...)` for the version, merged to `main` through a PR.
-3. Tag the merge commit and push the tag: `git tag -a vX.Y.Z -m "flyw8t X.Y.Z" <sha> && git push origin vX.Y.Z`.
-4. `.github/workflows/release.yml` builds `flyw8t-server` and `flyw8t-agent` for Windows (MSVC) and Linux (GNU), writes `SHA256SUMS`, and publishes a GitHub **pre-release** with that CHANGELOG section as its notes. It fails if the section is missing.
-5. Check the release page: every asset is present and the sums match a local `sha256sum`.
-6. The same workflow pushes the server image to `ghcr.io/spilloid/flyw8t-server:X.Y.Z` and appends its digest to the release notes. No `latest` tag is pushed: a deployment names the version it runs. A new package on GitHub starts **private**; make it public once (Packages → flyw8t-server → Package settings), or give deployments a pull credential. The image is not signed.
+1. In the release PR, set the workspace version in `Cargo.toml`, refresh `Cargo.lock`, update the version in `README.md`, and date the `## X.Y.Z — YYYY-MM-DD (...)` section in `CHANGELOG.md`. Merge the PR to `main`.
+2. Check that CI passed on the merge commit. Run `gh workflow run signing-check.yml --ref main`, confirm the run used that same SHA, and wait for it to pass. Use its `signed-binaries` artifact for the Windows browser launch check below. The artifact expires after one day.
+3. After the checks pass, tag that commit with `git tag -a vX.Y.Z -m "flyw8t X.Y.Z" <sha>` and push with `git push origin vX.Y.Z`.
+4. The release workflow publishes a GitHub **pre-release** with the version's changelog section as its notes. Download all seven binaries and `SHA256SUMS` into an empty directory. Confirm the asset names and run `sha256sum -c SHA256SUMS` there. Expect seven successful checks.
+
+   | Platform | Binaries |
+   | --- | --- |
+   | Windows x64 (MSVC) | `flyw8t-server`, `flyw8t-agent`, `flyw8t-mcp`, `flyw8t-technician` |
+   | Linux x64 (GNU) | `flyw8t-server`, `flyw8t-agent`, `flyw8t-mcp` |
+
+   Filenames include the tag and Rust target triple. Windows filenames end in `.exe`.
+5. Check the digest of `ghcr.io/spilloid/flyw8t-server:X.Y.Z` in the release notes and pin deployments to that digest. The image is unsigned. A new package on GitHub starts **private**. Give deployments a pull credential or make the package public once in its package settings.
 
 Every release is a pre-release while `docs/threat-model.md` lists blocking open items. Do not describe a release as production-ready.
 
 ## Code signing
 
-Windows binaries (`flyw8t-server.exe`, `flyw8t-agent.exe`) are Authenticode-signed in `release.yml` with the company's Azure Artifact Signing account (corporate-strategy D-0047), through `.github/actions/sign-release`. That action signs, adds an RFC 3161 timestamp (the signing certificates last only three days), and then fails the release unless every `.exe` verifies against the expected signer. A tag therefore cannot publish an unsigned Windows binary. Linux binaries are covered by `SHA256SUMS` only.
+Both the signing check and the release workflow use `.github/actions/sign-release` and the company's Azure Artifact Signing account (corporate-strategy D-0047). The action Authenticode-signs all four Windows executables, adds an RFC 3161 timestamp and checks each signature. Timestamping keeps signatures verifiable after the three-day signing certificate expires. Configure `SIGNING_EXPECTED_SUBJECT` to verify the publisher as well. Linux binaries are covered by `SHA256SUMS` only.
 
 The job signs in with GitHub OIDC; no signing secret is stored. The `release` environment holds the settings and may deploy only from `main` and `v*` tags.
 
-**One-time setup:** run `scripts/setup-signing.ps1` as the Azure subscription owner. Then run the **Signing check** workflow (`gh workflow run signing-check.yml`), which builds, signs and verifies without publishing anything. Do this before the next tag.
+For initial Azure setup, run `scripts/setup-signing.ps1` as the subscription owner. To verify a downloaded set of Windows binaries in PowerShell, run the following from the release checkout with the four executables in `dist`.
 
-To check a downloaded release yourself: `./scripts/verify-signature.ps1 -Files flyw8t-agent-*.exe -ExpectedSubject "CN=Joseph Spillers"`.
+```powershell
+./scripts/verify-signature.ps1 -Files (Get-ChildItem ./dist -Filter '*.exe').FullName -ExpectedSubject "CN=Joseph Spillers"
+```
+
+## Windows browser launch check
+
+The signing rehearsal runs this acceptance check on a second fresh Windows runner.
+It downloads the signing job's four executables, verifies them, starts the candidate
+console on loopback and exercises the links in a new Chrome profile. Use the same
+sequence for a hands-on check or to investigate a failed automatic run.
+
+1. Sign in with a clean Windows user account. Place the signed technician executable in the directory where it will stay. Launch it and select **Browser links → Enable for this Windows user**. Close the app.
+2. Sign in to the candidate web console and open a Windows device. Under **Open in Flyw8t Technician**, try **Help someone**, **Unattended console**, and **Windows sign-in**. Accept the browser's external-app prompt if shown. For each link, confirm that the app shows the intended computer and mode and waits for a click on **Find sessions**, **Check console**, or **Connect**. Close the app between checks.
+3. Remove the registration from **Browser links**, close the app, and repeat the browser launch. Confirm that Windows no longer opens that copy of the technician app. Record the candidate SHA, Windows and browser versions, and result.
+
+The executable also accepts `--register-protocol` and `--unregister-protocol` for per-user setup from a deployment script.

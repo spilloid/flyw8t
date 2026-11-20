@@ -24,6 +24,13 @@ pub struct Audit {
 const MAX_ANONYMOUS_LABEL: usize = 254;
 
 impl Audit {
+    pub fn mcp(p: &Principal, action: &'static str) -> Self {
+        Self {
+            channel: "mcp",
+            ..Self::user(p, action)
+        }
+    }
+
     pub fn user(p: &Principal, action: &'static str) -> Self {
         Self {
             actor_type: "user",

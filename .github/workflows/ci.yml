@@ -21,6 +21,14 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Build the Windows client and console for desktop integration testing
+        run: cargo build --locked -p flyw8t-technician -p flyw8t-server --target x86_64-pc-windows-msvc
+      - name: Registered device link opens the idle technician chooser
+        run: ./scripts/test-technician-handoff.ps1 -Binary ./target/x86_64-pc-windows-msvc/debug/flyw8t-technician.exe
+      - name: First-use Chrome prompt and three device-page links
+        uses: ./.github/actions/check-browser-handoff
+        with:
+          binaries: target/x86_64-pc-windows-msvc/debug
 
   linux:
     name: Linux - PostgreSQL end-to-end, protocol, TLS and UI capture
@@ -48,9 +56,16 @@ jobs:
       - name: Trust vectors match the independent reference encoder (ADR-0015)
         run: python3 -I docs/spec/trust_vectors.py | diff - crates/flyw8t-protocol/tests/vectors/trust.json
       - run: cargo clippy --workspace --all-targets --target $TARGET -- -D warnings
+      - name: Build the MCP adapter for the attended browser test
+        run: cargo build --locked -p flyw8t-mcp --target $TARGET
       - run: cargo test --workspace --target $TARGET -- --include-ignored --skip console_renders_cleanly_everywhere --nocapture
       - name: STD-008 UI capture (headless Chrome)
         run: cargo test -p flyw8t-server --test ui_capture --target $TARGET -- --ignored
+      - name: Consented screenshot through the stdio MCP executable
+        env:
+          FLYW8T_TEST_SYNTHETIC_CAPTURE: "1"
+          FLYW8T_TEST_MCP_BINARY: ${{ github.workspace }}/target/x86_64-unknown-linux-gnu/debug/flyw8t-mcp
+        run: cargo test -p flyw8t-server --test support_browser --target $TARGET -- --ignored
       - uses: actions/upload-artifact@v5
         if: always()
         with:

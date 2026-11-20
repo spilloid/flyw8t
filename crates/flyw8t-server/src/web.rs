@@ -1295,7 +1295,7 @@ pub async fn create_api_token(
         p.require(Permission::ManageUsers)?;
         p.require_sudo("/admin")?;
         let name = clean_name(form.get("name"))?;
-        let mut scopes: Vec<String> = form.all("scope").into_iter().filter(|s| matches!(*s, "read" | "jobs:run")).map(String::from).collect();
+        let mut scopes: Vec<String> = form.all("scope").into_iter().filter(|s| matches!(*s, "read" | "jobs:run" | "support:screenshot")).map(String::from).collect();
         scopes.sort();
         scopes.dedup();
         if scopes.is_empty() {

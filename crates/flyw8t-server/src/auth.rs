@@ -94,6 +94,8 @@ pub struct Principal {
     pub credential: String,
     /// API token scopes; `None` for browser sessions.
     pub scopes: Option<Vec<String>>,
+    /// Database identity and operator-assigned recipient name of an API credential.
+    pub api_token: Option<(Uuid, String)>,
     pub csrf: String,
     pub session_id: Option<Uuid>,
     /// Digest of the presented session cookie, so a check made under lock can tell that this
@@ -178,6 +180,7 @@ fn principal(
         channel,
         credential,
         scopes,
+        api_token: None,
         csrf,
         session_id,
         session_token: None,
@@ -312,13 +315,14 @@ pub async fn token_principal(state: &Shared, headers: &HeaderMap) -> AppResult<O
         Uuid,
         String,
         Vec<String>,
+        String,
         Uuid,
         String,
         String,
         String,
         Vec<Uuid>,
     )> = sqlx::query_as(&format!(
-        "SELECT t.id, t.prefix, t.scopes, {USER_COLUMNS}
+        "SELECT t.id, t.prefix, t.scopes, t.name, {USER_COLUMNS}
            FROM api_tokens t
            JOIN users u ON u.id = t.user_id
            LEFT JOIN user_organizations uo ON uo.user_id = u.id
@@ -329,22 +333,23 @@ pub async fn token_principal(state: &Shared, headers: &HeaderMap) -> AppResult<O
     .bind(digest(token))
     .fetch_optional(&state.db)
     .await?;
-    let Some((tid, prefix, scopes, uid, email, name, role, orgs)) = row else {
+    let Some((tid, prefix, scopes, token_name, uid, email, name, role, orgs)) = row else {
         return Err(AppError::Unauthorized);
     };
     sqlx::query("UPDATE api_tokens SET last_used_at = now() WHERE id = $1")
         .bind(tid)
         .execute(&state.db)
         .await?;
-    principal(
+    let mut p = principal(
         (uid, email, name, role, orgs),
         Channel::Api,
         format!("token:{prefix}"),
         Some(scopes),
         String::new(),
         None,
-    )
-    .map(Some)
+    )?;
+    p.api_token = Some((tid, token_name));
+    Ok(Some(p))
 }
 
 /// How far a browser session has got through sign-in. Only `Full` reaches the console.
@@ -700,6 +705,7 @@ mod tests {
             role,
             orgs: vec![],
             channel: Channel::Api,
+            api_token: None,
             credential: String::new(),
             scopes: scopes.map(|s| s.into_iter().map(String::from).collect()),
             csrf: String::new(),
