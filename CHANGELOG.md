@@ -2,7 +2,7 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
-## Unreleased
+## 0.1.6 — 2026-11-20 (pre-release)
 
 - Open Flyw8t Technician from an authorized Windows device page. Select an
   existing session, the physical console or Windows sign-in, review the
@@ -23,6 +23,11 @@ All notable changes to flyw8t. Dates are UTC.
 - Add a distinct **Unattended console** choice to the native Windows client.
   The picker verifies the existing host policy and the physical login before
   offering the allowed view or control action.
+- The native client needs a network or VPN route from the technician's Windows
+  workstation to the target. WAN interruption recovery and unattended access
+  to an owner-preauthorized physical console still need field verification.
+- Back up the database before upgrading the server. At startup it applies
+  migration 0015 for screenshot permissions and receipt metadata.
 
 ## 0.1.5 — 2026-11-16 (pre-release)
 
