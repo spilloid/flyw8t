@@ -58,14 +58,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets --target $TARGET -- -D warnings
       - name: Build the MCP adapter for the attended browser test
         run: cargo build --locked -p flyw8t-mcp --target $TARGET
-      - run: cargo test --workspace --target $TARGET -- --include-ignored --skip console_renders_cleanly_everywhere --nocapture
+      - run: dbus-run-session -- cargo test --workspace --target $TARGET -- --include-ignored --skip console_renders_cleanly_everywhere --nocapture
       - name: STD-008 UI capture (headless Chrome)
-        run: cargo test -p flyw8t-server --test ui_capture --target $TARGET -- --ignored
+        run: dbus-run-session -- cargo test -p flyw8t-server --test ui_capture --target $TARGET -- --ignored
       - name: Consented screenshot through the stdio MCP executable
         env:
           FLYW8T_TEST_SYNTHETIC_CAPTURE: "1"
           FLYW8T_TEST_MCP_BINARY: ${{ github.workspace }}/target/x86_64-unknown-linux-gnu/debug/flyw8t-mcp
-        run: cargo test -p flyw8t-server --test support_browser --target $TARGET -- --ignored
+        run: dbus-run-session -- cargo test -p flyw8t-server --test support_browser --target $TARGET -- --ignored
       - uses: actions/upload-artifact@v5
         if: always()
         with:

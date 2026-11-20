@@ -135,23 +135,19 @@ async fn a_browser_adds_a_passkey_and_confirms_sudo_mode_with_it() {
     let profile = tempfile::tempdir().unwrap();
     let mut child = tokio::process::Command::new(chrome)
         .arg("--headless=new")
+        .args([
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+        ])
         .arg("--remote-debugging-port=0")
         .arg(format!("--user-data-dir={}", profile.path().display()))
         .arg("about:blank")
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut devtools = None;
-    for _ in 0..100 {
-        if let Ok(t) = std::fs::read_to_string(profile.path().join("DevToolsActivePort")) {
-            devtools = t.lines().next().and_then(|l| l.trim().parse::<u16>().ok());
-            if devtools.is_some() {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let version = http_json(devtools.expect("DevTools port"), "/json/version").await;
+    let port = chrome_debug_port(&mut child, profile.path()).await;
+    let version = http_json(port, "/json/version").await;
     let (ws, _) =
         tokio_tungstenite::connect_async(version["webSocketDebuggerUrl"].as_str().unwrap())
             .await

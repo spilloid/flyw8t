@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: 22
       - name: Check the product screenshots and responsive layout
-        run: node scripts/check-product-site.mjs
+        run: dbus-run-session -- node scripts/check-product-site.mjs
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

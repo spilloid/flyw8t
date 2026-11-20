@@ -27,10 +27,12 @@ const stopped = new Promise(resolve => { chrome.once('error', resolve); chrome.o
 let ws;
 try {
   let port;
-  for (let attempt = 0; !port && attempt < 100; attempt++) {
+  const deadline = Date.now() + 60000;
+  while (!port && Date.now() < deadline) {
     if (chrome.exitCode !== null || !chrome.pid) throw Error('Chrome exited during startup');
     try { port = Number((await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
-    catch { await delay(100); }
+    catch { /* The file appears when the browser is ready. */ }
+    if (!port) await delay(100);
   }
   assert.ok(port, 'Chrome debugging port unavailable');
   const pages = await (await fetch('http://127.0.0.1:' + port + '/json/list', { signal: AbortSignal.timeout(5000) })).json();

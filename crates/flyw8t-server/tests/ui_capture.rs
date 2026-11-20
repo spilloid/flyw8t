@@ -348,6 +348,11 @@ async fn console_renders_cleanly_everywhere() {
     let profile = tempfile::tempdir().unwrap();
     let mut child = tokio::process::Command::new(find_chrome())
         .arg("--headless=new")
+        .args([
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+        ])
         .arg("--remote-debugging-port=0")
         .arg("--hide-scrollbars")
         .arg(format!("--user-data-dir={}", profile.path().display()))
@@ -355,17 +360,7 @@ async fn console_renders_cleanly_everywhere() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut port = None;
-    for _ in 0..100 {
-        if let Ok(t) = std::fs::read_to_string(profile.path().join("DevToolsActivePort")) {
-            port = t.lines().next().and_then(|l| l.trim().parse::<u16>().ok());
-            if port.is_some() {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let port = port.expect("DevTools port");
+    let port = chrome_debug_port(&mut child, profile.path()).await;
     let mut ws_url = None;
     for _ in 0..50 {
         ws_url = http_json(port, "/json/list")
