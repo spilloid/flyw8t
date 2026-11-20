@@ -84,7 +84,7 @@ h2 { font-size: clamp(1.6rem, 3.2vw, 2.2rem); line-height: 1.15; margin: 0 0 14p
 .rule h3 { margin: 10px 0 6px; font-size: 1.1rem; }
 .rule p { margin: 0; color: var(--muted); }
 
-.features { display: grid; gap: 12px; }
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; }
 .feature { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
 .feature h3 { margin: 0 0 6px; font-size: 1.05rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .feature p { margin: 0; color: var(--muted); }
@@ -98,7 +98,7 @@ h2 { font-size: clamp(1.6rem, 3.2vw, 2.2rem); line-height: 1.15; margin: 0 0 14p
 .downloads p { color: var(--muted); margin: 0.3rem 0 0; }
 .trial-links { display: flex; gap: 0.6rem 1.4rem; flex-wrap: wrap; margin-top: 1.25rem; }
 .trial-screen { margin-top: 1.5rem; }
-.session-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); gap: 32px; align-items: start; }
+.session-layout { display: grid; gap: 24px; }
 
 .checks { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: start; }
 .checks h3 { margin-top: 0; }
@@ -108,7 +108,7 @@ footer .wrap { display: flex; gap: 1rem 2rem; flex-wrap: wrap; align-items: cent
 footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-left: auto; }
 
 @media (max-width: 900px) {
-  .hero .wrap, .checks, .session-layout { grid-template-columns: minmax(0, 1fr); }
+  .hero .wrap, .checks { grid-template-columns: minmax(0, 1fr); }
   .rule { grid-template-columns: minmax(0, 1fr); }
   .hero { padding: 32px 0 56px; }
   section.band { padding: 56px 0; }
@@ -144,8 +144,8 @@ footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-left: auto; }
       </div>
     </div>
     <figure class="screen">
-      <a href="screenshots/devices.png" aria-label="Open full-size Devices screenshot"><img src="screenshots/devices.png" alt="The Devices page lists enrolled lab PCs with their connection status." fetchpriority="high"></a>
-      <figcaption>Start in <strong>Devices</strong> to find a PC and see whether its agent is connected. <a href="screenshots/devices.png">View full size</a></figcaption>
+      <a href="screenshots/devices.png" tabindex="-1" aria-label="Open full-size Devices screenshot"><img src="screenshots/devices.png" alt="The Devices page lists enrolled lab PCs with their connection status." fetchpriority="high"></a>
+      <figcaption>Start in <strong>Devices</strong> to find a PC and see whether its agent is connected. <a href="screenshots/devices.png" aria-label="View Devices screenshot at full size">View full size</a></figcaption>
     </figure>
   </div>
 </section>
@@ -162,8 +162,8 @@ footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-left: auto; }
           <li><a href="https://github.com/spilloid/flyw8t/releases/download/v0.1.6/flyw8t-technician-v0.1.6-x86_64-pc-windows-msvc.exe">Download Flyw8t Technician (.exe)</a><p>Runs on the PC you work from. It opens a Windows session when you choose one in the console.</p></li>
         </ul>
         <figure class="screen trial-screen">
-          <a href="screenshots/enrollment.png" aria-label="Open full-size enrollment screenshot"><img src="screenshots/enrollment.png" alt="The enrollment screen shows how to add a Windows PC to an organization." loading="lazy"></a>
-          <figcaption>Preview of <strong>Devices → Enroll a Windows device</strong>. In v0.1.6, open <strong>Organizations</strong>, choose your organization and select <strong>Create enrollment token</strong>. <a href="screenshots/enrollment.png">View full size</a></figcaption>
+          <a href="screenshots/enrollment.png" tabindex="-1" aria-label="Open full-size enrollment screenshot"><img src="screenshots/enrollment.png" alt="Windows enrollment form with the agent download, checksums, token lifetime and device count." loading="lazy"></a>
+          <figcaption>Preview of <strong>Devices → Enroll a Windows device</strong>. In v0.1.6, open <strong>Organizations</strong>, choose your organization and select <strong>Create enrollment token</strong>. <a href="screenshots/enrollment.png" aria-label="View enrollment screenshot at full size">View full size</a></figcaption>
         </figure>
       </div>
       <div>
@@ -188,8 +188,8 @@ footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-left: auto; }
     <p class="intro">The agent can report through NAT using its outbound connection. For a native Windows session, the technician PC needs its own route to the target over the LAN or VPN, plus Windows access to that host.</p>
     <div class="session-layout">
       <figure class="screen">
-        <a href="screenshots/windows-device.png" aria-label="Open full-size Windows device screenshot"><img src="screenshots/windows-device.png" alt="A Windows device page with Help someone, Unattended console and Windows sign-in under Open in Flyw8t Technician." loading="lazy"></a>
-        <figcaption>Choose the type of session on the Windows device page. You review the suggested computer in the desktop app before connecting. <a href="screenshots/windows-device.png">View full size</a></figcaption>
+        <a href="screenshots/windows-device.png" tabindex="-1" aria-label="Open full-size Windows device screenshot"><img src="screenshots/windows-device.png" alt="The Open in Flyw8t Technician panel offers Help someone, Unattended console and Windows sign-in." loading="lazy"></a>
+        <figcaption>Choose the type of session on the Windows device page. You review the suggested computer in the desktop app before connecting. <a href="screenshots/windows-device.png" aria-label="View Windows session choices screenshot at full size">View full size</a></figcaption>
       </figure>
       <div class="features">
         <div class="feature"><h3>Help someone</h3><p>Pick a signed-in user’s Windows session, then view it or request control. Windows checks your permissions and asks the user for consent when the host policy requires it.</p></div>
