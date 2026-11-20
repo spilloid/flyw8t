@@ -109,6 +109,17 @@ function Find-OpenPrompt {
     }
 }
 
+function Invoke-OpenPrompt($Prompt) {
+    # UIA can expose the button as Chrome is still activating its new dialog.
+    # Recheck the same browser-owned control after it has remained visible.
+    Start-Sleep -Milliseconds 1500
+    $settled = Find-OpenPrompt
+    if (!$settled -or ![System.Windows.Automation.Automation]::Compare($Prompt, $settled)) {
+        throw 'The external-app prompt changed before it could be approved.'
+    }
+    $settled.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+
 if ($Action -eq 'Absent') {
     if (Test-Path -LiteralPath $key) { throw 'Handler remains registered.' }
     # Depending on the Shell/Chrome cache, removal either suppresses the prompt
@@ -120,7 +131,7 @@ if ($Action -eq 'Absent') {
         if (!$accepted) {
             $prompt = Find-OpenPrompt
             if ($prompt) {
-                $prompt.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+                Invoke-OpenPrompt $prompt
                 $accepted = $true
                 $timer.Restart()
             }
@@ -141,10 +152,16 @@ $response = Wait-For {
     Find-OpenPrompt
 } 'Chrome did not display the Flyw8t external-app prompt or open the approved handler.'
 if ($response -isnot [string]) {
-    $response.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-    Write-Output "Observed and accepted the browser prompt for $Mode."
+    if (Find-Chooser) { throw 'The handler launched while the prompt was visible.' }
+    Invoke-OpenPrompt $response
+    Write-Output "Invoked the browser prompt for $Mode."
 }
-$app = Wait-For { Find-Chooser } 'The signed application did not open after prompt approval.'
+try {
+    $app = Wait-For { Find-Chooser } 'The handler window was not observed.' 30
+} catch {
+    if (Find-OpenPrompt) { throw "Chrome still shows the $Mode prompt after invoking Open." }
+    throw "Chrome dismissed the $Mode prompt but Windows did not open the expected handler."
+}
 $window = [IntPtr]::Zero
 try {
     $expected = @{ 'assist' = @(0,'Find sessions'); 'console' = @(3,'Check console'); 'sign-in' = @(2,'Connect') }[$Mode]
