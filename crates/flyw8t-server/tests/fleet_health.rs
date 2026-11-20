@@ -284,20 +284,34 @@ async fn a_new_enrollment_token_comes_with_the_commands_to_run() {
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     let token = extract(&r.body, r"(fw8e_[A-Za-z0-9_-]{43})").unwrap();
     let public_url = &server.state.config.public_url;
-    assert!(
-        r.body.contains(&format!(
-            ".\\flyw8t-agent.exe enroll --server '{public_url}' --token {token}\n.\\flyw8t-agent.exe service install"
-        )),
-        "{}",
-        r.body
+    assert!(r.body.contains(&format!("$server = '{public_url}'")));
+    assert!(r.body.contains("Get-AuthenticodeSignature"));
+    assert!(r.body.contains("FLYW8T_ENROLL_TOKEN"));
+    assert_eq!(
+        r.body.matches(&token).count(),
+        1,
+        "token must stay out of setup commands"
     );
+    let script = flyw8t_web::ENROLLMENT_COPY_JS;
+    assert!(r.body.contains(script));
+    let digest = ring::digest::digest(&ring::digest::SHA256, script.as_bytes());
+    use base64::Engine;
+    let hash = base64::engine::general_purpose::STANDARD.encode(digest);
+    assert!(r.headers["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .ends_with(&format!("script-src 'sha256-{hash}'")));
     // Shown once: the page that carries a secret is never stored, and a reload shows no token.
     assert_eq!(r.headers["cache-control"], "no-store");
     let again = admin.get(&server, &format!("/organizations/{org}")).await;
     assert!(!again.body.contains("fw8e_"), "{}", again.body);
-    assert!(!again.body.contains("flyw8t-agent.exe enroll"));
+    assert!(!again.body.contains("Get-AuthenticodeSignature"));
+    assert!(!again.headers["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .contains("script-src"));
 
-    // The commands work as written: the token they carry enrolls a device.
+    // The token shown separately can enroll a device.
     let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
     let list = admin.get(&server, "/devices").await;
     assert!(list.body.contains(&agent.device_id.to_string()));

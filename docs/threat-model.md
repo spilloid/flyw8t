@@ -84,7 +84,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 - **Residual:** a database superuser can drop the trigger. The triggers protect against application bugs and application-level compromise, not against DBA-level compromise. Off-host log shipping is a deployment concern ([deployment.md](deployment.md)).
 
 ### T13: Browser-side attacks on the console
-- **Control:** CSP `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'`; no inline script; `X-Frame-Options: DENY`; `nosniff`; `Referrer-Policy: same-origin` (`no-referrer` would make browsers send `Origin: null` on the console's own form posts); flash messages chosen from fixed codes so a URL cannot inject text.
+- **Control:** The console defaults to `default-src 'none'` and restricts styles, images and form submissions to its origin. The enrollment confirmation permits one static clipboard helper by SHA-256. A user can copy the token from its read-only field. Responses set `X-Frame-Options: DENY`, `nosniff` and `Referrer-Policy: same-origin` so browsers can identify the origin on form posts. Flash messages use fixed codes.
 - **Login CSRF:** state-changing requests whose `Origin` names another site are refused before routing, and sign-in also needs a double-submit token: the sign-in page sets a `SameSite=Strict`, HttpOnly cookie (`__Host-` over HTTPS) and puts the same random value in the form, and a sign-in is accepted only when they match. Evidence: `cross_origin_posts_are_refused`, `a_sign_in_must_carry_the_token_its_page_set`.
 - **Residual:** over plain HTTP (loopback only) the token cookie has no `__Host-` prefix, so a page on another port of the same host could set it.
 

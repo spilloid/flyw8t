@@ -65,6 +65,7 @@ function inspect(action, mode) {
 }
 
 async function clickMode(mode) {
+  await call('Page.bringToFront');
   const selector = 'a[href="flyw8t://open/' + mode + '?host=' + host + '"]';
   const coords = await evaluate('(() => { const a=document.querySelector('+JSON.stringify(selector)+');' +
     'if (!a) return null; a.scrollIntoView({block:"center",behavior:"instant"}); const r=a.getBoundingClientRect();' +
@@ -122,6 +123,10 @@ try {
   await evaluate('(() => { const f=document.querySelector("form[action=\\"/login\\"]"); f.elements.email.value='+JSON.stringify(email)+
     ';f.elements.password.value='+JSON.stringify(password)+';f.requestSubmit();return true; })()');
   await waitFor(()=>evaluate('location.origin === '+JSON.stringify(origin)+' && location.pathname === "/"'),'Fixture sign-in did not reach the console');
+  if (process.env.FLYW8T_TEST_SIGNED_TRIAL_INSTALL === '1') {
+    const { exerciseSignedTrial } = await import('./signed-trial-install.mjs');
+    await exerciseSignedTrial({ origin, binaries, shell, call, evaluate, waitFor });
+  }
   await call('Page.navigate',{url:origin+'/devices/'+id});
   await waitFor(()=>evaluate('document.querySelectorAll("a.desktop-choice").length === 3'),'Candidate device page did not offer the three session modes');
   console.log('Candidate '+process.env.GITHUB_SHA+', Chrome '+(await call('Browser.getVersion')).product+', Windows '+process.env.ImageVersion);

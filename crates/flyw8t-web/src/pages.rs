@@ -377,19 +377,17 @@ pub fn overview_page(ctx: &PageCtx, o: Overview) -> String {
         } else {
             view! { <li><strong>"Ask an administrator to create an organization and assign you to it"</strong></li> }.into_any()
         };
-        let token_step = match o.organizations.first() {
-            Some(org) => {
-                let href = format!("/organizations/{}", org.id);
-                view! { <li><strong><a href=href>"Create an enrollment token"</a></strong><p class="muted">"On the organization's page. The token is shown once, with the commands to run."</p></li> }.into_any()
-            }
-            None => view! { <li><strong>"Create an enrollment token"</strong><p class="muted">"On the organization's page. The token is shown once, with the commands to run."</p></li> }.into_any(),
+        let token_step = if have_org {
+            enrollment_navigation(ctx, &o.organizations, None).into_any()
+        } else {
+            view! { <strong>"Enroll a Windows device"</strong> }.into_any()
         };
         view! {
             <section class="card">
                 <h2>"Enroll your first device"</h2>
                 <ol class="setup">
                     {org_step}
-                    {token_step}
+                    <li>{token_step}<p class="muted">"Download the Windows agent and create a token in the organization that will manage the device."</p></li>
                     <li><strong>"Run the agent on the device"</strong><p class="muted">"In an elevated PowerShell on the Windows device, run the commands shown with the token. The device appears under Devices as soon as it connects."</p></li>
                 </ol>
             </section>
@@ -504,6 +502,55 @@ fn tag_chips(tags: &[String]) -> impl IntoView {
         .collect_view()
 }
 
+fn enrollment_navigation(
+    ctx: &PageCtx,
+    orgs: &[OrgRef],
+    selected: Option<uuid::Uuid>,
+) -> Option<AnyView> {
+    if !ctx.can_enroll {
+        return None;
+    }
+    let org = match orgs {
+        [only] => Some(only),
+        _ => orgs.iter().find(|org| Some(org.id) == selected),
+    };
+    let enroll_url = |org: &OrgRef| format!("/organizations/{}#enroll-device", org.id);
+    if let Some(org) = org {
+        return Some(
+            view! {
+                <a class="button" href=enroll_url(org)>"Enroll a Windows device"</a>
+            }
+            .into_any(),
+        );
+    }
+    if orgs.is_empty() {
+        return ctx.is_admin.then(|| {
+            let link = view! {
+                <a class="button" href="/organizations">"Create an organization to enroll a device"</a>
+            };
+            link.into_any()
+        });
+    }
+    let choices = orgs
+        .iter()
+        .map(|org| {
+            view! {
+                <li><a href=enroll_url(org)>{org.name.clone()}</a></li>
+            }
+        })
+        .collect_view();
+    Some(
+        view! {
+            <details class="setup-card">
+                <summary>"Enroll a Windows device"</summary>
+                <p>"Choose the organization that will manage this device."</p>
+                <ul>{choices}</ul>
+            </details>
+        }
+        .into_any(),
+    )
+}
+
 pub fn devices_page(
     ctx: &PageCtx,
     rows: Vec<DeviceRow>,
@@ -512,6 +559,7 @@ pub fn devices_page(
     tags: Vec<String>,
 ) -> String {
     let now = ctx.now;
+    let enroll = enrollment_navigation(ctx, &orgs, filter.organization);
     let org_options = orgs
         .into_iter()
         .map(|o| {
@@ -565,8 +613,7 @@ pub fn devices_page(
     let pick = ctx.can_manage_devices || ctx.can_run || ctx.can_retire;
     let shown: Vec<String> = rows.iter().map(|d| d.id.to_string()).collect();
     let table = if rows.is_empty() {
-        view! { <p class="empty">"No devices match. Enroll one from an organization's page."</p> }
-            .into_any()
+        view! { <p class="empty">"No devices match."</p> }.into_any()
     } else {
         let body = rows
             .into_iter()
@@ -662,7 +709,7 @@ pub fn devices_page(
         }
     };
     let body = view! {
-        <h1>"Devices"</h1>
+        <div class="workspace-heading"><h1>"Devices"</h1>{enroll}</div>
         <form method="get" action="/devices" class="filters" role="search">
             <input type="search" name="q" value=filter.q.clone() placeholder="Search name, hostname or tag" aria-label="Search name, hostname or tag" accesskey="s" autofocus=true/>
             <select name="org" aria-label="Organization"><option value="">"All organizations"</option>{org_options}</select>
@@ -1001,6 +1048,24 @@ pub fn bulk_confirm_page(ctx: &PageCtx, c: BulkConfirm) -> String {
     shell(&title, ctx, Nav::Devices, None, body)
 }
 
+const RELEASE_DOWNLOADS: &str = concat!(
+    "https://github.com/spilloid/flyw8t/releases/download/v",
+    env!("CARGO_PKG_VERSION"),
+    "/",
+);
+
+fn windows_downloads(component: &str, label: &'static str) -> impl IntoView {
+    let version = env!("CARGO_PKG_VERSION");
+    let url =
+        format!("{RELEASE_DOWNLOADS}flyw8t-{component}-v{version}-x86_64-pc-windows-msvc.exe");
+    view! {
+        <p class="release-downloads">
+            <a href=url target="_blank" rel="noopener noreferrer">{label}</a>
+            <a href=format!("{RELEASE_DOWNLOADS}SHA256SUMS") target="_blank" rel="noopener noreferrer">"SHA256SUMS"</a>
+        </p>
+    }
+}
+
 fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoView> {
     if !ctx.can_support || d.row.retired || !d.os_family.eq_ignore_ascii_case("windows") {
         return None;
@@ -1029,7 +1094,9 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
             <div class="actions">{choices}</div>
             <details class="desktop-link-help">
                 <summary>"Set up browser links on Windows"</summary>
-                <p>"If you need the app, ask your administrator for the Windows technician build. Open Flyw8t Technician and choose Browser links → Enable for this Windows user. Then choose a session here and confirm the browser prompt if it appears."</p>
+                {windows_downloads("technician", "Download Flyw8t Technician (Windows x64)")}
+                <p>"On your own Windows PC, compare the file’s SHA-256 hash with its entry in SHA256SUMS. In Properties → Digital Signatures, check that Windows reports a valid signature from Joseph Spillers with a timestamp."</p>
+                <p>"Keep the executable in a permanent folder. Open it and choose Browser links → Enable for this Windows user. Then choose a session here and confirm the browser prompt."</p>
             </details>
         </section>
     })
@@ -1404,23 +1471,42 @@ pub fn organizations_page(ctx: &PageCtx, orgs: Vec<OrgSummary>) -> String {
 }
 
 pub(crate) fn revealed_box(r: RevealedSecret) -> impl IntoView {
-    let commands = r.commands.map(|c| {
-        view! {
-            <h3>"On the Windows device"</h3>
-            <p class="muted">"In an elevated PowerShell, in the folder holding "<span class="mono">"flyw8t-agent.exe"</span>" (from the "<a href="https://github.com/spilloid/flyw8t/releases" rel="noreferrer">"release downloads"</a>"; check it against SHA256SUMS). The token is already in the first command:"</p>
-            <pre class="output secret cmd">{c}</pre>
-            <p class="muted">"The first command registers the device and stores its key, the second installs the service, and the third prints the server and device ID the agent holds. Whether it is connected shows on the device's page here."</p>
-        }
-    });
+    if let Some(commands) = r.commands {
+        return view! {
+            <section class="card reveal" aria-labelledby="enrollment-ready">
+                <h2 id="enrollment-ready">{r.label}</h2>
+                <p>"Keep this page open during setup. The token is shown once."</p>
+                <p>{r.hint}</p>
+                <label for="enrollment-token">"Enrollment token"</label>
+                <input id="enrollment-token" class="mono enrollment-token" type="text" value=r.secret readonly autocomplete="off" spellcheck="false"/>
+                <div class="copy-controls">
+                    <button id="copy-token" type="button" class="secondary" hidden>"Copy token"</button>
+                    <span id="token-status" role="status"></span>
+                </div>
+                <h3>"On the Windows device"</h3>
+                <p>"The device owner or an authorized local administrator must "<a href="#enroll-device">"download the agent and SHA256SUMS"</a>" into the same folder. Open PowerShell as administrator in that folder."</p>
+                <label for="enrollment-commands">"PowerShell setup commands"</label>
+                <textarea id="enrollment-commands" class="code" rows="9" wrap="off" readonly spellcheck="false">{textarea_text(&commands)}</textarea>
+                <div class="copy-controls">
+                    <button id="copy-commands" type="button" hidden>"Copy setup commands"</button>
+                    <span id="commands-status" role="status"></span>
+                </div>
+                <p>"Paste the commands into PowerShell. When prompted, copy and paste the enrollment token."</p>
+                <p class="hint">"To copy manually, select a field and use Ctrl+A, then Ctrl+C, or your device’s Select All and Copy commands."</p>
+                <p>"After setup, open "<a href="/devices">"Devices"</a>" and check for Connected · live."</p>
+                <script inner_html=crate::ENROLLMENT_COPY_JS></script>
+            </section>
+        }.into_any();
+    }
     view! {
         <section class="card reveal" role="alert">
             <h2>{r.label}</h2>
             <p><strong>"Copy it now. It is shown once and only its hash is stored."</strong></p>
             <pre class="output secret">{r.secret}</pre>
             <p class="muted">{r.hint}</p>
-            {commands}
         </section>
     }
+    .into_any()
 }
 
 /// The input for one field's value: a list for choices and yes/no, a password box for secrets, text otherwise.
@@ -1718,12 +1804,18 @@ pub fn organization_page(
     });
     let enroll_form = ctx.can_enroll.then(|| {
         let url = format!("/organizations/{id}/enrollment-tokens");
+        let return_to_setup = revealed.as_ref().and_then(|r| r.commands.as_ref()).map(|_| {
+            view! { <p><a href="#enrollment-ready">"Return to your setup commands"</a></p> }
+        });
         let site_opts = org
             .sites
             .iter()
             .map(|s| view! { <option value=s.id.to_string()>{s.name.clone()}</option> })
             .collect_view();
         view! {
+            {windows_downloads("agent", "Download Windows agent (x64)")}
+            <p>"Save both files together on the Windows device and keep their original names. The setup commands verify the download before enrollment."</p>
+            {return_to_setup}
             <form method="post" action=url class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                 <label>"Site"<select name="site"><option value="">"(none)"</option>{site_opts}</select></label>
@@ -1803,9 +1895,9 @@ pub fn organization_page(
                 {add_site}
                 <p><a href=devices_href>{format!("{} device(s) →", org.device_count)}</a></p>
             </section>
-            <section class="card">
-                <h2>"Enroll a device"</h2>
-                <p class="muted">"Enrollment tokens are short-lived and single-purpose. The device's organization comes from the token, never from the device."</p>
+            <section class="card" id="enroll-device">
+                <h2>"Enroll a Windows device"</h2>
+                <p class="muted">"An enrollment token joins a device to "{org.name.clone()}"."</p>
                 {enroll_form}
             </section>
         </div>

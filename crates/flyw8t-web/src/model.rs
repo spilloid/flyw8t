@@ -422,7 +422,7 @@ pub struct RevealedSecret {
     pub label: String,
     pub secret: String,
     pub hint: String,
-    /// For an enrollment token: the commands to run on the device, with the token already in them.
+    /// Local enrollment commands prompt for the separately displayed token.
     pub commands: Option<String>,
 }
 

@@ -82,18 +82,35 @@ Migrations are embedded in the binary and applied at startup.
 
 ## Windows agent
 
-Build (or, once releases exist, download a signed build):
+For a beta endpoint, open **Devices → Enroll a Windows device** and choose its
+organization. Download the signed Windows x64 agent and `SHA256SUMS` into the same
+folder. Create the enrollment token and follow the PowerShell instructions shown
+in the console. The setup commands verify the binary and prompt separately for
+the token. A successful first check-in is labeled **Connected · live**.
+The trial guide also covers installing the technician app and running a verified
+diagnostic. [Windows beta trial](beta-trial.md)
+
+For a development build:
 
 ```powershell
 cargo build --release -p flyw8t-agent      # target\x86_64-pc-windows-msvc\release\flyw8t-agent.exe
 ```
 
-On the endpoint, in an **elevated** PowerShell:
+To enroll a development build manually, open an elevated PowerShell on the endpoint:
 
 ```powershell
 # In flyw8t: Organizations → <org> → Create enrollment token (shown once)
-.\flyw8t-agent.exe enroll --server https://rmm.example.com --token fw8e_…
+$token = Read-Host 'Enrollment token' -AsSecureString
+try {
+    $env:FLYW8T_ENROLL_TOKEN = [Net.NetworkCredential]::new('', $token).Password
+    .\flyw8t-agent.exe enroll --server https://rmm.example.com
+    if ($LASTEXITCODE -ne 0) { throw 'Enrollment failed.' }
+} finally {
+    Remove-Item Env:\FLYW8T_ENROLL_TOKEN -ErrorAction SilentlyContinue
+    $token.Dispose()
+}
 .\flyw8t-agent.exe service install      # copies itself to Program Files; automatic start, LocalSystem, restart on failure
+if ($LASTEXITCODE -ne 0) { throw 'Service installation failed.' }
 .\flyw8t-agent.exe status
 ```
 

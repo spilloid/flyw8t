@@ -78,6 +78,18 @@ pub(crate) fn powershell_literal(s: &str) -> String {
 /// The operator's other products, for the frame. Set once, when the server starts (`FLYW8T_FAMILY_LINKS`).
 pub static FAMILY: std::sync::OnceLock<Vec<FamilyLink>> = std::sync::OnceLock::new();
 
+fn enrollment_copy_policy() -> axum::http::HeaderValue {
+    use base64::Engine;
+    let digest = ring::digest::digest(
+        &ring::digest::SHA256,
+        flyw8t_web::ENROLLMENT_COPY_JS.as_bytes(),
+    );
+    let hash = base64::engine::general_purpose::STANDARD.encode(digest);
+    format!("{}; script-src 'sha256-{hash}'", crate::CONSOLE_CSP)
+        .parse()
+        .expect("static policy and base64 digest are valid header text")
+}
+
 pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
     PageCtx {
         user_name: p.display_name.clone(),
@@ -927,12 +939,11 @@ pub async fn create_enrollment_token(
                 "Valid for {ttl_minutes} minutes and {max_uses} device(s). Whoever holds it can enroll a device into {} until then; revoke it below if it goes astray.",
                 org.name
             ),
-            // The token is the server's own (letters, digits, `_` and `-`). The URL is the operator's setting and
-            // goes in as a PowerShell single-quoted literal, where nothing is expanded.
-            commands: Some(format!(
-                ".\\flyw8t-agent.exe enroll --server {} --token {secret}\n.\\flyw8t-agent.exe service install\n.\\flyw8t-agent.exe status",
-                powershell_literal(&state.config.public_url)
-            )),
+            commands: Some(
+                include_str!("enroll-windows.ps1")
+                    .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+                    .replace("__SERVER_URL__", &powershell_literal(&state.config.public_url)),
+            ),
             secret,
         };
         let tokens = queries::enrollment_tokens(&state, id).await?;
@@ -940,6 +951,7 @@ pub async fn create_enrollment_token(
         let mut resp =
             Html(flyw8t_web::organization_page(&ctx(&p, None), org, tokens, Some(revealed), fields)).into_response();
         resp.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        resp.headers_mut().insert(header::CONTENT_SECURITY_POLICY, enrollment_copy_policy());
         Ok(resp)
     })
     .await

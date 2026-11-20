@@ -568,14 +568,12 @@ async fn security_headers(State(state): State<Shared>, req: Request, next: Next)
             "same-origin"
         },
     );
-    set(
-        h,
-        header::CONTENT_SECURITY_POLICY,
-        "default-src 'none'; style-src 'self'; img-src 'self'; manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-    );
+    set(h, header::CONTENT_SECURITY_POLICY, CONSOLE_CSP);
     set(h, header::CACHE_CONTROL, "no-store");
     resp
 }
+
+const CONSOLE_CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 /// Listens for work announced by any server instance (`jobs::DISPATCH_CHANNEL`) and runs a
 /// dispatch pass for each announced device connected here. With one instance this only
