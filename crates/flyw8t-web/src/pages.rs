@@ -1001,6 +1001,40 @@ pub fn bulk_confirm_page(ctx: &PageCtx, c: BulkConfirm) -> String {
     shell(&title, ctx, Nav::Devices, None, body)
 }
 
+fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoView> {
+    if !ctx.can_support || d.row.retired || !d.os_family.eq_ignore_ascii_case("windows") {
+        return None;
+    }
+    let host = flyw8t_protocol::desktop_link::host(&d.row.hostname);
+    let query = host.map(|h| format!("?host={h}")).unwrap_or_default();
+    let target = match host {
+        Some(h) => format!("Review {h} in the app before connecting."),
+        None => "Enter the computer name or IP address in the app before connecting.".into(),
+    };
+    let choices = [
+        ("assist", "Help someone", "Choose a signed-in user’s Windows session. Windows may ask the user for consent."),
+        ("console", "Unattended console", "View or control the physical desktop if a user is signed in and device policy allows it."),
+        ("sign-in", "Windows sign-in", "Sign in to Windows. This can lock the physical desktop or resume an existing session."),
+    ].into_iter().map(|(mode, label, description)| view! {
+        <a class="action desktop-choice" href=format!("flyw8t://open/{mode}{query}")
+            aria-labelledby=format!("desktop-{mode}-label") aria-describedby=format!("desktop-{mode}-hint")>
+            <strong id=format!("desktop-{mode}-label")>{label}</strong>
+            <span class="small" id=format!("desktop-{mode}-hint")>{description}</span>
+        </a>
+    }).collect_view();
+    Some(view! {
+        <section class="card" aria-labelledby="desktop-launch-title">
+            <h2 id="desktop-launch-title">"Open in Flyw8t Technician"</h2>
+            <p class="desktop-target">{target}" Use a Windows PC that can reach this device over the network or VPN."</p>
+            <div class="actions">{choices}</div>
+            <details class="desktop-link-help">
+                <summary>"Set up browser links on Windows"</summary>
+                <p>"If you need the app, ask your administrator for the Windows technician build. Open Flyw8t Technician and choose Browser links → Enable for this Windows user. Then choose a session here and confirm the browser prompt if it appears."</p>
+            </details>
+        </section>
+    })
+}
+
 pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     let now = ctx.now;
     let connected = matches!(d.row.connection, Connection::Connected { .. });
@@ -1062,6 +1096,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     let glance = glance_section(&d, now);
     let title = d.row.name().to_string();
     let manage = manage_section(ctx, &d);
+    let desktop = desktop_launch_section(ctx, &d);
     let tags = tag_chips(&d.row.tags);
     let notes = (!d.notes.is_empty())
         .then(|| view! { <dt>"Notes"</dt><dd class="notes">{d.notes.clone()}</dd> });
@@ -1080,6 +1115,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
         {retired_note}
         <p>{tags}</p>
+        {desktop}
         {glance}
         <div class="grid">
             <section class="card">
@@ -1091,7 +1127,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
                     <dt>"Enrolled"</dt><dd>{fmt::timestamp(d.enrolled_at)}</dd>
                     <dt>"Agent"</dt><dd class="mono">{d.row.agent_version.clone().unwrap_or_else(|| "—".into())}</dd>
                     <dt>"Credential"</dt><dd>{credential}</dd>
-                    <dt>"Remote access"</dt><dd>{d.remote_access.clone()}</dd>
+                    <dt>"External remote access"</dt><dd>{d.remote_access.clone()}</dd>
                     <dt>"Device ID"</dt><dd class="mono">{d.row.id.to_string()}</dd>
                     {notes}
                 </dl>

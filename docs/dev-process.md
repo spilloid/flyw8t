@@ -95,6 +95,36 @@ This exercise covered direct LAN sign-in, shadow viewing and operator-tested sha
 WAN/relay behavior, independent concurrent sign-ins, the full database-backed
 suite and production signing remain outside this evidence.
 
+## Windows device-page handoff, 2026-11-19
+
+The device page and Windows picker use the same grammar for a suggested host.
+The Windows smoke registered the local executable twice, dispatched a real
+`flyw8t://` link through the Windows shell, and read the resulting window's
+address, session selection, button and status. It showed the unique synthetic
+computer and waited at **Check console**. Removing the association twice left
+the test user's scheme clear. The final technician passed 20 Windows tests.
+An isolated mutation that accepted alternate numeric IP spellings failed the
+shared validation regression on `0x7f000001`.
+
+A disposable PostgreSQL-backed console, enrolled synthetic Windows device and
+signed-in Chrome profile exercised the complete launch. An actual mouse click
+on **Unattended console** opened the executable with the expected host, mode,
+idle action and empty status. The profile remembered permission for only the
+test's loopback origin and scheme. The first-use prompt on a clean user remains
+part of signed release acceptance. The UI capture suite passed at desktop,
+tablet and phone widths in light and dark themes (210 captures). All six scoped
+device tests passed serially. A parallel run exceeded the existing ten-second
+agent-retirement timeout on this machine. The full Windows workspace run then
+passed all 378 tests it executed, including retirement and two-browser WebRTC.
+UI capture and the authenticated browser launch ran separately. Rust formatting
+and workspace Clippy with warnings denied passed.
+
+Same-family review identified existing Windows default-app choices and modified
+shell verbs as registration conflicts. The app checks both before changing its
+registry entries. Windows CI now runs the shell smoke, and the signing rehearsal
+includes the technician app and MCP adapter. The signed candidate on a clean
+Windows account is a release check.
+
 ## Technician MCP and Windows console preview
 
 The Windows smoke run used a local flyw8t server, disposable PostgreSQL instance,

@@ -18,7 +18,7 @@ pub struct NotConfigured;
 
 impl RemoteAccessProvider for NotConfigured {
     fn describe(&self, _device_id: Uuid) -> String {
-        "Remote control is not available in this build.".into()
+        "No external provider configured.".into()
     }
 
     fn launch_url(&self, _device_id: Uuid) -> Option<String> {

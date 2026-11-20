@@ -20,12 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
-      - run: cargo build --release --locked --target x86_64-pc-windows-msvc -p flyw8t-server -p flyw8t-agent
+      - run: cargo build --release --locked --target x86_64-pc-windows-msvc -p flyw8t-server -p flyw8t-agent -p flyw8t-mcp -p flyw8t-technician
       - name: Collect binaries
         shell: bash
         run: |
           mkdir dist
-          cp target/x86_64-pc-windows-msvc/release/flyw8t-server.exe target/x86_64-pc-windows-msvc/release/flyw8t-agent.exe dist/
+          for binary in flyw8t-server flyw8t-agent flyw8t-mcp flyw8t-technician; do
+            cp "target/x86_64-pc-windows-msvc/release/$binary.exe" dist/
+          done
       - name: Sign and verify binaries
         uses: ./.github/actions/sign-release
         with:

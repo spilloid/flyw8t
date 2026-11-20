@@ -44,6 +44,14 @@ flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP 
   console or transfer an existing session. Concurrent independent desktops depend
   on the Windows host's edition, licensing and configuration.
 
+To open this client from the web console, keep the executable in a local folder
+and choose **Browser links → Enable for this Windows user** in Flyw8t Technician.
+On a Windows device page, choose a session under **Open in Flyw8t Technician**
+and accept the browser's open-app prompt if shown. Review the computer and session
+in the app, then start the connection. The link carries the mode and a suggested
+hostname. Windows still handles access and the technician needs a route to the host.
+If you move or replace the executable, enable links from the new copy.
+
 For a local Windows x64 build, install the Rust MSVC toolchain, Visual C++ build tools,
 and a Windows SDK, then launch the viewer with Cargo.
 

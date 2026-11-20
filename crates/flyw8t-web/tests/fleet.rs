@@ -2,7 +2,7 @@
 //! nothing a device reports can become markup.
 
 use flyw8t_web::model::*;
-use flyw8t_web::{devices_page, organization_page, overview_page};
+use flyw8t_web::{device_page, devices_page, organization_page, overview_page};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -73,6 +73,65 @@ fn seen(ago: Duration) -> Connection {
 fn connected() -> Connection {
     Connection::Connected {
         since: now() - Duration::hours(1),
+    }
+}
+
+#[test]
+fn device_page_opens_only_the_explicit_desktop_modes() {
+    let context = ctx();
+    let mut d = DeviceDetail {
+        row: device(seen(Duration::hours(1)), None),
+        os_family: "windows".into(),
+        enrolled_at: now(),
+        inventory: None,
+        credential: None,
+        recent_jobs: Vec::new(),
+        remote_access: "No external provider configured.".into(),
+        notes: String::new(),
+        site_id: None,
+        sites: Vec::new(),
+        fields: Vec::new(),
+    };
+    let modes = ["assist", "console", "sign-in"];
+    // A friendly name is not the network address; agent presence is independent of RDP reachability.
+    d.row.display_name = Some("Operator's workstation".into());
+    for host in ["WS-01", "ws-01.lab.example.", "192.0.2.8"] {
+        d.row.hostname = host.into();
+        let html = device_page(&context, d.clone());
+        for mode in modes {
+            assert!(html.contains(&format!(r#"href="flyw8t://open/{mode}?host={host}""#)));
+        }
+        assert_eq!(html.matches("flyw8t://").count(), modes.len());
+        assert!(html.contains("Enable for this Windows user"));
+    }
+    for host in [
+        "",
+        " host ",
+        "ws?host=other",
+        "example:3389",
+        "127.1",
+        "010.0.0.1",
+        "host..example",
+    ] {
+        d.row.hostname = host.into();
+        let html = device_page(&context, d.clone());
+        for mode in modes {
+            assert!(
+                html.contains(&format!(r#"href="flyw8t://open/{mode}""#)),
+                "{host}"
+            );
+        }
+        assert!(html.contains("Enter the computer name or IP address"));
+    }
+    let mut readonly = ctx();
+    readonly.can_support = false;
+    assert!(!device_page(&readonly, d.clone()).contains("flyw8t://"));
+    d.row.retired = true;
+    assert!(!device_page(&context, d.clone()).contains("flyw8t://"));
+    d.row.retired = false;
+    for family in ["linux", "darwin", ""] {
+        d.os_family = family.into();
+        assert!(!device_page(&context, d.clone()).contains("flyw8t://"));
     }
 }
 

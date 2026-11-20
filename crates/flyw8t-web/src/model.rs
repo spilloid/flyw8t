@@ -304,6 +304,9 @@ pub struct CredentialView {
 pub struct DeviceDetail {
     #[serde(flatten)]
     pub row: DeviceRow,
+    /// OS family reported on enrollment and refreshed with inventory.
+    #[serde(skip)]
+    pub os_family: String,
     #[serde(with = "time::serde::rfc3339")]
     pub enrolled_at: OffsetDateTime,
     pub inventory: Option<InventoryView>,

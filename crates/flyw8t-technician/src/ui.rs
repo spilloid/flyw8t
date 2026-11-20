@@ -1,6 +1,8 @@
 //! The window owns the RDP control on its STA. Window callbacks only enqueue events:
 //! Win32 and OLE can synchronously reenter a callback while a control method is running.
+use crate::launch::Intent;
 use crate::rdp::{RdpEvent, RdpSession};
+use crate::registration;
 use crate::target::{probe, Target};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -21,6 +23,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const CONNECT: usize = 101;
 const INTENT: usize = 105;
+const ENABLE_LINKS: usize = 106;
+const REMOVE_LINKS: usize = 107;
 const RDP_EVENT: u32 = WM_APP + 40;
 const WAKE: u32 = WM_APP + 41;
 const TIMER: usize = 1;
@@ -39,6 +43,7 @@ fn last_error(action: &str) -> String {
 #[derive(Clone, Copy)]
 enum Event {
     Action,
+    ConfigureLinks(bool),
     SelectIntent,
     Resize,
     Dpi,
@@ -60,6 +65,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
     }
     let event = match msg {
         WM_CLOSE => Event::Close,
+        WM_COMMAND if l == 0 && w == ENABLE_LINKS => Event::ConfigureLinks(true),
+        WM_COMMAND if l == 0 && w == REMOVE_LINKS => Event::ConfigureLinks(false),
         WM_COMMAND if w & 0xffff == CONNECT && (w >> 16) as u32 == BN_CLICKED => Event::Action,
         WM_COMMAND if w & 0xffff == INTENT && (w >> 16) as u32 == CBN_SELCHANGE => {
             Event::SelectIntent
@@ -83,7 +90,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             let limits = &mut *(l as *mut MINMAXINFO);
             limits.ptMinTrackSize = POINT {
                 x: MIN_CARD_WIDTH * dpi / 96,
-                y: INITIAL_CARD_HEIGHT * dpi / 96,
+                y: card_height(dpi),
             };
             return 0;
         }
@@ -120,7 +127,51 @@ impl Drop for Window {
     }
 }
 
-pub fn run(prefill: Option<String>, connect_now: bool) -> Result<(), String> {
+unsafe fn card_height(dpi: i32) -> i32 {
+    INITIAL_CARD_HEIGHT * dpi / 96 + GetSystemMetricsForDpi(SM_CYMENU, dpi as u32)
+}
+
+unsafe fn attach_browser_menu(hwnd: HWND) -> Result<(), String> {
+    let menu = CreateMenu();
+    if menu.is_null() {
+        return Err(last_error("Could not create the technician menu"));
+    }
+    let browser = CreatePopupMenu();
+    if browser.is_null()
+        || AppendMenuW(
+            menu,
+            MF_POPUP,
+            browser as usize,
+            wide("&Browser links").as_ptr(),
+        ) == 0
+    {
+        let error = last_error("Could not create the Browser links menu");
+        if !browser.is_null() {
+            DestroyMenu(browser);
+        }
+        DestroyMenu(menu);
+        return Err(error);
+    }
+    // The parent menu now owns the popup. The window owns both after SetMenu.
+    for (id, label) in [
+        (ENABLE_LINKS, "&Enable for this Windows user"),
+        (REMOVE_LINKS, "&Remove for this Windows user"),
+    ] {
+        if AppendMenuW(browser, MF_STRING, id, wide(label).as_ptr()) == 0 {
+            let error = last_error("Could not add a browser link command");
+            DestroyMenu(menu);
+            return Err(error);
+        }
+    }
+    if SetMenu(hwnd, menu) == 0 {
+        let error = last_error("Could not attach the technician menu");
+        DestroyMenu(menu);
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn run(prefill: Option<String>, intent: Intent, connect_now: bool) -> Result<(), String> {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let hr = OleInitialize(null());
@@ -153,7 +204,7 @@ pub fn run(prefill: Option<String>, connect_now: bool) -> Result<(), String> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             730 * GetDpiForSystem().max(96) as i32 / 96,
-            INITIAL_CARD_HEIGHT * GetDpiForSystem().max(96) as i32 / 96,
+            card_height(GetDpiForSystem().max(96) as i32),
             null_mut(),
             null_mut(),
             instance,
@@ -163,10 +214,8 @@ pub fn run(prefill: Option<String>, connect_now: bool) -> Result<(), String> {
             return Err(last_error("Could not open the technician window"));
         }
         let _window = Window(hwnd);
-        let mut ui = Ui::new(hwnd, prefill.as_deref().unwrap_or_default())?;
-        if connect_now {
-            SendMessageW(ui.intent, CB_SETCURSEL, 2, 0);
-        }
+        attach_browser_menu(hwnd)?;
+        let mut ui = Ui::new(hwnd, prefill.as_deref().unwrap_or_default(), intent)?;
         ui.select_intent();
         ui.update_font();
         ui.layout();
@@ -181,6 +230,7 @@ pub fn run(prefill: Option<String>, connect_now: bool) -> Result<(), String> {
                 match next {
                     Some(Event::Close) => return Ok(()),
                     Some(Event::Action) => ui.action(),
+                    Some(Event::ConfigureLinks(enable)) => ui.configure_links(enable),
                     Some(Event::SelectIntent) => ui.select_intent(),
                     Some(Event::Resize) => ui.layout(),
                     Some(Event::Dpi) => {
@@ -251,14 +301,6 @@ unsafe fn child(
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Intent {
-    Assist,
-    Share,
-    SignIn,
-    Console,
-}
-
 struct Chooser {
     intent: Intent,
     target: String,
@@ -304,7 +346,7 @@ struct Ui {
 }
 
 impl Ui {
-    unsafe fn new(hwnd: HWND, address: &str) -> Result<Self, String> {
+    unsafe fn new(hwnd: HWND, address: &str, initial_intent: Intent) -> Result<Self, String> {
         let label = child(hwnd, "STATIC", "&Computer", 0, 0, 0)?;
         let address = child(
             hwnd,
@@ -333,7 +375,7 @@ impl Ui {
                 return Err("Could not set up the session choices.".into());
             }
         }
-        SendMessageW(intent, CB_SETCURSEL, 0, 0);
+        SendMessageW(intent, CB_SETCURSEL, initial_intent as usize, 0);
         let button = child(
             hwnd,
             "BUTTON",
@@ -609,6 +651,30 @@ impl Ui {
                     SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER,
                 );
             }
+        }
+    }
+
+    unsafe fn configure_links(&self, enable: bool) {
+        let (message, icon): (String, u32) = match registration::configure(enable) {
+            Ok(()) if enable => (
+                "Browser links are enabled for this Windows user.".into(),
+                MB_ICONINFORMATION,
+            ),
+            Ok(()) => (
+                "The browser link registration was removed for this Windows user.".into(),
+                MB_ICONINFORMATION,
+            ),
+            Err(reason) => (reason.chars().take(300).collect(), MB_ICONERROR),
+        };
+        if self.active.is_some() {
+            MessageBoxW(
+                self.hwnd,
+                wide(&message).as_ptr(),
+                wide("Browser links").as_ptr(),
+                MB_OK | icon,
+            );
+        } else {
+            self.message(&message);
         }
     }
 
@@ -900,26 +966,62 @@ impl Drop for Ui {
 mod tests {
     use super::*;
 
+    unsafe fn test_window() -> Window {
+        let host = CreateWindowExW(
+            0,
+            wide("STATIC").as_ptr(),
+            null(),
+            WS_OVERLAPPED,
+            0,
+            0,
+            730,
+            294,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null(),
+        );
+        assert!(!host.is_null());
+        Window(host)
+    }
+
+    #[test]
+    fn browser_links_prepare_an_idle_picker_for_the_requested_mode() {
+        unsafe {
+            for (link, expected_mode, expected_host) in [
+                ("assist?host=dev.example", Intent::Assist, "dev.example"),
+                ("console?host=192.0.2.3", Intent::Console, "192.0.2.3"),
+                ("sign-in", Intent::SignIn, ""),
+            ] {
+                let window = test_window();
+                let (mode, host) =
+                    crate::launch::parse_link(&[format!("flyw8t://open/{link}").into()]).unwrap();
+                let ui = Ui::new(window.0, host.as_deref().unwrap_or_default(), mode).unwrap();
+                ui.select_intent();
+                assert_eq!(ui.selected(), expected_mode);
+                let mut text = [0u16; 64];
+                let len = GetWindowTextW(ui.address, text.as_mut_ptr(), text.len() as i32);
+                assert_eq!(
+                    String::from_utf16_lossy(&text[..len as usize]),
+                    expected_host
+                );
+                assert!(ui.choosers.is_empty() && ui.session.is_none() && ui.active.is_none());
+                assert_eq!(ui.generation.load(Ordering::Acquire), 0);
+            }
+        }
+    }
+
     #[test]
     fn support_is_the_default_and_only_sign_in_offers_rdp_clipboard() {
         unsafe {
-            let host = CreateWindowExW(
-                0,
-                wide("STATIC").as_ptr(),
-                null(),
-                WS_OVERLAPPED,
-                0,
-                0,
-                730,
-                294,
-                null_mut(),
-                null_mut(),
-                null_mut(),
-                null(),
-            );
-            assert!(!host.is_null());
-            let _window = Window(host);
-            let mut ui = Ui::new(host, "example.test").unwrap();
+            let window = test_window();
+            let host = window.0;
+            attach_browser_menu(host).unwrap();
+            let submenu = GetSubMenu(GetMenu(host), 0);
+            assert!(!submenu.is_null());
+            assert_eq!(GetMenuItemID(submenu, 0), ENABLE_LINKS as u32);
+            assert_eq!(GetMenuItemID(submenu, 1), REMOVE_LINKS as u32);
+            let mut ui = Ui::new(host, "example.test", Intent::Assist).unwrap();
             ui.update_font();
             for (index, expected, clipboard) in [
                 (0, "Find sessions", false),
@@ -960,7 +1062,7 @@ mod tests {
                     0,
                     0,
                     width * dpi / 96,
-                    INITIAL_CARD_HEIGHT * dpi / 96,
+                    card_height(dpi),
                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
                 ui.select_intent();

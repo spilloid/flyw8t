@@ -4,6 +4,9 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## Unreleased
 
+- Open Flyw8t Technician from an authorized Windows device page. Select an
+  existing session, the physical console or Windows sign-in, review the
+  suggested computer, and start the connection in the desktop app.
 - Add a Windows technician preview with existing-session selection and shadowing,
   explicit Windows sign-in with optional clipboard sharing, and an attended
   browser screen-sharing handoff. A failed connection leaves one actionable
