@@ -43,3 +43,28 @@ jobs:
           name: signed-binaries
           path: dist/*.exe
           retention-days: 1
+
+  browser-launch:
+    name: Signed Windows browser handoff on a clean user
+    needs: sign
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: signed-binaries
+          path: dist
+      - name: Verify the four downloaded signed executables
+        shell: pwsh
+        run: |
+          $expected = 'flyw8t-agent.exe', 'flyw8t-mcp.exe', 'flyw8t-server.exe', 'flyw8t-technician.exe'
+          $files = Get-ChildItem dist -File
+          if (Compare-Object $expected $files.Name) { throw 'Unexpected signed artifact contents.' }
+          ./scripts/verify-signature.ps1 -Files $files.FullName -ExpectedSubject 'CN=Joseph Spillers'
+      - name: Exercise the first-use prompt, all three session modes and removal
+        uses: ./.github/actions/check-browser-handoff
+        with:
+          binaries: dist

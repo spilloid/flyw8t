@@ -2,6 +2,25 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class TechnicianSmoke {
+    [DllImport("user32")] private static extern IntPtr GetMenu(IntPtr hwnd);
+    [DllImport("user32")] private static extern IntPtr GetSubMenu(IntPtr menu, int position);
+    [DllImport("user32")] private static extern int GetMenuItemID(IntPtr menu, int position);
+    [DllImport("user32", CharSet=CharSet.Unicode)] private static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int length, uint flags);
+    private static string MenuLabel(IntPtr menu, uint position) {
+        var text = new StringBuilder(160);
+        GetMenuString(menu, position, text, text.Capacity, 0x400); // MF_BYPOSITION
+        return text.ToString().Replace("&", "");
+    }
+    public static bool ChooseBrowserMenu(IntPtr hwnd, bool enable) {
+        IntPtr menu = GetMenu(hwnd);
+        if (MenuLabel(menu, 0) != "Browser links") return false;
+        IntPtr links = GetSubMenu(menu, 0);
+        int position = enable ? 0 : 1;
+        string expected = enable ? "Enable for this Windows user" : "Remove for this Windows user";
+        if (MenuLabel(links, (uint)position) != expected) return false;
+        int command = GetMenuItemID(links, position);
+        return command > 0 && PostMessage(hwnd, 0x111, (IntPtr)command, IntPtr.Zero);
+    }
     private delegate bool Callback(IntPtr hwnd, IntPtr data);
     [DllImport("user32")] private static extern bool EnumWindows(Callback cb, IntPtr data);
     [DllImport("user32")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);

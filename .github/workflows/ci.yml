@@ -21,10 +21,14 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      - name: Build the Windows technician client for shell integration testing
-        run: cargo build --locked -p flyw8t-technician --target x86_64-pc-windows-msvc
+      - name: Build the Windows client and console for desktop integration testing
+        run: cargo build --locked -p flyw8t-technician -p flyw8t-server --target x86_64-pc-windows-msvc
       - name: Registered device link opens the idle technician chooser
         run: ./scripts/test-technician-handoff.ps1 -Binary ./target/x86_64-pc-windows-msvc/debug/flyw8t-technician.exe
+      - name: First-use Chrome prompt and three device-page links
+        uses: ./.github/actions/check-browser-handoff
+        with:
+          binaries: target/x86_64-pc-windows-msvc/debug
 
   linux:
     name: Linux - PostgreSQL end-to-end, protocol, TLS and UI capture
