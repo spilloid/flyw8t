@@ -207,7 +207,7 @@ The operator requested an independent adversarial review. A separate Codex Astra
 | A list of known luma bands did not count every presented frame. Successful exit alone did not bound revocation. | Accepted. The fixture now checks presentation callbacks and receiver/decode counters, a two-second process-stop limit and stability after a defined drain. These observations are specific to a test process on loopback. |
 | CI environment metadata, trigger coverage and release scope needed reconciliation. | Accepted. The fixture reports browser/OS and records toolchain information. ADR-0019 and the roadmap distinguish Windows 0.10.0, macOS 0.11.0 and the 1.0 obligations. |
 
-The review allowed a proposed ADR and isolated experiments. It did not authorize production unattended access. Evidence and remaining release gates are tracked in [issue #57](https://github.com/spilloid/flyw8t/issues/57).
+The reviewer reread ADR `17f0788` and media fixture `09d5674`, and inspected WGC probe `ad34a73`. The WGC sequence originally asserted four states, or three transitions. The implementer changed it to five alternating states and ran it in an interactive Windows session with a 25-second external watchdog. The independent review found no remaining material experiment-only merge blocker conditional on exact-revision checks. Production unattended access still requires the full release evidence. The operator selected organization SSO with TOTP and an independent grant signer after the review. Evidence and remaining gates are tracked in [issue #57](https://github.com/spilloid/flyw8t/issues/57).
 
 ## Standing rules (STD-001)
 
