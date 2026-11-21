@@ -11,7 +11,7 @@ npm test
 
 ## Workstation selection
 
-The policy administrator signs a selection for one tenant, device, enrollment and enrollment generation. The authorization service and endpoint each verify it against an independently provisioned Ed25519 public key and persist the decision in their own SQLite store. Each selection has a revision and expires within two minutes. A new enrollment for the same device supersedes the previous selection.
+The policy administrator signs a selection for one tenant, device, enrollment and enrollment generation. The authorization service and endpoint each verify it against an independently provisioned Ed25519 public key and persist the decision in their own SQLite store. Each selection has a revision and expires within two minutes. Changing an enrollment ID requires a higher generation. Even a new signed revision cannot return a workstation to an earlier generation.
 
 | Latest selection | Effect on a synthetic grant |
 | --- | --- |
@@ -29,7 +29,9 @@ The grant signer accepts a verified transaction through a scope-specific adapter
 
 The endpoint spends an offer once and records admission in the same transaction. Each lease check reads the current decision, local revocations, expiry and clock high-water mark. A demotion invalidates pending and active work. A later Notify with Stop selection requires a fresh offer. The SQLite policy history retains the applied revision, enrollment, time, mode, expiry and a digest of each signed update. Lower revisions and conflicting updates at the same revision are rejected after restart.
 
-Local Stop vetoes all pending and active leases. A targeted cancellation can veto one offer, or the endpoint can revoke a single lease. Revocation persists its audit intent with the veto. The verifier can recover an interrupted journal delivery once. Audit correlation uses a one-way digest. The test suite exercises concurrent redemption, failed audit writes, authority and endpoint checks, policy substitution, clock rollback, and a policy downgrade during issuance and simulated lease use.
+To stop one synthetic session, the fixture can cancel its offer or revoke its lease. Other sessions can continue. The fixture also exposes an endpoint-wide emergency disable through `stopLocally()`. It permanently vetoes all current and future admissions in that ledger, including after restart and receipt of a fresh signed policy. There is no recovery operation in the rehearsal. A lease UUID indexes simulated local state. It proves no binding to a running Windows logon, input target or transport.
+
+Revocation persists its audit intent with the veto. The verifier can recover an interrupted journal delivery once. A veto records the greatest trustworthy time observed so far and still takes effect if the clock fails. Verification and admission preserve time observations even on rollback, signature failure and failed audit writes, preventing an unrelated expired lease from becoming usable after restart. Audit correlation uses a one-way digest.
 
 ## Remaining evidence for deployment
 

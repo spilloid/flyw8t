@@ -114,33 +114,44 @@ export class EndpointLedger {
 
   async admit(token) {
     let grant;
-    const verifiedAt = this.#clock();
-    try {
-      grant = await verifyGrant(token, this.#policy, this.#verifyKey, verifiedAt);
-    } catch {
-      this.#write(() => {
-        const now = this.#clock();
-        this.#advanceClock(now);
-        this.#log('denied', null, now);
-      });
-      throw new Error('Grant denied');
+    const verifiedAt = this.#sampleClock();
+    // This observation is durable before yielding to the signature verifier.
+    if (this.#observeTime(verifiedAt) === verifiedAt) {
+      try {
+        grant = await verifyGrant(token, this.#policy, this.#verifyKey, verifiedAt);
+      } catch { /* Record a denial in the same decision path. */ }
     }
-    const lease = this.#write(() => {
-      const now = this.#clock();
-      const selected = this.#selections.allowed(this.#policy, now);
-      const accepted = selected && now >= verifiedAt && now >= grant.iat && this.#advanceClock(now) && this.#db.prepare(`
-        INSERT INTO leases(id,nonce,expires)
-        SELECT ?,nonce,? FROM challenges
-        WHERE nonce=? AND binding=? AND expires>? AND ?>?
-        AND EXISTS (SELECT 1 FROM challenge_policies WHERE nonce=challenges.nonce AND revision=?)
-        AND NOT EXISTS (SELECT 1 FROM offer_vetoes WHERE nonce=challenges.nonce)
-        ON CONFLICT DO NOTHING`).run(grant.jti, grant.exp, grant.nonce,
-          grant.binding, now, grant.exp, now, selected.revision).changes === 1;
-      this.#log(accepted ? 'admitted' : 'denied', accepted ? grant.jti : null, now);
-      return accepted ? grant.jti : null;
+    const decision = this.#write(() => {
+      const now = this.#sampleClock();
+      const highWater = this.#observeTime(now);
+      // Keep the clock observation when a failed audit write rolls back a spend.
+      this.#db.exec('SAVEPOINT admission');
+      try {
+        const lease = grant && now === highWater ? this.#redeem(grant, now) : null;
+        this.#log(lease ? 'admitted' : 'denied', lease, highWater);
+        this.#db.exec('RELEASE admission');
+        return { lease };
+      } catch (error) {
+        this.#db.exec('ROLLBACK TO admission; RELEASE admission');
+        return { error };
+      }
     });
-    if (!lease) throw new Error('Grant denied');
-    return lease;
+    if (decision.error) throw decision.error;
+    if (!decision.lease) throw new Error('Grant denied');
+    return decision.lease;
+  }
+
+  #redeem(grant, now) {
+    const selected = this.#selections.allowed(this.#policy, now);
+    if (!selected || now < grant.iat) return null;
+    const inserted = this.#db.prepare(`INSERT INTO leases(id,nonce,expires)
+      SELECT ?,nonce,? FROM challenges WHERE nonce=? AND binding=? AND expires>? AND ?>?
+      AND EXISTS (SELECT 1 FROM configuration WHERE singleton=1 AND stopped_at IS NULL)
+      AND EXISTS (SELECT 1 FROM challenge_policies WHERE nonce=challenges.nonce AND revision=?)
+      AND NOT EXISTS (SELECT 1 FROM offer_vetoes WHERE nonce=challenges.nonce)
+      ON CONFLICT DO NOTHING`).run(grant.jti, grant.exp, grant.nonce,
+        grant.binding, now, grant.exp, now, selected.revision);
+    return inserted.changes === 1 ? grant.jti : null;
   }
 
   // For the rehearsal this predicate guards a simulated use of a lease. Each use
@@ -160,12 +171,24 @@ export class EndpointLedger {
     }
   }
 
+  // A veto must remain available even when the clock fails or moves backwards.
+  // Persist each trustworthy observation before another lease can be used.
+  #sampleClock() {
+    try { return this.#clock(); } catch { return undefined; }
+  }
+
+  #observeTime(observed) {
+    return this.#db.prepare(`UPDATE configuration SET checked_at=MAX(checked_at,?)
+      WHERE singleton=1 RETURNING checked_at`).get(Number.isSafeInteger(observed) ? observed : 0).checked_at;
+  }
+
   revoke(lease) {
     // Commit the veto and its durable audit intent together. If journal delivery
     // fails, every reader still sees the veto, including after process restart.
     this.#write(() => {
       requireEvidence(this.#db.prepare('SELECT 1 FROM leases WHERE id=?').get(lease));
-      this.#db.prepare('INSERT OR IGNORE INTO revocations(id,occurred) VALUES(?,?)').run(lease, this.#clock());
+      const occurred = this.#observeTime(this.#sampleClock());
+      this.#db.prepare('INSERT OR IGNORE INTO revocations(id,occurred) VALUES(?,?)').run(lease, occurred);
     });
     this.flushRevocations();
   }
@@ -173,14 +196,16 @@ export class EndpointLedger {
   cancelLocalOffer(nonce) {
     this.#write(() => {
       requireEvidence(this.#db.prepare('SELECT 1 FROM challenges WHERE nonce=?').get(nonce));
-      this.#db.prepare('INSERT OR IGNORE INTO offer_vetoes(nonce,occurred) VALUES(?,?)').run(nonce, this.#clock());
+      const occurred = this.#observeTime(this.#sampleClock());
+      this.#db.prepare('INSERT OR IGNORE INTO offer_vetoes(nonce,occurred) VALUES(?,?)').run(nonce, occurred);
     });
     this.flushRevocations();
   }
 
   stopLocally() {
     this.#write(() => {
-      this.#db.prepare('UPDATE configuration SET stopped_at=? WHERE stopped_at IS NULL').run(this.#clock());
+      const occurred = this.#observeTime(this.#sampleClock());
+      this.#db.prepare('UPDATE configuration SET stopped_at=? WHERE stopped_at IS NULL').run(occurred);
     });
     this.flushRevocations();
   }

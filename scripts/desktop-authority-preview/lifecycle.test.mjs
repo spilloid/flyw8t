@@ -48,7 +48,8 @@ async function fixture(t) {
   const close = ledger => { ledger.close(); ledgers.delete(ledger); };
   const ledger = open();
   const raw = new DatabaseSync(file);
-  const registryDb = new DatabaseSync(join(dir, 'authority.sqlite'));
+  const registryFile = join(dir, 'authority.sqlite');
+  const registryDb = new DatabaseSync(registryFile);
   const selections = new WorkstationSelections(registryDb, policy, keys.admin.publicKey, clock);
   const signPolicy = (device, revision, mode, expires) => fixtureSelection(device, keys.admin.privateKey, time, revision, mode, expires);
   const first = await signPolicy(policy, 1, 'notify_with_stop');
@@ -77,7 +78,7 @@ async function fixture(t) {
     const { offer, nonce } = await ledger.prepare(keys.endpoint.privateKey, session);
     return { offer, nonce, identity: await identity(nonce), confirmation: await confirmation(offer) };
   }
-  return { file, keys, config, authorize, ledger, raw, open, close, identity, confirmation, signPolicy, clock, selections, first,
+  return { file, registryFile, keys, config, authorize, ledger, raw, open, close, identity, confirmation, signPolicy, clock, selections, first,
     request, advance(seconds) { time += seconds; } };
 }
 
@@ -157,7 +158,7 @@ if (!isMainThread) {
       ['notify_with_stop','ask_first','notify_with_stop']);
   });
 
-  test('re-enrollment, incorrect policy signature, changed trust and policy expiry all fail closed', async t => {
+  test('re-enrollment is monotone and cannot replace the enrollment ID within a generation', async t => {
     const f = await fixture(t);
     const req = await f.request();
     const reEnrolled = { ...policy, enrollment: 'replacement-enrollment', generation: 18 };
@@ -170,6 +171,27 @@ if (!isMainThread) {
     await f.ledger.applyPolicy(replacement);
     await assert.rejects(f.authorize(req));
     await assert.rejects(f.request());
+    f.close(f.ledger);
+    const restarted = f.open();
+    const registry = new DatabaseSync(f.registryFile);
+    try {
+      const reloaded = new WorkstationSelections(registry, policy, f.keys.admin.publicKey, f.clock);
+      for (const stale of [policy, { ...reEnrolled, enrollment: 'substituted-enrollment' }]) {
+        const update = await f.signPolicy(stale, 3, 'notify_with_stop');
+        await assert.rejects(restarted.applyPolicy(update), /Stale or conflicting/);
+        await assert.rejects(reloaded.apply(update), /Stale or conflicting/);
+      }
+      const ask = await f.signPolicy(reEnrolled, 3, 'ask_first');
+      await restarted.applyPolicy(ask);
+      await reloaded.apply(ask);
+      assert.equal(reloaded.allowed(policy, f.clock()), null);
+      await assert.rejects(restarted.prepare(f.keys.endpoint.privateKey, session));
+    } finally { registry.close(); }
+  });
+
+  test('policy limits grant expiry and refuses invalid scope, stale time and excessive age', async t => {
+    const f = await fixture(t);
+    const req = await f.request();
     const invalidMode = await f.signPolicy(policy, 3, 'control_desktop');
     await assert.rejects(f.ledger.applyPolicy(invalidMode));
     const tooLong = await f.signPolicy(policy, 3, 'notify_with_stop', clockStart + 121);
@@ -391,9 +413,66 @@ if (!isMainThread) {
     f.close(f.ledger);
     const restarted = f.open();
     restarted.stopLocally();
+    await restarted.applyPolicy(await f.signPolicy(policy, 2, 'notify_with_stop'));
+    await assert.rejects(restarted.prepare(f.keys.endpoint.privateKey, session), /Evidence rejected/);
     assert.equal(restarted.active(lease), false);
     assert.equal(f.raw.prepare("SELECT COUNT(*) AS n FROM audit WHERE event='stopped'").get().n, 1);
   });
+
+  for (const veto of ['revoke','cancelLocalOffer','stopLocally']) {
+    test(veto + ' remembers a later time across restart and still works with a broken clock', async t => {
+      const f = await fixture(t);
+      const makeLease = async () => f.ledger.admit(await f.authorize(await f.request()));
+      const unrelated = await makeLease();
+      const targeted = await makeLease();
+      const outstanding = await f.request();
+      const arg = veto === 'revoke' ? targeted : outstanding.nonce;
+      f.advance(31);
+      f.ledger[veto](arg);
+      f.close(f.ledger);
+      f.advance(-30);
+      const reopened = f.open();
+      assert.equal(reopened.active(unrelated), false);
+      assert.equal(f.raw.prepare('SELECT checked_at FROM configuration').get().checked_at, clockStart + 31);
+      // Vetoes also work while the wall clock throws, even for an item that
+      // had no previous veto. The recorded time is the last durable observation.
+      const broken = new EndpointLedger(f.file, policy, f.keys.authority.publicKey, f.keys.admin.publicKey,
+        () => { throw Error('clock unavailable'); });
+      try {
+        if (veto === 'revoke') broken.revoke(unrelated);
+        else if (veto === 'cancelLocalOffer') broken.cancelLocalOffer(f.raw.prepare('SELECT nonce FROM leases WHERE id=?').get(unrelated).nonce);
+        else broken.stopLocally();
+      } finally { broken.close(); }
+      const table = { revoke:'revocations', cancelLocalOffer:'offer_vetoes', stopLocally:'configuration' }[veto];
+      const stamp = veto === 'stopLocally' ? 'stopped_at' : 'occurred';
+      const decisions = f.raw.prepare('SELECT ' + stamp + ' AS at FROM ' + table).all();
+      assert.equal(decisions.length, veto === 'stopLocally' ? 1 : 2);
+      assert.ok(decisions.every(e => e.at === clockStart + 31));
+    });
+  }
+
+  for (const rejection of ['invalid signature','rolled back at commit','failed audit at commit']) {
+    test(rejection + ' preserves verification and decision times for unrelated leases after restart', async t => {
+      const f = await fixture(t);
+      const unrelated = await f.ledger.admit(await f.authorize(await f.request()));
+      f.advance(20);
+      const valid = await f.authorize(await f.request());
+      const badAudit = rejection === 'failed audit at commit';
+      const samples = badAudit ? [clockStart + 20, clockStart + 31] : [clockStart + 31, clockStart + 20];
+      const clocked = new EndpointLedger(f.file, policy, f.keys.authority.publicKey, f.keys.admin.publicKey,
+        () => samples.shift());
+      if (badAudit) f.raw.exec("CREATE TRIGGER reject_decision BEFORE INSERT ON audit BEGIN SELECT RAISE(ABORT,'journal unavailable'); END");
+      try {
+        const token = rejection === 'invalid signature'
+          ? await sign(decodeJwt(valid), grantType, keyPair().privateKey) : valid;
+        await assert.rejects(clocked.admit(token), badAudit ? /journal unavailable/ : /Grant denied/);
+      } finally { clocked.close(); }
+      assert.equal(f.raw.prepare('SELECT COUNT(*) AS n FROM leases').get().n, 1);
+      f.close(f.ledger);
+      assert.equal(f.open().active(unrelated), false);
+      assert.equal(f.raw.prepare('SELECT checked_at FROM configuration').get().checked_at, clockStart + 31);
+    });
+  }
 
   test('rolling the wall clock back after expiry cannot resurrect a persisted lease', async t => {
     const f = await fixture(t);

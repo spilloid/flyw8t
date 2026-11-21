@@ -60,11 +60,12 @@ export class WorkstationSelections {
     // stale arrivals, including when multiple verifiers apply updates at once.
     const applied = this.#db.prepare(`INSERT INTO workstation_selections
       SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM workstation_selections
-        WHERE tenant=? AND device=? AND (revision>? OR checked_at>?))
+        WHERE tenant=? AND device=? AND (revision>? OR checked_at>? OR generation>?
+          OR (generation=? AND enrollment<>?)))
       ON CONFLICT(tenant,device,revision) DO UPDATE SET checked_at=excluded.checked_at
       WHERE digest=excluded.digest`)
       .run(p.tenant,p.device,p.sub,p.generation,p.revision,p.mode,p.exp,now,now,digest,
-        p.tenant,p.device,p.revision,now);
+        p.tenant,p.device,p.revision,now,p.generation,p.generation,p.sub);
     if (!applied.changes) throw Error('Stale or conflicting policy update');
   }
 
