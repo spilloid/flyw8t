@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>flyw8t | Self-hosted Windows support</title>
-<meta name="description" content="Manage Windows endpoints from your own web console. Try the signed Windows agent and Flyw8t Technician on one lab PC with the 0.1.6 beta.">
+<meta name="description" content="Manage Windows endpoints from your own web console. Try the signed Windows agent and Flyw8t Technician on one lab PC with the 0.1.7 beta.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#2456c7">
 <meta property="og:title" content="flyw8t | Self-hosted Windows support">
-<meta property="og:description" content="Run diagnostics, review the evidence and open a Windows support session from your device list. Try the 0.1.6 beta on one lab PC.">
+<meta property="og:description" content="Run diagnostics, review the evidence and open a Windows support session from your device list. Try the 0.1.7 beta on one lab PC.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://spilloid.github.io/flyw8t/">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -135,12 +135,12 @@ footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-left: auto; }
 <section class="hero">
   <div class="wrap">
     <div>
-      <span class="pill">Windows beta · v0.1.6</span>
+      <span class="pill">Windows beta · v0.1.7</span>
       <h1>Your Windows<br><span>support console.</span></h1>
       <p class="lead">flyw8t is a self-hosted remote monitoring and management tool for MSP technicians. Check which PCs are online, run diagnostics and open a Windows session from the device page.</p>
       <div class="cta">
         <a class="btn primary" href="#try">Try it on one PC</a>
-        <a class="btn ghost" href="https://github.com/spilloid/flyw8t/releases/tag/v0.1.6">Release notes</a>
+        <a class="btn ghost" href="https://github.com/spilloid/flyw8t/releases/tag/v0.1.7">Release notes</a>
       </div>
     </div>
     <figure class="screen">
@@ -153,23 +153,23 @@ footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-left: auto; }
 <section class="band" id="try">
   <div class="wrap">
     <h2>Try it on one Windows PC</h2>
-    <p class="intro">Use a Windows x64 lab PC as both the managed device and the technician workstation. You’ll need access to a flyw8t 0.1.6 console and an organization enrollment token. The guide also covers starting your own console.</p>
+    <p class="intro">To try the beta on one Windows x64 lab PC, sign in to your flyw8t 0.1.7 console as an administrator or assigned technician. The installation guide also covers starting your own console.</p>
     <div class="checks">
       <div>
         <h3>Download the signed Windows apps</h3>
         <ul class="downloads">
-          <li><a href="https://github.com/spilloid/flyw8t/releases/download/v0.1.6/flyw8t-agent-v0.1.6-x86_64-pc-windows-msvc.exe">Download the Windows agent (.exe)</a><p>Runs on the PC you manage. It sends inventory and diagnostic results to your console over an outbound connection.</p></li>
-          <li><a href="https://github.com/spilloid/flyw8t/releases/download/v0.1.6/flyw8t-technician-v0.1.6-x86_64-pc-windows-msvc.exe">Download Flyw8t Technician (.exe)</a><p>Runs on the PC you work from. It opens a Windows session when you choose one in the console.</p></li>
+          <li><a href="https://github.com/spilloid/flyw8t/releases/download/v0.1.7/flyw8t-agent-v0.1.7-x86_64-pc-windows-msvc.exe">Download the Windows agent (.exe)</a><p>Runs on the PC you manage. It sends inventory and diagnostic results to your console over an outbound connection.</p></li>
+          <li><a href="https://github.com/spilloid/flyw8t/releases/download/v0.1.7/flyw8t-technician-v0.1.7-x86_64-pc-windows-msvc.exe">Download Flyw8t Technician (.exe)</a><p>Runs on the PC you work from. It opens a Windows session when you choose one in the console.</p></li>
         </ul>
         <figure class="screen trial-screen">
           <a href="screenshots/enrollment.png" tabindex="-1" aria-label="Open full-size enrollment screenshot"><img src="screenshots/enrollment.png" alt="Windows enrollment form with the agent download, checksums, token lifetime and device count." loading="lazy"></a>
-          <figcaption>Preview of <strong>Devices → Enroll a Windows device</strong>. In v0.1.6, open <strong>Organizations</strong>, choose your organization and select <strong>Create enrollment token</strong>. <a href="screenshots/enrollment.png" aria-label="View enrollment screenshot at full size">View full size</a></figcaption>
+          <figcaption>Open <strong>Devices → Enroll a Windows device</strong>, choose the organization that owns the PC and create a single-use enrollment token. <a href="screenshots/enrollment.png" aria-label="View enrollment screenshot at full size">View full size</a></figcaption>
         </figure>
       </div>
       <div>
         <h3>Verify your first device</h3>
         <ol class="trial">
-          <li>Follow the <a href="https://github.com/spilloid/flyw8t/blob/main/docs/beta-trial.md">beta installation guide</a> to verify both downloads, enroll the agent and start it. Open <strong>Devices</strong> and look for <strong>Connected · live</strong> beside your PC.</li>
+          <li>Save the agent and <strong>SHA256SUMS</strong> in the same folder. Follow the <a href="https://github.com/spilloid/flyw8t/blob/main/docs/beta-trial.md">beta installation guide</a> to copy the setup commands into PowerShell running as administrator, then paste the token when prompted. In <strong>Devices</strong>, look for <strong>Connected · live</strong> beside your PC.</li>
           <li>On the device page, run <strong>System information</strong> under <strong>Run a diagnostic</strong>. Open the job to see the result and the evidence the agent returned.</li>
           <li>Keep Flyw8t Technician in a permanent folder. Open it and choose <strong>Browser links → Enable for this Windows user</strong>. Back on your device page, choose <strong>Open in Flyw8t Technician → Help someone</strong>. Accept the browser prompt if shown and review the suggested computer in the app. You can stop here on one PC.</li>
         </ol>
@@ -177,7 +177,7 @@ footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; margin-left: auto; }
     </div>
     <nav class="trial-links" aria-label="Beta resources">
       <a href="https://github.com/spilloid/flyw8t/blob/main/README.md">Project README</a>
-      <a href="https://github.com/spilloid/flyw8t/releases/tag/v0.1.6">All v0.1.6 downloads &amp; SHA256SUMS</a>
+      <a href="https://github.com/spilloid/flyw8t/releases/tag/v0.1.7">All v0.1.7 downloads &amp; SHA256SUMS</a>
     </nav>
   </div>
 </section>
