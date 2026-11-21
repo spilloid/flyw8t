@@ -9,7 +9,12 @@ license = "MIT"
 [workspace]
 
 [features]
-owned-board = ["windows/Win32_System_RemoteDesktop"]
+owned-board = [
+  "windows/Win32_System_RemoteDesktop",
+  "windows/Win32_System_StationsAndDesktops",
+  "windows/Win32_System_Threading",
+  "windows/Win32_UI_Accessibility",
+]
 
 [[example]]
 name = "owned-control"

@@ -1,5 +1,6 @@
 //! The entire remote effect surface is this board. No remote event carries an HWND,
 //! OS keycode, window message, URL, path or executable action.
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
 pub const COLUMNS: u8 = 8;
@@ -26,6 +27,7 @@ enum Event {
 #[serde(deny_unknown_fields)]
 struct Packet {
     scope: String,
+    activation: String,
     seq: u32,
     event: Event,
 }
@@ -33,6 +35,8 @@ struct Packet {
 #[derive(Default, Serialize, PartialEq, Eq, Debug)]
 pub struct Board {
     pub phase: Phase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation: Option<String>,
     pub x: u8,
     pub y: u8,
     pub marked: Option<(u8, u8)>,
@@ -43,15 +47,24 @@ pub struct Board {
 }
 
 impl Board {
-    /// Only the native window's local Allow handler calls this.
+    /// Only the native window's local Allow handler activates this connection.
     pub fn allow(&mut self) {
         if self.phase == Phase::Waiting {
+            // The peer can first learn this value in the state sent after Allow.
+            // A packet prepared before consent cannot become valid while queued.
+            let mut bytes = [0u8; 32];
+            if SystemRandom::new().fill(&mut bytes).is_err() {
+                self.stop();
+                return;
+            }
+            self.activation = Some(hex::encode(bytes));
             self.phase = Phase::Active;
         }
     }
 
     pub fn stop(&mut self) {
         self.phase = Phase::Stopped;
+        self.activation = None;
         self.release();
     }
 
@@ -76,6 +89,9 @@ impl Board {
             return Err("oversized fixture input");
         }
         let p: Packet = serde_json::from_slice(bytes).map_err(|_| "invalid fixture input")?;
+        if self.activation.as_deref() != Some(p.activation.as_str()) {
+            return Err("wrong board activation");
+        }
         if p.scope != "owned_board" || self.seq.checked_add(1) != Some(p.seq) {
             return Err("wrong scope or sequence");
         }
@@ -128,58 +144,142 @@ impl Board {
 }
 
 #[cfg(test)]
+pub(super) fn test_packet(board: &Board, seq: u32, event: serde_json::Value) -> Vec<u8> {
+    // Use the wire representation available to a viewer, including the
+    // activation only when the endpoint published it.
+    let state = serde_json::to_value(board).unwrap();
+    let mut packet = serde_json::json!({"scope":"owned_board", "seq":seq, "event":event});
+    if let Some(activation) = state.get("activation") {
+        packet["activation"] = activation.clone();
+    }
+    serde_json::to_vec(&packet).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{json, Value};
 
-    fn packet(seq: u32, event: Value) -> Vec<u8> {
-        json!({"scope":"owned_board", "seq":seq, "event":event})
-            .to_string()
-            .into_bytes()
-    }
-
     #[test]
     fn only_local_allow_opens_control_and_stop_releases_everything_once() {
         let mut board = Board::default();
-        let click = packet(1, json!({"kind":"button","down":true,"x":7,"y":3}));
-        assert!(board.apply(&click).is_err());
+        let click = json!({"kind":"button","down":true,"x":7,"y":3});
+        assert!(board.apply(&test_packet(&board, 1, click.clone())).is_err());
         assert_eq!(board, Board::default());
         board.allow();
-        board.apply(&click).unwrap();
+        board.apply(&test_packet(&board, 1, click)).unwrap();
         board
-            .apply(&packet(2, json!({"kind":"key","key":"A","down":true})))
+            .apply(&test_packet(
+                &board,
+                2,
+                json!({"kind":"key","key":"A","down":true}),
+            ))
             .unwrap();
         assert_eq!(board.marked, Some((7, 3)));
         assert_eq!(board.text, "A");
         assert!(board.pressed && board.held_key == Some('A'));
+        let queued = test_packet(&board, 3, json!({"kind":"move","x":0,"y":0}));
         board.stop();
         board.stop();
         board.allow();
         assert!(!board.pressed && board.held_key.is_none());
-        assert!(board
-            .apply(&packet(3, json!({"kind":"move","x":0,"y":0})))
-            .is_err());
+        assert!(board.apply(&queued).is_err());
         assert_eq!(board.phase, Phase::Stopped);
         assert_eq!(board.seq, 2);
     }
 
     #[test]
-    fn malformed_replay_foreign_scope_and_outside_the_board_end_control() {
-        let wrong_scope = String::from_utf8(packet(1, json!({"kind":"move","x":0,"y":0})))
+    fn a_queued_preconsent_packet_and_a_previous_activation_cannot_authorize_input() {
+        let mut original = Board::default();
+        let event = json!({"kind":"key","key":"A","down":true});
+        let queued = test_packet(&original, 1, event.clone());
+        assert!(serde_json::to_value(&original)
             .unwrap()
-            .replace("owned_board", "view_screen")
-            .into_bytes();
-        for bytes in [
-            vec![b'x'; 257],
-            b"{}".to_vec(),
-            wrong_scope,
-            packet(2, json!({"kind":"move","x":0,"y":0})),
-            packet(1, json!({"kind":"move","x":8,"y":0})),
-            packet(1, json!({"kind":"move","x":0,"y":4})),
-            packet(1, json!({"kind":"move","x":1,"y":0,"hwnd":4})),
-            packet(1, json!({"kind":"allow"})),
-            packet(1, json!({"kind":"key","key":"Enter","down":true})),
+            .get("activation")
+            .is_none());
+        original.allow();
+        let live = test_packet(&original, 1, event);
+        assert!(live.len() <= 256);
+        let active: Value = serde_json::from_slice(&live).unwrap();
+        let activation = active["activation"].as_str().unwrap();
+        assert_eq!(activation.len(), 64);
+
+        // Even a valid event with the next sequence number must have been
+        // constructed after the participant's decision on this very board.
+        assert!(original.apply(&queued).is_err());
+        assert_eq!(original.phase, Phase::Stopped);
+        assert_eq!(original.seq, 0);
+        assert!(serde_json::to_value(&original)
+            .unwrap()
+            .get("activation")
+            .is_none());
+        let mut next = Board::default();
+        next.allow();
+        assert_ne!(next.activation.as_deref(), Some(activation));
+        assert_eq!(next.apply(&live), Err("wrong board activation"));
+        assert_eq!(next.seq, 0);
+        assert!(next.text.is_empty() && next.held_key.is_none());
+        assert_eq!(next.phase, Phase::Stopped);
+    }
+
+    #[test]
+    fn malformed_replay_foreign_scope_and_outside_the_board_end_control() {
+        for (scope, seq, event, expected) in [
+            (
+                "view_screen",
+                1,
+                json!({"kind":"move","x":0,"y":0}),
+                "wrong scope or sequence",
+            ),
+            (
+                "owned_board",
+                2,
+                json!({"kind":"move","x":0,"y":0}),
+                "wrong scope or sequence",
+            ),
+            (
+                "owned_board",
+                1,
+                json!({"kind":"move","x":8,"y":0}),
+                "outside the test board",
+            ),
+            (
+                "owned_board",
+                1,
+                json!({"kind":"move","x":0,"y":4}),
+                "outside the test board",
+            ),
+            (
+                "owned_board",
+                1,
+                json!({"kind":"move","x":1,"y":0,"hwnd":4}),
+                "invalid fixture input",
+            ),
+            (
+                "owned_board",
+                1,
+                json!({"kind":"allow"}),
+                "invalid fixture input",
+            ),
+            (
+                "owned_board",
+                1,
+                json!({"kind":"key","key":"Enter","down":true}),
+                "unsupported board key",
+            ),
         ] {
+            let mut b = Board::default();
+            b.allow();
+            let mut packet: Value = serde_json::from_slice(&test_packet(&b, seq, event)).unwrap();
+            packet["scope"] = json!(scope);
+            assert_eq!(
+                b.apply(&serde_json::to_vec(&packet).unwrap()),
+                Err(expected)
+            );
+            assert_eq!(b.phase, Phase::Stopped);
+            assert_eq!(b.seq, 0);
+        }
+        for bytes in [vec![b'x'; 257], b"{}".to_vec()] {
             let mut b = Board::default();
             b.allow();
             assert!(b.apply(&bytes).is_err());

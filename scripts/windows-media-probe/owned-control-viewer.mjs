@@ -4,19 +4,19 @@ const board = $('board');
 const positions = Array.from({length:32}, () => board.appendChild(document.createElement('span')));
 const hex = b => Array.from(new Uint8Array(b), x => x.toString(16).padStart(2,'0')).join('');
 const digest = t => crypto.subtle.digest('SHA-256',new TextEncoder().encode(t));
-let pc, channel, active = false, verified = false, closed = false, seq = 0, heldKey, dragging = false, lastCell = '';
+let pc, channel, activation, verified = false, closed = false, seq = 0, heldKey, dragging = false, lastCell = '';
 function end(detail) {
   if (closed) return;
   closed = true;
-  active = false;
+  activation = undefined;
   pc?.close();
   $('status').textContent = detail;
   window.closeBoard().catch(() => {});
 }
 function send(event) {
-  if (!active || !verified || closed || channel?.readyState !== 'open') return;
+  if (!activation || !verified || closed || channel?.readyState !== 'open') return;
   if (channel.bufferedAmount > 4096) { end('Session ended because input was delayed.'); return; }
-  try { channel.send(JSON.stringify({scope:'owned_board',seq:++seq,event})); }
+  try { channel.send(JSON.stringify({scope:'owned_board',activation,seq:++seq,event})); }
   catch { end('The session disconnected.'); }
 }
 function cell(e) {
@@ -27,13 +27,13 @@ function cell(e) {
 }
 board.onpointermove = e => {
   const p = cell(e);
-  if (!p || !active || lastCell === p.x+','+p.y) return;
+  if (!p || !activation || lastCell === p.x+','+p.y) return;
   lastCell = p.x+','+p.y;
   send({kind:'move',...p});
 };
 board.onpointerdown = e => {
   const p = cell(e);
-  if (!p || !active || dragging || !e.isPrimary || e.button !== 0) return;
+  if (!p || !activation || dragging || !e.isPrimary || e.button !== 0) return;
   board.focus();
   board.setPointerCapture(e.pointerId);
   dragging = true;
@@ -48,7 +48,7 @@ board.onpointerup = e => {
 };
 board.onpointercancel = () => { if (dragging) end('Pointer interrupted.'); };
 board.onkeydown = e => {
-  if (!active || e.ctrlKey || e.altKey || e.metaKey || !(e.key === 'Backspace' || /^[ -~]$/.test(e.key))) return;
+  if (!activation || e.ctrlKey || e.altKey || e.metaKey || !(e.key === 'Backspace' || /^[ -~]$/.test(e.key))) return;
   e.preventDefault();
   if (e.repeat || heldKey) return;
   heldKey = {code:e.code,key:e.key};
@@ -74,16 +74,23 @@ async function start() {
   };
   pc.ondatachannel = async ({channel:incoming}) => {
     try {
-      if (channel || incoming.label !== 'flyw8t.owned-board.v1' || !incoming.ordered ||
+      if (channel || incoming.label !== 'flyw8t.owned-board.v2' || !incoming.ordered ||
           incoming.maxRetransmits != null || incoming.maxPacketLifeTime != null) throw Error();
       channel = incoming;
       channel.onclose = () => end('Session ended.');
       channel.onerror = () => end('The control channel closed.');
       channel.onmessage = ({data}) => {
         if (closed) return;
-        const state = JSON.parse(data);
-        active = state.phase === 'active';
-        $('status').textContent = active ? 'You control the practice board.' : 'Waiting for the participant to click Allow.';
+        let state;
+        try { state = JSON.parse(data); } catch { end('Invalid board state.'); return; }
+        if (state?.phase === 'active' && typeof state.activation === 'string' &&
+            /^[a-f0-9]{64}$/.test(state.activation) && (!activation || activation === state.activation)) {
+          activation = state.activation;
+        } else if (state?.phase !== 'waiting' || activation || Object.hasOwn(state, 'activation')) {
+          end('Board authorization ended.');
+          return;
+        }
+        $('status').textContent = activation ? 'You control the practice board.' : 'Waiting for the participant to click Allow.';
         $('typed').textContent = state.text;
         positions.forEach((el,i) => {
           el.textContent = i === state.y*8+state.x ? '●' : '';
