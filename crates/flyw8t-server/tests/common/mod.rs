@@ -23,6 +23,33 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 pub const ADMIN_EMAIL: &str = "admin@example.test";
+
+/// A fresh profile on a hosted runner can take a while to open its debugging socket.
+pub async fn chrome_debug_port(
+    child: &mut tokio::process::Child,
+    profile: &std::path::Path,
+) -> u16 {
+    let file = profile.join("DevToolsActivePort");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(status) = child.try_wait().expect("check Chrome process") {
+                panic!("Chrome exited before opening its debugging socket: {status}");
+            }
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                if let Some(port) = text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.trim().parse().ok())
+                {
+                    return port;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("Chrome stayed running without a debugging port for 60 seconds")
+}
 pub const ADMIN_PASSWORD: &str = "correct-horse-battery";
 
 pub fn admin_url() -> String {

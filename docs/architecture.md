@@ -59,7 +59,7 @@ The founding brief suggested separate `storage` and `integrations` crates. They 
 
 | Boundary | Crossing | Control |
 |---|---|---|
-| Browser → server | HTTPS (TLS natively or at a proxy; plaintext only for a loopback public URL) | Session cookie (HttpOnly, SameSite=Strict, `__Host-` + Secure when HTTPS), per-session CSRF token on every POST, CSP `default-src 'none'`, no inline script. |
+| Browser → server | HTTPS (TLS natively or at a proxy; plaintext only for a loopback public URL) | Session cookie (HttpOnly, SameSite=Strict, `__Host-` + Secure when HTTPS), per-session CSRF token on every POST, CSP `default-src 'none'`, a hash authorizes the static clipboard helper on enrollment confirmation. |
 | Integration → server | HTTPS | Bearer `fw8_…` token: SHA-256 at rest, revocable, expiring, scopes that only narrow the owner's role. API accepts bearer tokens only, never cookies. |
 | Agent → server | WSS, outbound from the endpoint | Per-connection nonce signed by the device's Ed25519 key; 1 MiB message cap; every report checked against the device that owns the job. Tenancy comes from the enrollment token, never from the device. |
 | Server → agent | Same connection | The agent validates every action against its own compiled-in catalog and rejects anything else; there is no shell and no arbitrary command. |
@@ -100,7 +100,7 @@ Validated by `tests/ui_capture.rs` (STD-008): 16 pages × 3 widths × 2 color sc
 
 ## Attended support (implemented: browser screen view)
 
-`support.rs` pairs a technician's browser with a participant's browser through a 9-digit code or single-use link, records consent, and relays WebRTC signaling between exactly two sockets, and only after consent. Media flows browser to browser (DTLS-SRTP); the server never sees it. Sessions have their own state machine (`domain::support`) and append-only `support_events`. The support pages are the console's only pages with script (`/static/support.js`, same-origin, no inline script; [ADR-0010](decisions/ADR-0010-attended-support.md)). Details and the threat analysis: [attended-support.md](attended-support.md).
+`support.rs` pairs a technician's browser with a participant's browser through a 9-digit code or single-use link, records consent, and relays WebRTC signaling between exactly two sockets, and only after consent. Media flows browser to browser (DTLS-SRTP); the server never sees it. Sessions have their own state machine (`domain::support`) and append-only `support_events`. The support pages load `/static/support.js` from the same origin ([ADR-0010](decisions/ADR-0010-attended-support.md)). Details and the threat analysis: [attended-support.md](attended-support.md).
 
 ## Remote access (seam only)
 

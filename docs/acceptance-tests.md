@@ -82,6 +82,8 @@ Beyond the milestone:
 | AT-60 | The viewer waits for a displayable frame, retains early ICE candidates and reports the selected connection route. | `support.test.mjs` and `tests/support_browser.rs` |
 | AT-61 | An MCP screenshot requires its own participant grant and an authorized requester. Revocation takes effect before image release. | `tests/support/screenshot.rs`, MCP framing and API tests, two-browser screenshot checks |
 
+| AT-62 | Enroll a Windows PC from Devices. The setup commands verify the release, prompt separately for the token and start the service. The console shows its live connection. | Fleet view tests, `a_new_enrollment_token_comes_with_the_commands_to_run`, signed Windows trial rehearsal |
+
 ## Manual checks still owed
 
 - **AT-06 as a service:** on a Windows machine, as Administrator, run `flyw8t-agent enroll …` then `flyw8t-agent service install`. Confirm the service starts, survives a reboot, restarts after `taskkill /f`, and that `%ProgramData%\flyw8t\agent` is not readable by a standard user.

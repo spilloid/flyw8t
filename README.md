@@ -1,12 +1,12 @@
 # flyw8t
 
-**Lightweight agents. Heavyweight control.** *(pronounced "flyweight")*
+flyw8t (pronounced *flyweight*) is a self-hosted remote monitoring and management platform for MSPs. From one device page, a technician can see when a Windows PC last checked in, run a read-only diagnostic, or open a Windows desktop. Completed jobs show the evidence behind the result. If a device stops reporting mid-job, its outcome can stay unknown.
 
-flyw8t is a self-hosted remote monitoring and management (RMM) platform for MSP technicians, written in Rust. Its defining rule:
+**Version 0.1.7, pre-release.** Start in **Devices → Enroll a Windows device** on your console. The signed **agent** runs on the PC you manage. The signed **Technician** app opens from your device page on your Windows workstation. An end user can also share a screen with you in their browser. [Install and verify the Windows beta](docs/beta-trial.md) · [Product tour and screenshots](https://spilloid.github.io/flyw8t/)
 
-> An operation either succeeds **with evidence**, fails **with an explanation**, or explicitly reports that its outcome is **unknown**. Never pretend otherwise.
+[![The Devices page shows the connection status of Windows PCs in a synthetic trial organization.](site/screenshots/devices.png)](https://spilloid.github.io/flyw8t/)
 
-**Version 0.1.6, pre-release.** The Windows technician preview supports routed RDP sign-in, Windows session shadowing and launch from the web console. The attended browser viewer supports separately consented MCP screenshots. TOTP two-step verification, local passkey sign-in, sudo mode and optional [OIDC/SCIM directory integration](docs/directory-sso.md) are available. Production release gates include native remote control across networks, signed installation and update verification, and fleet recovery. See the [threat model](docs/threat-model.md#open-items-before-production) and [roadmap](docs/roadmap.md).
+You host the server and its PostgreSQL database. Administrators can enable directory sign-in alongside local accounts, two-step verification and passkeys. WAN interruption recovery and unattended physical-console access still need field verification. [Server deployment](docs/deployment.md) · [Directory integration](docs/directory-sso.md) · [Release gates](docs/threat-model.md#open-items-before-production)
 
 ## What works today
 
@@ -87,27 +87,12 @@ cargo test --workspace -- --include-ignored              # + PostgreSQL end-to-e
 
 The suite includes real agents running real Windows commands against a real server, deliberate crashes mid-job, a model-based test that drives the real journal and the real state machine through thousands of random sequences of lost, duplicated and reordered messages, and headless-Chrome checks of every page at three widths in light and dark. How each reliability claim is backed is in [docs/reliability.md](docs/reliability.md), and what the tests found is in [docs/dev-process.md](docs/dev-process.md).
 
-## Try it
-
-```sh
-# Server (PostgreSQL required)
-export FLYW8T_DATABASE_URL=postgres://flyw8t:secret@127.0.0.1:5432/flyw8t
-export FLYW8T_PUBLIC_URL=http://localhost:8080
-export FLYW8T_BOOTSTRAP_ADMIN_EMAIL=admin@example.com FLYW8T_BOOTSTRAP_ADMIN_PASSWORD='a-long-password'
-cargo run -p flyw8t-server
-# Sign in at http://localhost:8080 → Organizations → create one → Create enrollment token
-
-# Agent, on the same Windows machine (foreground)
-cargo run -p flyw8t-agent -- --state-dir .\agent-state enroll --server http://localhost:8080 --token fw8e_…
-cargo run -p flyw8t-agent -- --state-dir .\agent-state run
-```
-
-Docker Compose and production notes (TLS, backups, Windows service): [docs/deployment.md](docs/deployment.md).
-
 ## Documentation
 
 | | |
 |---|---|
+| [Windows beta trial](docs/beta-trial.md) | Enroll one PC, verify a diagnostic, open its desktop and remove the trial |
+| [Deployment](docs/deployment.md) | Docker Compose, HTTPS, Windows services and backups |
 | [Architecture](docs/architecture.md) | Components, trust boundaries, what one instance can and cannot do |
 | [Job lifecycle](docs/job-lifecycle.md) | The state machine and every failure behavior |
 | [Agent protocol](docs/agent-protocol.md) | Wire format, authentication, delivery guarantees |

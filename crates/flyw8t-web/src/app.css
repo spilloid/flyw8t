@@ -175,6 +175,10 @@ ol.timeline li { padding: 0.35rem 0 0.35rem 0.9rem; position: relative; overflow
 ol.timeline li::before { content: ""; position: absolute; left: -6px; top: 0.85rem; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
 ol.timeline time { color: var(--muted); font-size: 0.82rem; }
 .reveal { border-color: var(--unk-fg); }
+.release-downloads, .copy-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; }
+.enrollment-token { display: block; width: 100%; }
+.copy-controls { margin: .4rem 0; }
+.reveal textarea:focus-visible, .setup-card > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 @media (max-width: 680px) {
   .top { gap: 0.5rem; }
@@ -267,9 +271,9 @@ meter:-moz-meter-sub-sub-optimum::-moz-meter-bar { background: var(--bad-fg); }
 .stat meter { max-width: none; }
 
 ol.setup { margin: 0; padding: 0; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 0.9rem; }
-ol.setup li { counter-increment: step; position: relative; padding-left: 2.4rem; min-height: 1.6rem; }
-ol.setup li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 1.6rem; height: 1.6rem; border-radius: 50%; background: var(--busy-bg); color: var(--busy-fg); font-weight: 700; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; }
-ol.setup li.done::before { content: "\2713"; background: var(--good-bg); color: var(--good-fg); }
+ol.setup > li { counter-increment: step; position: relative; padding-left: 2.4rem; min-height: 1.6rem; }
+ol.setup > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 1.6rem; height: 1.6rem; border-radius: 50%; background: var(--busy-bg); color: var(--busy-fg); font-weight: 700; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; }
+ol.setup > li.done::before { content: "\2713"; background: var(--good-bg); color: var(--good-fg); }
 ol.setup p { margin: 0.1rem 0 0; }
 ul.reasons { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 0.3rem; }
 ul.bars { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: minmax(0, max-content) minmax(4rem, 1fr) max-content; gap: 0.3rem 0.7rem; align-items: center; }

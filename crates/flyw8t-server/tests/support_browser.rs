@@ -240,6 +240,11 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
     }
     let mut child = chrome
         .arg("--headless=new")
+        .args([
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+        ])
         .arg("--remote-debugging-port=0")
         .arg(format!("--user-data-dir={}", profile.path().display()))
         .arg("--use-fake-ui-for-media-stream")
@@ -251,17 +256,8 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let mut port = None;
-    for _ in 0..100 {
-        if let Ok(t) = std::fs::read_to_string(profile.path().join("DevToolsActivePort")) {
-            port = t.lines().next().and_then(|l| l.trim().parse::<u16>().ok());
-            if port.is_some() {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let version = http_json(port.expect("DevTools port"), "/json/version").await;
+    let port = chrome_debug_port(&mut child, profile.path()).await;
+    let version = http_json(port, "/json/version").await;
     let (ws, _) =
         tokio_tungstenite::connect_async(version["webSocketDebuggerUrl"].as_str().unwrap())
             .await

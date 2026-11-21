@@ -103,6 +103,8 @@ fn device_page_opens_only_the_explicit_desktop_modes() {
         }
         assert_eq!(html.matches("flyw8t://").count(), modes.len());
         assert!(html.contains("Enable for this Windows user"));
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(html.contains(&format!("https://github.com/spilloid/flyw8t/releases/download/v{version}/flyw8t-technician-v{version}-x86_64-pc-windows-msvc.exe")));
     }
     for host in [
         "",
@@ -318,8 +320,16 @@ fn the_first_run_steps_show_only_until_a_device_exists_and_only_what_the_person_
     assert!(html.contains("Enroll your first device"));
     assert!(html.contains("href=\"/organizations\""));
     let html = overview_page(&ctx(), overview(0, vec![org.clone()]));
-    assert!(html.contains(&format!("href=\"/organizations/{}\"", org.id)));
+    assert!(html.contains(&format!("href=\"/organizations/{}#enroll-device\"", org.id)));
     assert!(html.contains("class=\"done\""));
+    let second = OrgRef {
+        id: Uuid::from_u128(6),
+        name: "Second".into(),
+    };
+    let multi = overview_page(&ctx(), overview(0, vec![org.clone(), second.clone()]));
+    for visible in [&org, &second] {
+        assert!(multi.contains(&format!("/organizations/{}#enroll-device", visible.id)));
+    }
     // Someone who cannot enroll is not told to.
     let mut readonly = ctx();
     readonly.can_enroll = false;
@@ -335,7 +345,46 @@ fn the_first_run_steps_show_only_until_a_device_exists_and_only_what_the_person_
 }
 
 #[test]
-fn enrollment_commands_are_shown_as_text() {
+fn devices_offer_enrollment_in_visible_organizations() {
+    let one = OrgRef {
+        id: Uuid::from_u128(1),
+        name: "First".into(),
+    };
+    let two = OrgRef {
+        id: Uuid::from_u128(2),
+        name: "Second".into(),
+    };
+    let render = |context: &PageCtx, orgs, selected| {
+        devices_page(
+            context,
+            vec![],
+            DeviceFilter {
+                organization: selected,
+                ..Default::default()
+            },
+            orgs,
+            vec![],
+        )
+    };
+    let link = |id| format!("/organizations/{id}#enroll-device");
+    let single = render(&ctx(), vec![one.clone()], None);
+    assert!(single.contains(&link(one.id)));
+    assert!(single.contains("Enroll a Windows device"));
+    let orgs = vec![one.clone(), two.clone()];
+    let foreign = Uuid::from_u128(3);
+    let all = render(&ctx(), orgs.clone(), Some(foreign));
+    assert!(all.contains(&link(one.id)) && all.contains(&link(two.id)));
+    assert!(!all.contains(&link(foreign)));
+    let filtered = render(&ctx(), orgs.clone(), Some(two.id));
+    assert!(filtered.contains(&link(two.id)) && !filtered.contains(&link(one.id)));
+    assert!(render(&ctx(), vec![], None).contains("Create an organization to enroll a device"));
+    let mut reader = ctx();
+    reader.can_enroll = false;
+    assert!(!render(&reader, orgs, None).contains("Enroll a Windows device"));
+}
+
+#[test]
+fn enrollment_downloads_are_pinned_and_setup_commands_are_separate_from_the_token() {
     let org = OrgSummary {
         id: Uuid::from_u128(5),
         name: "Org".into(),
@@ -347,12 +396,24 @@ fn enrollment_commands_are_shown_as_text() {
         label: "Enrollment token".into(),
         secret: "fw8e_abc".into(),
         hint: "hint".into(),
-        commands: Some(".\\flyw8t-agent.exe enroll --server https://x/<b> --token fw8e_abc".into()),
+        commands: Some("Write-Output 'before </textarea><b> after'".into()),
     };
+    let version = env!("CARGO_PKG_VERSION");
+    let release = format!("https://github.com/spilloid/flyw8t/releases/download/v{version}/");
+    let normal = organization_page(&ctx(), org.clone(), vec![], None, vec![]);
+    assert!(normal.contains(&format!(
+        "{release}flyw8t-agent-v{version}-x86_64-pc-windows-msvc.exe"
+    )));
+    assert!(normal.contains(&format!("{release}SHA256SUMS")));
+    assert!(!normal.contains("<script"));
     let html = organization_page(&ctx(), org, vec![], Some(revealed), vec![]);
-    assert!(
-        html.contains("--server https://x/&lt;b&gt; --token fw8e_abc"),
-        "{html}"
-    );
-    assert!(!html.contains("<b> --token"));
+    assert!(html.contains("Write-Output 'before &lt;/textarea>&lt;b> after'"));
+    assert!(!html.contains("</textarea><b>"));
+    assert!(html.contains(r#"value="fw8e_abc""#));
+    assert_eq!(html.matches("fw8e_abc").count(), 1);
+    assert!(html.contains(&format!(
+        "<script>{}</script>",
+        flyw8t_web::ENROLLMENT_COPY_JS
+    )));
+    assert!(html.contains("Copy token") && html.contains("Copy setup commands"));
 }

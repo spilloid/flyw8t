@@ -19,6 +19,9 @@ pub use pages::*;
 /// Stylesheet served at `/static/app.css`.
 pub const STYLESHEET: &str = include_str!("app.css");
 
+/// Inline script authorized by its CSP hash only on the one-time enrollment confirmation.
+pub const ENROLLMENT_COPY_JS: &str = include_str!("enrollment_copy.js");
+
 /// Script for the attended-support pages only (ADR-0010), served at `/static/support.js`.
 pub const SUPPORT_JS: &str = concat!(
     "(() => {\n",

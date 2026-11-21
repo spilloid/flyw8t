@@ -34,6 +34,11 @@ It downloads the signing job's four executables, verifies them, starts the candi
 console on loopback and exercises the links in a new Chrome profile. Use the same
 sequence for a hands-on check or to investigate a failed automatic run.
 
+The same signing rehearsal enrolls its disposable Windows runner in a loopback
+console using the signed agent and the commands copied from the enrollment form.
+It checks the Windows service status and the device's live row, then uninstalls
+that service. No operator or customer endpoint is part of the rehearsal.
+
 1. Sign in with a clean Windows user account. Place the signed technician executable in the directory where it will stay. Launch it and select **Browser links → Enable for this Windows user**. Close the app.
 2. Sign in to the candidate web console and open a Windows device. Under **Open in Flyw8t Technician**, try **Help someone**, **Unattended console**, and **Windows sign-in**. Accept the browser's external-app prompt if shown. For each link, confirm that the app shows the intended computer and mode and waits for a click on **Find sessions**, **Check console**, or **Connect**. Close the app between checks.
 3. Remove the registration from **Browser links**, close the app, and repeat the browser launch. Confirm that Windows no longer opens that copy of the technician app. Record the candidate SHA, Windows and browser versions, and result.

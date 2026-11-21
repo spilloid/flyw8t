@@ -2,6 +2,18 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## 0.1.7 — 2026-11-20 (pre-release)
+
+- Start a Windows beta installation from **Devices → Enroll a Windows device**.
+  The organization page offers the matching Windows agent and checksum file.
+  Copy the setup commands, run them locally as an administrator and paste the
+  enrollment token at the prompt. Setup checks the file hash, timestamped
+  publisher signature and version before enrolling the PC and starting its service.
+- Find the technician download on a Windows device page. The trial guide
+  walks through a live check-in, a diagnostic with evidence and opening
+  the Windows session chooser. The product site shows the actual console with
+  synthetic devices.
+
 ## 0.1.6 — 2026-11-20 (pre-release)
 
 - Open Flyw8t Technician from an authorized Windows device page. Select an

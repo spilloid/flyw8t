@@ -64,7 +64,9 @@ jobs:
           $files = Get-ChildItem dist -File
           if (Compare-Object $expected $files.Name) { throw 'Unexpected signed artifact contents.' }
           ./scripts/verify-signature.ps1 -Files $files.FullName -ExpectedSubject 'CN=Joseph Spillers'
-      - name: Exercise the first-use prompt, all three session modes and removal
+      - name: Verify signed agent enrollment and the Windows browser handoff
         uses: ./.github/actions/check-browser-handoff
+        env:
+          FLYW8T_TEST_SIGNED_TRIAL_INSTALL: '1'
         with:
           binaries: dist
