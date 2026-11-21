@@ -196,6 +196,19 @@ CI follow-up: all five jobs passed on implementation ref **a48f7e6**, [run 43171
 - **The attended-support code (`support.rs`, `support.js`) has had no cross-family review.** It must have one before anyone relies on it.
 - TLA+ (`docs/spec/JobDelivery.tla`) is written but **not model-checked**: running the downloaded Java runtime was not permitted in this session.
 
+## Independent review of native streaming, 2026-11-21
+
+The operator requested an independent adversarial review. A separate Codex Astra reviewer examined draft #54 at `71e9d26`, fixture #55 at `3b010a6` and main at `8c70374`. This was a same-family review with a separate media reader. The reviewers inspected source. The implementer ran the Windows and browser tests.
+
+| Finding | Disposition |
+|---|---|
+| Policy signing, anti-rollback and independent per-session authority were unspecified. Full sessions can exist without demonstrated MFA. | Accepted as release blockers. ADR-0019 now states the binding and denial requirements. Endpoint enforcement, key provisioning/rotation and deployed MFA proof remain open. |
+| A WGC window or monitor does not confine keyboard input. Local revocation and held-input cleanup are unimplemented. | Accepted. Narrow grants stay view-only, while desktop-wide control requires its own authority. Physical Stop, in-flight work, locally held keys, crash and session replacement need real negative tests. |
+| A list of known luma bands did not count every presented frame. Successful exit alone did not bound revocation. | Accepted. The fixture now checks presentation callbacks and receiver/decode counters, a two-second process-stop limit and stability after a defined drain. These observations are specific to a test process on loopback. |
+| CI environment metadata, trigger coverage and release scope needed reconciliation. | Accepted. The fixture reports browser/OS and records toolchain information. ADR-0019 and the roadmap distinguish Windows 0.10.0, macOS 0.11.0 and the 1.0 obligations. |
+
+The review allowed a proposed ADR and isolated experiments. It did not authorize production unattended access. Evidence and remaining release gates are tracked in [issue #57](https://github.com/spilloid/flyw8t/issues/57).
+
 ## Standing rules (STD-001)
 
 - A finding can be right about the problem and wrong about the fix: adjudicate, then choose the fix.
