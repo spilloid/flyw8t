@@ -2,8 +2,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { release } from 'node:os';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 
 assert.equal(process.argv.length, 3, 'usage: node loopback.mjs <probe executable>');
@@ -12,6 +14,15 @@ const browser = await chromium.launch({
   headless: true,
   args: ['--allow-loopback-in-peer-connection', '--autoplay-policy=no-user-gesture-required'],
 });
+console.log('Windows', release(), 'Edge', browser.version(), 'Node', process.version);
+
+async function counts(page) {
+  return page.evaluate(async () => {
+    const inbound = [...(await window.fixturePeer.getStats()).values()].find(s => s.type === 'inbound-rtp' && s.kind === 'video');
+    return { presented: window.presented, received: inbound?.framesReceived ?? 0, decoded: inbound?.framesDecoded ?? 0 };
+  });
+}
+
 async function run(mismatch) {
   const source = spawn(resolve(process.argv[2]), ['--loopback'], {
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, timeout: 30_000,
@@ -51,9 +62,11 @@ async function run(mismatch) {
       canvas.width = canvas.height = 1;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       window.fixtureBands = [];
+      window.presented = 0;
       peer.ontrack = e => {
         video.srcObject = new MediaStream([e.track]);
         function frame() {
+          window.presented++;
           ctx.drawImage(video, 0, 0, 1, 1);
           const level = ctx.getImageData(0, 0, 1, 1).data[0];
           const band = level <= 50 ? 'dark' : level >= 190 ? 'light' : null;
@@ -73,8 +86,9 @@ async function run(mismatch) {
       const [status] = await done;
       assert.equal(status, 1, diagnostics);
       assert.match(diagnostics, /actual DTLS peer does not match/);
-      assert.equal(await page.evaluate(() => window.fixtureBands.length), 0);
-      console.log('Mismatched certificate rejected before a frame was presented.');
+      await delay(500);
+      assert.deepEqual(await counts(page), { presented: 0, received: 0, decoded: 0 });
+      console.log('Mismatched certificate rejected; no received, decoded or presented frames at drain check.');
       return;
     }
     await page.waitForFunction(() => window.fixtureBands.length >= 4, { }, { timeout: 18_000 });
@@ -89,9 +103,17 @@ async function run(mismatch) {
     assert.deepEqual(result.bands.slice(0, 4), ['dark', 'light', 'dark', 'light']);
     console.log('Native H.264 over loopback WebRTC:', result);
     // Revoking the private fixture pipe must stop the native sender before its frame budget.
+    const stopAt = performance.now();
     source.stdin.end();
     const [status] = await done;
     assert.equal(status, 0, 'native sender did not finish cleanly');
+    const stopMs = performance.now() - stopAt;
+    assert.ok(stopMs < 2000, 'fixture took ' + stopMs + ' ms to stop');
+    await delay(500);
+    const afterDrain = await counts(page);
+    await delay(500);
+    assert.deepEqual(await counts(page), afterDrain);
+    console.log('Fixture stopped in', Math.ceil(stopMs), 'ms; receiver counters stable after drain:', afterDrain);
   } finally {
     if (source.exitCode === null) source.kill();
     await page.close();

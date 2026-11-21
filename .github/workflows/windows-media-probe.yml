@@ -6,6 +6,8 @@ on:
     paths:
       - 'scripts/windows-media-probe/**'
       - '.github/workflows/windows-media-probe.yml'
+      - '.cargo/config.toml'
+      - 'rust-toolchain.toml'
 
 permissions:
   contents: read
@@ -23,6 +25,7 @@ jobs:
         with:
           node-version: 22
       - run: cargo fmt --check
+      - run: rustc -Vv
       - run: cargo clippy --locked -- -D warnings
       - run: cargo build --locked
       - run: npm ci --ignore-scripts
