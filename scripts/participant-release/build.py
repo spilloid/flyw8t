@@ -159,7 +159,7 @@ def main():
                         "-File", str(ROOT / "scripts/verify-signature.ps1"), "-Files", str(sender)], check=True)
         # A different signed Flyw8t binary or a sender built without the picker
         # must not pass. EOF refuses the session before any capture can start.
-        probe = subprocess.run([str(sender), "--selected-window-console-relay"], input=b"",
+        probe = subprocess.run([str(sender), "--selected-window-attended-relay"], input=b"",
                                capture_output=True, timeout=30, cwd=folder)
         if probe.returncode == 0 or b"invalid fixture identity message" not in probe.stderr:
             raise ValueError("Signed binary did not handle the picker-enabled sender protocol.")

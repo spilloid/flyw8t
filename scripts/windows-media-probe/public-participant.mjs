@@ -1,5 +1,5 @@
 import { accessSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { supportOrigin } from './public-connection.mjs';
 import { secureParticipantCookie } from './participant-transport.mjs';
@@ -17,6 +17,12 @@ if (typeof transport.WebSocket !== 'function' || typeof transport.fetch !== 'fun
     supportOrigin('https://localhost/') !== 'https://localhost') throw Error('The participant package is incomplete.');
 
 if (args.length === 1 && args[0] === '--check') {
+  const check = spawnSync(binary, ['--selected-window-attended-relay'], {
+    input:'', encoding:'utf8', timeout:10000, windowsHide:true, maxBuffer:8192,
+  });
+  if (check.status !== 1 || !check.stderr?.includes('invalid fixture identity message')) {
+    throw Error('The installed Windows sender did not reject a missing session identity.');
+  }
   console.log('Windows participant package ready.');
 } else if (args.length || process.platform !== 'win32') {
   throw Error('Run the Windows participant from its extracted folder.');
