@@ -4,7 +4,7 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## Unreleased
 
-- Connect an attended screenshot client from Administration with a dedicated scoped token. Directory administrators can confirm this action through fresh organization sign-in. First-passkey setup links directly to reauthentication.
+- Connect an attended screenshot client from Administration with a dedicated scoped token. Directory administrators can confirm this action through a fresh organization sign-in, including provider TOTP. Tokens issued this way expire within 30 days. First-passkey setup links directly to reauthentication.
 - The MCP adapter accepts `--server`, `--token-file`, and `--ca-cert` alongside the existing environment settings. Run `flyw8t-mcp --help` for the corresponding names.
 
 ## 0.1.7 — 2026-11-20 (pre-release)

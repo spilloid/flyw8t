@@ -1332,6 +1332,7 @@ pub async fn create_api_token(
         if sso_screenshot && !crate::passkeys::recent_provider(&mut *tx, &p).await? {
             return to("/login/oidc?resume=mcp");
         }
+        let days = if sso_screenshot { days.min(30) } else { days };
         let (tid,): (Uuid,) = sqlx::query_as(
             "INSERT INTO api_tokens (user_id, name, prefix, token_hash, scopes, expires_at)
              VALUES ($1, $2, $3, $4, $5, now() + make_interval(days => $6)) RETURNING id",
