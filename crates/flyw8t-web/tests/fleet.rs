@@ -92,7 +92,7 @@ fn device_page_opens_only_the_explicit_desktop_modes() {
         sites: Vec::new(),
         fields: Vec::new(),
     };
-    let modes = ["assist", "console", "sign-in"];
+    let modes = ["assist", "console", "sign-in", "terminal"];
     // A friendly name is not the network address; agent presence is independent of RDP reachability.
     d.row.display_name = Some("Operator's workstation".into());
     for host in ["WS-01", "ws-01.lab.example.", "192.0.2.8"] {

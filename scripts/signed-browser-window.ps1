@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^handoff-[a-f0-9]{32}\.invalid$')][string]$ExpectedComputer,
     [int]$ChromeProcessId,
     [string]$Origin,
-    [ValidateSet('assist','console','sign-in')][string]$Mode
+    [ValidateSet('assist','console','sign-in','terminal')][string]$Mode
 )
 
 $ErrorActionPreference = 'Stop'
@@ -164,7 +164,7 @@ try {
 }
 $window = [IntPtr]::Zero
 try {
-    $expected = @{ 'assist' = @(0,'Find sessions'); 'console' = @(3,'Check console'); 'sign-in' = @(2,'Connect') }[$Mode]
+    $expected = @{ 'assist' = @(0,'Find sessions'); 'console' = @(3,'Check console'); 'sign-in' = @(2,'Connect'); 'terminal' = @(4,'Open terminal') }[$Mode]
     $window = Wait-For { $w = [TechnicianSmoke]::Window($app.Id); if ($w -ne [IntPtr]::Zero) { $w } } 'Missing technician chooser.'
     Wait-For {
         [TechnicianSmoke]::Label($window,102) -ceq $ExpectedComputer -and

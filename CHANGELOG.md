@@ -2,6 +2,10 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## Unreleased
+
+- Open an interactive SSH terminal from a Windows device page in Flyw8t Technician. The operator can sign in to an SSH-enabled host without taking over its desktop.
+
 ## 0.1.7 — 2026-11-20 (pre-release)
 
 - Start a Windows beta installation from **Devices → Enroll a Windows device**.

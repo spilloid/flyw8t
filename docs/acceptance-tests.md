@@ -83,6 +83,7 @@ Beyond the milestone:
 | AT-61 | An MCP screenshot requires its own participant grant and an authorized requester. Revocation takes effect before image release. | `tests/support/screenshot.rs`, MCP framing and API tests, two-browser screenshot checks |
 
 | AT-62 | Enroll a Windows PC from Devices. The setup commands verify the release, prompt separately for the token and start the service. The console shows its live connection. | Fleet view tests, `a_new_enrollment_token_comes_with_the_commands_to_run`, signed Windows trial rehearsal |
+| AT-64 | A technician can open a separate interactive SSH terminal for a host. The browser link prefills the target and waits for the operator. | Fleet rendering, native chooser and argument tests, signed browser handoff |
 
 ## Manual checks still owed
 
