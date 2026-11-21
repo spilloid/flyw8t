@@ -2,7 +2,10 @@
 //! nothing a device reports can become markup.
 
 use flyw8t_web::model::*;
-use flyw8t_web::{device_page, devices_page, organization_page, overview_page};
+use flyw8t_web::{
+    device_page, devices_page, organization_page, overview_page, physical_console_result,
+    PhysicalConsoleCheck,
+};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -76,11 +79,9 @@ fn connected() -> Connection {
     }
 }
 
-#[test]
-fn device_page_opens_only_the_explicit_desktop_modes() {
-    let context = ctx();
-    let mut d = DeviceDetail {
-        row: device(seen(Duration::hours(1)), None),
+fn windows_device(connection: Connection) -> DeviceDetail {
+    DeviceDetail {
+        row: device(connection, None),
         os_family: "windows".into(),
         enrolled_at: now(),
         inventory: None,
@@ -91,7 +92,75 @@ fn device_page_opens_only_the_explicit_desktop_modes() {
         site_id: None,
         sites: Vec::new(),
         fields: Vec::new(),
-    };
+    }
+}
+
+#[test]
+fn physical_console_check_requires_a_connected_windows_device_and_support_permission() {
+    let mut context = ctx();
+    let mut d = windows_device(connected());
+    let path = format!("/devices/{}/physical-console/check", d.row.id);
+    context.can_control = false;
+    context.can_run = false;
+    let html = device_page(&context, d.clone());
+    let form = html
+        .split_once(&format!(r#"<form method="post" action="{path}">"#))
+        .unwrap()
+        .1
+        .split_once("</form>")
+        .unwrap()
+        .0;
+    assert!(form.contains(r#"name="csrf" value="csrf""#));
+    assert!(form.contains("Check physical console"));
+    context.can_support = false;
+    assert!(!device_page(&context, d.clone()).contains(&path));
+    context.can_support = true;
+    for connection in [seen(Duration::hours(1)), Connection::NeverConnected] {
+        d.row.connection = connection;
+        assert!(!device_page(&context, d.clone()).contains(&path));
+    }
+    d.row.connection = connected();
+    d.row.retired = true;
+    assert!(!device_page(&context, d.clone()).contains(&path));
+    d.row.retired = false;
+    d.os_family = "linux".into();
+    assert!(!device_page(&context, d).contains(&path));
+}
+
+#[test]
+fn physical_console_result_distinguishes_observations_from_agent_delivery_failures() {
+    use PhysicalConsoleCheck::*;
+    let context = ctx();
+    let id = Uuid::from_u128(7);
+    for (status, message) in [
+        (
+            Active,
+            "A user is signed in at the Windows physical console.",
+        ),
+        (NoActiveLogin, "no active login at the physical console"),
+        (NoConsole, "no attached physical console"),
+        (Unknown, "could not determine the physical console state"),
+        (Unsupported, "requires an updated Windows agent"),
+        (Offline, "no live connection to the agent"),
+        (Busy, "agent connection is busy"),
+        (TimedOut, "timed out waiting for the agent"),
+    ] {
+        let page = physical_console_result(&context, id, "<img src=x>", status);
+        assert!(page.contains(message), "{status:?}");
+        assert!(page.contains(&format!(r#"href="/devices/{id}""#)));
+        assert!(!page.contains("<img src=x>"));
+        assert!(!page.contains("flyw8t://"));
+        assert_eq!(
+            page.contains("Lock state and input access are unknown"),
+            status == Active
+        );
+    }
+}
+
+#[test]
+fn device_page_opens_only_the_explicit_desktop_modes() {
+    let context = ctx();
+    let mut d = windows_device(seen(Duration::hours(1)));
     let modes = ["assist", "console", "sign-in"];
     // A friendly name is not the network address; agent presence is independent of RDP reachability.
     d.row.display_name = Some("Operator's workstation".into());

@@ -2,6 +2,14 @@
 
 The agent makes one outbound WebSocket connection to `wss://<server>/api/agent/ws` (plain `ws://` only to loopback). Every message is one JSON text frame tagged by `"type"`. The types live in `crates/flyw8t-protocol`; unknown message types and unknown actions fail to deserialize and end the connection.
 
+## Windows physical console
+
+A technician with support permission can open a connected Windows device in the console and select **Check physical console**. The server checks the device's organization, credential and the technician's active browser session, records the request in Audit, and sends it over that device's existing authenticated WebSocket.
+
+Windows agents advertise the optional `physical_console_check` boolean in `authenticate`. An omitted field means the agent cannot handle the request. Older servers ignore the field. The server sends `check_physical_console` only after this connection has advertised it. The agent answers `physical_console_status` with the same server-generated `request_id` and one of `active_console`, `no_interactive_user`, `no_console` or `unavailable`. A result or delivery failure is audited under that request ID. The server discards late replies or replies from another connection. Requests expire after five seconds and never follow a device across a reconnect.
+
+A signed-in physical console can be locked. This observation contains no account name or Windows session ID. Starting a stream and authorizing input require the remote desktop session policy and separate grants.
+
 ## Limits
 
 | Limit | Value | Enforced by |

@@ -4,12 +4,14 @@
 //! a restart forgets every connection (agents reconnect), and the database's `last_seen_at`
 //! is shown as history, never as liveness.
 
-use flyw8t_protocol::ServerMsg;
+use flyw8t_protocol::{PhysicalConsoleState, ServerMsg};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 use time::OffsetDateTime;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -22,11 +24,60 @@ pub struct Conn {
     pub since: OffsetDateTime,
     pub tx: mpsc::Sender<ServerMsg>,
     pub close: CancellationToken,
+    pub physical_console_check: bool,
 }
 
 #[derive(Default)]
 pub struct Registry {
-    conns: Mutex<HashMap<Uuid, Conn>>,
+    live: Mutex<Live>,
+}
+
+#[derive(Default)]
+struct Live {
+    conns: HashMap<Uuid, Conn>,
+    /// At most one check per device, also bounded across this server instance.
+    checks: HashMap<Uuid, PendingCheck>,
+}
+
+const MAX_CONSOLE_CHECKS: usize = 32;
+const CONSOLE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct PendingCheck {
+    conn_id: Uuid,
+    request_id: Uuid,
+    deadline: Instant,
+    reply: Option<oneshot::Sender<PhysicalConsoleState>>,
+}
+
+/// Removing the waiter also covers cancellation of the requesting HTTP handler.
+struct CheckGuard<'a> {
+    registry: &'a Registry,
+    device_id: Uuid,
+    conn_id: Uuid,
+    request_id: Uuid,
+}
+
+impl Drop for CheckGuard<'_> {
+    fn drop(&mut self) {
+        let mut live = self.registry.live.lock().unwrap();
+        if live.checks.get(&self.device_id).is_some_and(|check| {
+            check.conn_id == self.conn_id && check.request_id == self.request_id
+        }) {
+            live.checks.remove(&self.device_id);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ConsoleCheckError {
+    #[error("the agent is disconnected")]
+    NotConnected,
+    #[error("the connected agent does not support a physical console check")]
+    Unsupported,
+    #[error("the agent or server is busy")]
+    Busy,
+    #[error("the agent did not answer in time")]
+    Timeout,
 }
 
 impl Registry {
@@ -40,11 +91,16 @@ impl Registry {
     /// Returns `false`, registering nothing, if a newer connection is already registered:
     /// the newest authentication always wins, whatever order the registrations arrive in.
     pub fn register(&self, device_id: Uuid, conn: Conn) -> bool {
-        let mut conns = self.conns.lock().unwrap();
-        if conns.get(&device_id).is_some_and(|cur| cur.seq > conn.seq) {
+        let mut live = self.live.lock().unwrap();
+        if live
+            .conns
+            .get(&device_id)
+            .is_some_and(|cur| cur.seq > conn.seq)
+        {
             return false;
         }
-        if let Some(old) = conns.insert(device_id, conn) {
+        if let Some(old) = live.conns.insert(device_id, conn) {
+            live.checks.remove(&device_id);
             old.close.cancel();
         }
         true
@@ -52,25 +108,36 @@ impl Registry {
 
     /// Remove the device's entry only if it is still this connection.
     pub fn unregister(&self, device_id: Uuid, conn_id: Uuid) {
-        let mut conns = self.conns.lock().unwrap();
-        if conns.get(&device_id).is_some_and(|c| c.conn_id == conn_id) {
-            conns.remove(&device_id);
+        let mut live = self.live.lock().unwrap();
+        if live
+            .conns
+            .get(&device_id)
+            .is_some_and(|c| c.conn_id == conn_id)
+        {
+            live.conns.remove(&device_id);
+            live.checks.remove(&device_id);
         }
     }
 
     pub fn connected_since(&self, device_id: Uuid) -> Option<OffsetDateTime> {
-        self.conns.lock().unwrap().get(&device_id).map(|c| c.since)
+        self.live
+            .lock()
+            .unwrap()
+            .conns
+            .get(&device_id)
+            .map(|c| c.since)
     }
 
     pub fn connected_devices(&self) -> Vec<Uuid> {
-        self.conns.lock().unwrap().keys().copied().collect()
+        self.live.lock().unwrap().conns.keys().copied().collect()
     }
 
     /// The id of the device's current connection, if any.
     pub fn current_conn(&self, device_id: Uuid) -> Option<Uuid> {
-        self.conns
+        self.live
             .lock()
             .unwrap()
+            .conns
             .get(&device_id)
             .map(|c| c.conn_id)
     }
@@ -79,9 +146,10 @@ impl Registry {
     /// outbound buffer is full; the caller must treat the message as not sent.
     pub fn send(&self, device_id: Uuid, msg: ServerMsg) -> bool {
         let tx = self
-            .conns
+            .live
             .lock()
             .unwrap()
+            .conns
             .get(&device_id)
             .map(|c| c.tx.clone());
         tx.is_some_and(|tx| tx.try_send(msg).is_ok())
@@ -91,9 +159,10 @@ impl Registry {
     /// reconnected, nothing is sent and the caller must treat the message as not sent.
     pub fn send_on(&self, device_id: Uuid, conn_id: Uuid, msg: ServerMsg) -> bool {
         let tx = self
-            .conns
+            .live
             .lock()
             .unwrap()
+            .conns
             .get(&device_id)
             .filter(|c| c.conn_id == conn_id)
             .map(|c| c.tx.clone());
@@ -102,9 +171,105 @@ impl Registry {
 
     /// Force-close a device's connection (credential revoked).
     pub fn kick(&self, device_id: Uuid) {
-        if let Some(c) = self.conns.lock().unwrap().remove(&device_id) {
+        let mut live = self.live.lock().unwrap();
+        if let Some(c) = live.conns.remove(&device_id) {
+            live.checks.remove(&device_id);
             c.close.cancel();
         }
+    }
+
+    /// Ask the current authenticated connection once. The server supplies a fresh audit
+    /// correlation ID. A replacement connection must receive a new request of its own.
+    pub async fn check_physical_console(
+        &self,
+        device_id: Uuid,
+        request_id: Uuid,
+    ) -> Result<PhysicalConsoleState, ConsoleCheckError> {
+        self.check_until(
+            device_id,
+            request_id,
+            Instant::now() + CONSOLE_CHECK_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn check_until(
+        &self,
+        device_id: Uuid,
+        request_id: Uuid,
+        deadline: Instant,
+    ) -> Result<PhysicalConsoleState, ConsoleCheckError> {
+        let (guard, reply) = {
+            let mut live = self.live.lock().unwrap();
+            let conn = live
+                .conns
+                .get(&device_id)
+                .ok_or(ConsoleCheckError::NotConnected)?;
+            if !conn.physical_console_check {
+                return Err(ConsoleCheckError::Unsupported);
+            }
+            if live.checks.len() >= MAX_CONSOLE_CHECKS || live.checks.contains_key(&device_id) {
+                return Err(ConsoleCheckError::Busy);
+            }
+            let conn_id = conn.conn_id;
+            conn.tx
+                .try_send(ServerMsg::CheckPhysicalConsole { request_id })
+                .map_err(|err| match err {
+                    mpsc::error::TrySendError::Full(_) => ConsoleCheckError::Busy,
+                    mpsc::error::TrySendError::Closed(_) => ConsoleCheckError::NotConnected,
+                })?;
+            let (tx, rx) = oneshot::channel();
+            live.checks.insert(
+                device_id,
+                PendingCheck {
+                    conn_id,
+                    request_id,
+                    deadline,
+                    reply: Some(tx),
+                },
+            );
+            (
+                CheckGuard {
+                    registry: self,
+                    device_id,
+                    conn_id,
+                    request_id,
+                },
+                rx,
+            )
+        };
+        let state = tokio::time::timeout_at(deadline, reply)
+            .await
+            .map_err(|_| ConsoleCheckError::Timeout)?
+            .map_err(|_| ConsoleCheckError::NotConnected)?;
+        if self.current_conn(device_id) != Some(guard.conn_id) {
+            return Err(ConsoleCheckError::NotConnected);
+        }
+        Ok(state)
+    }
+
+    /// A reply has meaning only for its currently registered socket, expected request and deadline.
+    pub(crate) fn physical_console_status(
+        &self,
+        device_id: Uuid,
+        conn_id: Uuid,
+        request_id: Uuid,
+        state: PhysicalConsoleState,
+    ) -> bool {
+        let mut live = self.live.lock().unwrap();
+        let Some(check) = live.checks.get_mut(&device_id) else {
+            return false;
+        };
+        if check.conn_id != conn_id
+            || check.request_id != request_id
+            || Instant::now() >= check.deadline
+        {
+            return false;
+        }
+        check
+            .reply
+            .take()
+            .is_some_and(|reply| reply.send(state).is_ok())
     }
 }
 
@@ -120,7 +285,164 @@ mod tests {
             since: OffsetDateTime::now_utc(),
             tx,
             close: CancellationToken::new(),
+            physical_console_check: false,
         }
+    }
+
+    fn connect(
+        registry: &Registry,
+        device: Uuid,
+        capable: bool,
+    ) -> (Uuid, mpsc::Receiver<ServerMsg>) {
+        let (tx, rx) = mpsc::channel(1);
+        let conn = Conn {
+            tx,
+            physical_console_check: capable,
+            ..conn(Registry::next_seq())
+        };
+        let id = conn.conn_id;
+        assert!(registry.register(device, conn));
+        (id, rx)
+    }
+
+    #[tokio::test]
+    async fn only_the_requested_live_socket_can_supply_a_console_observation() {
+        let r = Registry::default();
+        let device = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let request = Uuid::new_v4();
+        let state = PhysicalConsoleState::ActiveConsole;
+        assert_eq!(
+            r.check_physical_console(device, request).await,
+            Err(ConsoleCheckError::NotConnected)
+        );
+        let (_, mut old_rx) = connect(&r, device, false);
+        assert_eq!(
+            r.check_physical_console(device, request).await,
+            Err(ConsoleCheckError::Unsupported)
+        );
+        assert!(matches!(
+            old_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let (id, mut rx) = connect(&r, device, true);
+        let (other_id, _other_rx) = connect(&r, other, true);
+        let mut check = Box::pin(r.check_physical_console(device, request));
+        assert!(futures_util::poll!(&mut check).is_pending());
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ServerMsg::CheckPhysicalConsole {
+                request_id: request
+            }
+        );
+        assert_eq!(
+            r.check_physical_console(device, Uuid::new_v4()).await,
+            Err(ConsoleCheckError::Busy)
+        );
+        assert!(!r.physical_console_status(other, other_id, request, state));
+        assert!(!r.physical_console_status(device, other_id, request, state));
+        assert!(!r.physical_console_status(device, id, Uuid::new_v4(), state));
+        assert!(r.physical_console_status(device, id, request, state));
+        assert!(!r.physical_console_status(device, id, request, state));
+        assert_eq!(check.await, Ok(state));
+        assert!(!r.physical_console_status(device, id, request, state));
+    }
+
+    #[tokio::test]
+    async fn replacement_revocation_and_disconnect_invalidate_in_flight_console_checks() {
+        let r = Registry::default();
+        let device = Uuid::new_v4();
+        let request = Uuid::new_v4();
+        let state = PhysicalConsoleState::NoConsole;
+        let (old, _rx) = connect(&r, device, true);
+        let mut first = Box::pin(r.check_physical_console(device, request));
+        assert!(futures_util::poll!(&mut first).is_pending());
+        let (current, _rx) = connect(&r, device, true);
+        let next_request = Uuid::new_v4();
+        let mut second = Box::pin(r.check_physical_console(device, next_request));
+        assert!(futures_util::poll!(&mut second).is_pending());
+        assert_eq!(first.await, Err(ConsoleCheckError::NotConnected));
+        r.unregister(device, old);
+        assert!(!r.physical_console_status(device, old, next_request, state));
+        assert!(!r.physical_console_status(device, current, request, state));
+        // Even an accepted response waiting to be read is unusable after revocation.
+        assert!(r.physical_console_status(device, current, next_request, state));
+        r.kick(device);
+        assert_eq!(second.await, Err(ConsoleCheckError::NotConnected));
+        let (current, _rx) = connect(&r, device, true);
+        let mut third = Box::pin(r.check_physical_console(device, Uuid::new_v4()));
+        assert!(futures_util::poll!(&mut third).is_pending());
+        r.unregister(device, current);
+        assert_eq!(third.await, Err(ConsoleCheckError::NotConnected));
+    }
+
+    #[tokio::test]
+    async fn expired_and_cancelled_checks_release_the_slot_and_late_replies_are_ignored() {
+        let r = Registry::default();
+        let device = Uuid::new_v4();
+        let (id, mut rx) = connect(&r, device, true);
+        let request = Uuid::new_v4();
+        let state = PhysicalConsoleState::NoInteractiveUser;
+        assert_eq!(
+            r.check_until(device, request, Instant::now()).await,
+            Err(ConsoleCheckError::Timeout)
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ServerMsg::CheckPhysicalConsole {
+                request_id: request
+            }
+        );
+        assert!(!r.physical_console_status(device, id, request, state));
+        let cancelled = Uuid::new_v4();
+        let mut check = Box::pin(r.check_physical_console(device, cancelled));
+        assert!(futures_util::poll!(&mut check).is_pending());
+        drop(check);
+        // Its unsent frame still occupies the one-entry test channel.
+        assert_eq!(
+            r.check_physical_console(device, Uuid::new_v4()).await,
+            Err(ConsoleCheckError::Busy)
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ServerMsg::CheckPhysicalConsole {
+                request_id: cancelled
+            }
+        );
+        let fresh = Uuid::new_v4();
+        let mut check = Box::pin(r.check_physical_console(device, fresh));
+        assert!(futures_util::poll!(&mut check).is_pending());
+        assert!(!r.physical_console_status(device, id, cancelled, state));
+        assert!(r.physical_console_status(device, id, fresh, state));
+        assert_eq!(check.await, Ok(state));
+        drop(rx);
+        assert_eq!(
+            r.check_physical_console(device, Uuid::new_v4()).await,
+            Err(ConsoleCheckError::NotConnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn console_waiters_are_bounded_for_the_whole_instance() {
+        let r = Registry::default();
+        let mut checks = Vec::new();
+        for _ in 0..MAX_CONSOLE_CHECKS {
+            let device = Uuid::new_v4();
+            let (_, rx) = connect(&r, device, true);
+            let mut check = Box::pin(r.check_physical_console(device, Uuid::new_v4()));
+            assert!(futures_util::poll!(&mut check).is_pending());
+            checks.push((rx, check));
+        }
+        let device = Uuid::new_v4();
+        let (_, mut rx) = connect(&r, device, true);
+        assert_eq!(
+            r.check_physical_console(device, Uuid::new_v4()).await,
+            Err(ConsoleCheckError::Busy)
+        );
+        assert!(rx.try_recv().is_err());
+        drop(checks);
+        let mut check = Box::pin(r.check_physical_console(device, Uuid::new_v4()));
+        assert!(futures_util::poll!(&mut check).is_pending());
     }
 
     #[test]

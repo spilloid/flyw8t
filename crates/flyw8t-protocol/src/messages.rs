@@ -2,6 +2,7 @@
 
 use crate::catalog::Action;
 use crate::inventory::InventoryReport;
+use crate::PhysicalConsoleState;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -40,6 +41,8 @@ pub enum ServerMsg {
     /// The server has durably stored the final report for `job_id`; the agent may stop
     /// re-sending it.
     ReportAck { job_id: Uuid },
+    /// Read-only observation, sent only when this connection advertised the capability.
+    CheckPhysicalConsole { request_id: Uuid },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +77,9 @@ pub enum AgentMsg {
         device_id: Uuid,
         signature: String,
         agent_version: String,
+        /// Older agents omit this. Older servers ignore additional authentication fields.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        physical_console_check: bool,
     },
     Heartbeat {
         agent_version: String,
@@ -82,6 +88,11 @@ pub enum AgentMsg {
     },
     Inventory(Box<InventoryReport>),
     Job(JobReport),
+    /// Reply on the same authenticated socket as the matching check.
+    PhysicalConsoleStatus {
+        request_id: Uuid,
+        state: PhysicalConsoleState,
+    },
 }
 
 /// What a device says about itself when enrolling. Display hints only; the server decides
@@ -174,6 +185,87 @@ pub struct CapturedStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_check_is_an_optional_v1_authentication_field() {
+        let old = serde_json::json!({
+            "type": "authenticate", "protocol_version": 1, "device_id": Uuid::nil(),
+            "signature": "test-signature", "agent_version": "0.1.7"
+        });
+        let auth: AgentMsg = serde_json::from_value(old.clone()).unwrap();
+        assert!(matches!(
+            auth,
+            AgentMsg::Authenticate {
+                physical_console_check: false,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(auth).unwrap(), old);
+
+        // The released v1 decoder accepts unknown struct-variant fields. Exercise its
+        // actual Authenticate shape with the new field present.
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Legacy {
+            Authenticate {
+                protocol_version: u32,
+                device_id: Uuid,
+                signature: String,
+                agent_version: String,
+            },
+        }
+        let mut current = old;
+        current["physical_console_check"] = true.into();
+        let auth: AgentMsg = serde_json::from_value(current.clone()).unwrap();
+        assert!(matches!(
+            auth,
+            AgentMsg::Authenticate {
+                physical_console_check: true,
+                ..
+            }
+        ));
+        let Legacy::Authenticate {
+            protocol_version,
+            device_id,
+            signature,
+            agent_version,
+        } = serde_json::from_value(serde_json::to_value(auth).unwrap()).unwrap();
+        assert_eq!((protocol_version, device_id), (1, Uuid::nil()));
+        assert_eq!(
+            (signature.as_str(), agent_version.as_str()),
+            ("test-signature", "0.1.7")
+        );
+        current["physical_console_check"] = "yes".into();
+        assert!(serde_json::from_value::<AgentMsg>(current).is_err());
+    }
+
+    #[test]
+    fn physical_console_wire_carries_only_a_request_and_one_of_four_observations() {
+        let request_id = Uuid::from_u128(7);
+        let request =
+            serde_json::json!({"type": "check_physical_console", "request_id": request_id});
+        let decoded: ServerMsg = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(decoded, ServerMsg::CheckPhysicalConsole { request_id });
+        assert_eq!(serde_json::to_value(decoded).unwrap(), request);
+        for (state, wire) in [
+            (PhysicalConsoleState::ActiveConsole, "active_console"),
+            (
+                PhysicalConsoleState::NoInteractiveUser,
+                "no_interactive_user",
+            ),
+            (PhysicalConsoleState::NoConsole, "no_console"),
+            (PhysicalConsoleState::Unavailable, "unavailable"),
+        ] {
+            let response = AgentMsg::PhysicalConsoleStatus { request_id, state };
+            let json = serde_json::json!({"type":"physical_console_status","request_id": request_id,"state":wire});
+            assert_eq!(serde_json::to_value(&response).unwrap(), json);
+            assert_eq!(serde_json::from_value::<AgentMsg>(json).unwrap(), response);
+        }
+        assert!(serde_json::from_value::<AgentMsg>(serde_json::json!({
+            "type":"physical_console_status","request_id":request_id,"state":"rdp"
+        }))
+        .is_err());
+    }
 
     #[test]
     fn job_offer_round_trips() {

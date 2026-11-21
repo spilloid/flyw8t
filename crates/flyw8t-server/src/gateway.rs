@@ -192,6 +192,7 @@ async fn handle(
             device_id,
             signature,
             agent_version,
+            physical_console_check,
         } => {
             if protocol_version != PROTOCOL_VERSION {
                 return refuse(
@@ -211,6 +212,7 @@ async fn handle(
                         hostname,
                         key,
                         agent_version,
+                        physical_console_check,
                         ip,
                     )
                     .await
@@ -412,6 +414,7 @@ async fn connected(
     hostname: String,
     key: Vec<u8>,
     agent_version: String,
+    physical_console_check: bool,
     ip: String,
 ) -> anyhow::Result<()> {
     // Ordered before any await: if this device connects again while this connection is
@@ -450,6 +453,7 @@ async fn connected(
             since: now,
             tx,
             close: close.clone(),
+            physical_console_check,
         },
     );
     if !registered {
@@ -483,7 +487,10 @@ async fn connected(
     crate::metrics::CONNECTS.inc();
     tracing::info!(%device_id, %hostname, %conn_id, "agent connected");
 
-    let result = connected_loop(state, sink, stream, &mut rx, &close, device_id, &hostname).await;
+    let result = connected_loop(
+        state, sink, stream, &mut rx, &close, device_id, conn_id, &hostname,
+    )
+    .await;
 
     state.registry.unregister(device_id, conn_id);
     let _ = sqlx::query("UPDATE devices SET last_disconnected_at = now() WHERE id = $1")
@@ -503,6 +510,7 @@ async fn connected(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connected_loop(
     state: &Shared,
     sink: &mut Sink,
@@ -510,6 +518,7 @@ async fn connected_loop(
     rx: &mut mpsc::Receiver<ServerMsg>,
     close: &CancellationToken,
     device_id: Uuid,
+    conn_id: Uuid,
     hostname: &str,
 ) -> anyhow::Result<()> {
     if let Err(e) = jobs::dispatch_pending(state, device_id, jobs::Pass::NewConnection).await {
@@ -550,7 +559,7 @@ async fn connected_loop(
                         anyhow::bail!("malformed agent message: {e}");
                     }
                 };
-                on_message(state, sink, device_id, hostname, msg).await?;
+                on_message(state, sink, device_id, conn_id, hostname, msg).await?;
             }
         }
     }
@@ -560,6 +569,7 @@ async fn on_message(
     state: &Shared,
     sink: &mut Sink,
     device_id: Uuid,
+    conn_id: Uuid,
     hostname: &str,
     msg: AgentMsg,
 ) -> anyhow::Result<()> {
@@ -574,6 +584,15 @@ async fn on_message(
             .await?;
         }
         AgentMsg::Inventory(report) => store_inventory(state, device_id, *report).await?,
+        AgentMsg::PhysicalConsoleStatus {
+            request_id,
+            state: observed,
+        } => {
+            // Late or unsolicited observations do not affect this connection or any other waiter.
+            state
+                .registry
+                .physical_console_status(device_id, conn_id, request_id, observed);
+        }
         AgentMsg::Job(report) => {
             let job_id = report.job_id;
             // Any storage failure propagates and drops the connection without an ack; the

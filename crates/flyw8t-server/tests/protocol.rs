@@ -49,6 +49,14 @@ impl RawAgent {
     }
 
     async fn authenticate(server: &TestServer, agent: &TestAgent) -> RawAgent {
+        Self::authenticate_with_console(server, agent, false).await
+    }
+
+    async fn authenticate_with_console(
+        server: &TestServer,
+        agent: &TestAgent,
+        physical_console_check: bool,
+    ) -> RawAgent {
         let key = DeviceKey::load(&agent.dir.path().join("device.key")).unwrap();
         let mut raw = RawAgent::connect(server).await;
         let sig = key.sign_b64(&auth::auth_message(&raw.nonce, agent.device_id));
@@ -57,6 +65,7 @@ impl RawAgent {
             device_id: agent.device_id,
             signature: sig,
             agent_version: "raw".into(),
+            physical_console_check,
         })
         .await;
         assert!(matches!(next(&mut raw.ws).await, ServerMsg::Welcome { .. }));
@@ -88,6 +97,100 @@ async fn next(ws: &mut Ws) -> ServerMsg {
             return serde_json::from_str(t.as_str()).unwrap();
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn physical_console_check_uses_the_enrolled_connection_and_audits_the_reply() {
+    use axum::http::StatusCode;
+    use flyw8t_protocol::PhysicalConsoleState;
+
+    let server = start_fresh().await;
+    let (admin, org, agent) = enrolled(&server).await;
+    let device = agent.device_id;
+    // The test runs on Linux too. Set only the display fact that selects the Windows UI.
+    sqlx::query("UPDATE devices SET os_family='windows' WHERE id=$1")
+        .bind(device)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let path = format!("/devices/{device}/physical-console/check");
+    let other_org = admin.create_org(&server, "Outside the pilot").await;
+    let added = admin
+        .post(
+            &server,
+            "/admin/users",
+            &[
+                ("email", "other@example.test"),
+                ("display_name", "Other technician"),
+                ("password", "example-password-123"),
+                ("role", "technician"),
+                ("org", &other_org.to_string()),
+            ],
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::SEE_OTHER);
+    let outsider = server
+        .login("other@example.test", "example-password-123")
+        .await;
+    assert_eq!(
+        outsider.post(&server, &path, &[]).await.status,
+        StatusCode::NOT_FOUND
+    );
+    // A CSRF-less POST must fail even for the administrator.
+    let invalid = axum::http::Request::post(&path)
+        .header(axum::http::header::COOKIE, &admin.cookie)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(server.request(invalid).await.status, StatusCode::FORBIDDEN);
+
+    let legacy = RawAgent::authenticate(&server, &agent).await;
+    let response = admin.post(&server, &path, &[]).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(server.state.registry.current_conn(device).is_some());
+    drop(legacy);
+    let mut current = RawAgent::authenticate_with_console(&server, &agent, true).await;
+    let (_, served) = tokio::join!(
+        async {
+            let ServerMsg::CheckPhysicalConsole { request_id } = next(&mut current.ws).await else {
+                panic!("expected a physical console check")
+            };
+            // A delayed reply from another request must not satisfy this request.
+            current
+                .send(&AgentMsg::PhysicalConsoleStatus {
+                    request_id: Uuid::new_v4(),
+                    state: PhysicalConsoleState::NoConsole,
+                })
+                .await;
+            current
+                .send(&AgentMsg::PhysicalConsoleStatus {
+                    request_id,
+                    state: PhysicalConsoleState::ActiveConsole,
+                })
+                .await;
+        },
+        admin.post(&server, &path, &[])
+    );
+    assert_eq!(served.status, StatusCode::OK, "{}", served.body);
+    assert!(served.body.contains("signed in"));
+    let audited: Vec<(String, String)> = sqlx::query_as(
+        "SELECT detail->>'request_id', COALESCE(detail->>'status','requested')
+         FROM audit_events WHERE organization_id=$1 AND target_id=$2
+           AND action IN ('device.physical_console.requested','device.physical_console.result') ORDER BY id",
+    ).bind(org).bind(device).fetch_all(&server.state.db).await.unwrap();
+    assert_eq!(audited.len(), 4);
+    assert_eq!(audited[0].0, audited[1].0);
+    assert_eq!(audited[2].0, audited[3].0);
+    assert_ne!(audited[0].0, audited[2].0);
+    assert_eq!(
+        audited
+            .iter()
+            .map(|(_, outcome)| outcome.as_str())
+            .collect::<Vec<_>>(),
+        ["requested", "unsupported", "requested", "active_console"]
+    );
+    drop(current);
+    server.stop().await;
 }
 
 fn finished_exit0(text: &str) -> JobPhase {
@@ -246,6 +349,7 @@ async fn replayed_authentication_is_refused() {
             device_id: agent.device_id,
             signature: captured,
             agent_version: "x".into(),
+            physical_console_check: false,
         })
         .await;
     assert!(matches!(
@@ -266,6 +370,7 @@ async fn replayed_authentication_is_refused() {
             device_id: agent.device_id,
             signature: sig,
             agent_version: "x".into(),
+            physical_console_check: false,
         })
         .await;
     assert!(matches!(
@@ -312,6 +417,7 @@ async fn hostile_frames_close_the_connection() {
         device_id: agent.device_id,
         signature: String::new(),
         agent_version: "x".into(),
+        physical_console_check: false,
     })
     .await;
     assert!(matches!(
