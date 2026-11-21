@@ -1092,6 +1092,7 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
             <h2 id="desktop-launch-title">"Open in Flyw8t Technician"</h2>
             <p class="desktop-target">{target}" Use a Windows PC that can reach this device over the network or VPN."</p>
             <div class="actions">{choices}</div>
+            <p><a href=format!("flyw8t://open/terminal{query}")>"Open SSH terminal"</a>" · Requires SSH on the device and a LAN or VPN route."</p>
             <details class="desktop-link-help">
                 <summary>"Set up browser links on Windows"</summary>
                 {windows_downloads("technician", "Download Flyw8t Technician (Windows x64)")}

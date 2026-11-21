@@ -300,10 +300,18 @@ async fn console_renders_cleanly_everywhere() {
             .await
             .unwrap();
     let session_value = admin.cookie.split_once('=').unwrap().1.to_string();
+    let windows_device: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO devices (organization_id, hostname, os_family) VALUES ($1, 'workstation.example.test', 'windows') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
     let pages: Vec<(String, &str)> = vec![
         ("/".into(), "overview"),
         ("/devices".into(), "devices"),
         (format!("/devices/{}", agent.device_id), "device"),
+        (format!("/devices/{}", windows_device.0), "windows-device"),
         ("/jobs".into(), "jobs"),
         (format!("/jobs/{ok}"), "job-succeeded"),
         (format!("/jobs/{info}"), "job-structured"),
