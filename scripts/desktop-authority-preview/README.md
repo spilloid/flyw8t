@@ -31,7 +31,7 @@ The endpoint spends an offer once and records admission in the same transaction.
 
 To stop one synthetic session, the fixture can cancel its offer or revoke its lease. Other sessions can continue. The fixture also exposes an endpoint-wide emergency disable through `stopLocally()`. It permanently vetoes all current and future admissions in that ledger, including after restart and receipt of a fresh signed policy. There is no recovery operation in the rehearsal. A lease UUID indexes simulated local state. It proves no binding to a running Windows logon, input target or transport.
 
-Revocation persists its audit intent with the veto. The verifier can recover an interrupted journal delivery once. A veto records the greatest trustworthy time observed so far and still takes effect if the clock fails. Verification and admission preserve time observations even on rollback, signature failure and failed audit writes, preventing an unrelated expired lease from becoming usable after restart. Audit correlation uses a one-way digest.
+Revocation persists its audit intent with the veto. The verifier can recover an interrupted journal delivery once. A veto records the greatest trustworthy time observed so far and still takes effect if the clock fails. Offer preparation and grant admission preserve their initial and final clock observations through signing errors, expiry and failed database writes. An unrelated expired lease stays unusable after the clock rolls back and the process restarts. Audit correlation uses a one-way digest.
 
 ## Remaining evidence for deployment
 

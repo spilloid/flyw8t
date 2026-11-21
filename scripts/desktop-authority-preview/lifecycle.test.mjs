@@ -451,6 +451,36 @@ if (!isMainThread) {
     });
   }
 
+  for (const { failure, start, finish } of [
+    { failure: 'offer expires while signing', start: 1, finish: 61 },
+    { failure: 'signing key fails', start: 1, finish: 31 },
+    { failure: 'signing key fails after rollback', start: 31, finish: 1 },
+    { failure: 'challenge persistence fails', start: 1, finish: 31 },
+  ]) {
+    test(failure + ' leaves unrelated expired leases unusable after restart', async t => {
+      const f = await fixture(t);
+      const unrelated = await f.ledger.admit(await f.authorize(await f.request()));
+      const samples = [clockStart + start, clockStart + finish];
+      const signer = new EndpointLedger(f.file, policy, f.keys.authority.publicKey, f.keys.admin.publicKey,
+        () => samples.shift());
+      if (failure === 'challenge persistence fails') {
+        f.raw.exec("CREATE TRIGGER fail_policy_bind BEFORE INSERT ON challenge_policies BEGIN SELECT RAISE(ABORT,'binding unavailable'); END");
+      }
+      try {
+        // A public key makes the real JOSE signing operation reject.
+        const key = failure.startsWith('signing key fails') ? f.keys.endpoint.publicKey : f.keys.endpoint.privateKey;
+        await assert.rejects(signer.prepare(key, session));
+      } finally { signer.close(); }
+      assert.equal(samples.length, 0);
+      assert.equal(f.raw.prepare('SELECT COUNT(*) AS n FROM challenges').get().n, 1);
+      assert.equal(f.raw.prepare('SELECT COUNT(*) AS n FROM challenge_policies').get().n, 1);
+      f.close(f.ledger);
+      f.advance(1);
+      assert.equal(f.open().active(unrelated), false);
+      assert.equal(f.raw.prepare('SELECT checked_at FROM configuration').get().checked_at, clockStart + Math.max(start, finish));
+    });
+  }
+
   for (const rejection of ['invalid signature','rolled back at commit','failed audit at commit']) {
     test(rejection + ' preserves verification and decision times for unrelated leases after restart', async t => {
       const f = await fixture(t);

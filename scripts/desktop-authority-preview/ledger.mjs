@@ -96,15 +96,41 @@ export class EndpointLedger {
       WHERE checked_at<=? AND stopped_at IS NULL`).run(now, now).changes === 1;
   }
 
+  // Record the decision time inside the write lock, even if the decision
+  // subsequently fails. Its own writes must succeed or roll back together.
+  #timedDecision(fn) {
+    const result = this.#write(() => {
+      const now = this.#sampleClock();
+      const highWater = this.#observeTime(now);
+      this.#db.exec('SAVEPOINT decision');
+      try {
+        const value = fn(now, highWater);
+        this.#db.exec('RELEASE decision');
+        return { value };
+      } catch (error) {
+        this.#db.exec('ROLLBACK TO decision; RELEASE decision');
+        return { error };
+      }
+    });
+    if ('error' in result) throw result.error;
+    return result.value;
+  }
+
   async prepare(endpointKey, session) {
     const nonce = randomBytes(32).toString('base64url');
-    const now = this.#clock();
+    const now = this.#sampleClock();
+    requireEvidence(this.#observeTime(now) === now);
     const selected = this.#selections.allowed(this.#policy, now);
     requireEvidence(selected);
-    const offer = await makeEndpointOffer(this.#policy, endpointKey, { ...session, nonce, policyRevision: selected.revision }, now);
-    this.#write(() => {
-      const atCommit = this.#clock();
-      requireEvidence(atCommit >= now && atCommit < now + 60 && this.#advanceClock(atCommit));
+    let offer;
+    try {
+      offer = await makeEndpointOffer(this.#policy, endpointKey, { ...session, nonce, policyRevision: selected.revision }, now);
+    } catch (error) {
+      this.#observeTime(this.#sampleClock());
+      throw error;
+    }
+    this.#timedDecision((atCommit, highWater) => {
+      requireEvidence(atCommit === highWater && atCommit < now + 60 && this.#advanceClock(atCommit));
       requireEvidence(this.#selections.allowed(this.#policy, atCommit)?.revision === selected.revision);
       this.#db.prepare('INSERT INTO challenges VALUES(?,?,?)').run(nonce, digest(offer), now + 60);
       this.#db.prepare('INSERT INTO challenge_policies VALUES(?,?)').run(nonce, selected.revision);
@@ -121,24 +147,13 @@ export class EndpointLedger {
         grant = await verifyGrant(token, this.#policy, this.#verifyKey, verifiedAt);
       } catch { /* Record a denial in the same decision path. */ }
     }
-    const decision = this.#write(() => {
-      const now = this.#sampleClock();
-      const highWater = this.#observeTime(now);
-      // Keep the clock observation when a failed audit write rolls back a spend.
-      this.#db.exec('SAVEPOINT admission');
-      try {
-        const lease = grant && now === highWater ? this.#redeem(grant, now) : null;
-        this.#log(lease ? 'admitted' : 'denied', lease, highWater);
-        this.#db.exec('RELEASE admission');
-        return { lease };
-      } catch (error) {
-        this.#db.exec('ROLLBACK TO admission; RELEASE admission');
-        return { error };
-      }
+    const lease = this.#timedDecision((now, highWater) => {
+      const accepted = grant && now === highWater ? this.#redeem(grant, now) : null;
+      this.#log(accepted ? 'admitted' : 'denied', accepted, highWater);
+      return accepted;
     });
-    if (decision.error) throw decision.error;
-    if (!decision.lease) throw new Error('Grant denied');
-    return decision.lease;
+    if (!lease) throw new Error('Grant denied');
+    return lease;
   }
 
   #redeem(grant, now) {
