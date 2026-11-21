@@ -2,6 +2,12 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## 0.10.0-beta.1 — release candidate
+
+- Add a portable attended Windows participant to the signing rehearsal, with the native picker-enabled sender, a pinned Node runtime and dependency notices. A person on the Windows PC starts the foreground app and chooses the surface to share. The release gate requires a signed package, a fresh extraction and a real participant confirming capture and Stop.
+- The native browser trial supports attended viewing. Technician keyboard and mouse control remains available through the native Windows Technician app and Windows host policy. Native WebRTC input, independent authorization for unattended control, and macOS remain release work.
+- Windows release verification requires a valid timestamped signature from the exact Flyw8t publisher.
+
 ## 0.1.7 — 2026-11-20 (pre-release)
 
 - Start a Windows beta installation from **Devices → Enroll a Windows device**.

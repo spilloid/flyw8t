@@ -12,6 +12,8 @@ permissions:
   id-token: write
 
 jobs:
+  participant:
+    uses: ./.github/workflows/windows-participant.yml
   sign:
     name: Sign and verify (no release)
     runs-on: windows-latest

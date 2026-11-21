@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.ps1 text eol=crlf
+scripts/participant-release/*.cmd text eol=crlf
+scripts/participant-release/notices/* -text

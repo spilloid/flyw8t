@@ -14,9 +14,9 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
   assert.equal(process.env.RUNNER_OS, 'Windows');
   assert.match(origin, /^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/);
   const dir = await fs.mkdtemp(path.join(process.env.RUNNER_TEMP, 'signed-trial-'));
-  const manifest = await fs.readFile('Cargo.toml', 'utf8');
-  const version = /\[workspace\.package\][^\[]*?^version\s*=\s*"(\d+\.\d+\.\d+)"/m.exec(manifest)?.[1];
-  assert.ok(version, 'Workspace package version missing');
+  const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {encoding: 'utf8'}));
+  const version = metadata.packages.find(pkg => pkg.name === 'flyw8t-agent')?.version;
+  assert.ok(version, 'Workspace agent version missing');
   const name = 'flyw8t-agent-v' + version + '-x86_64-pc-windows-msvc.exe';
   const agent = path.join(dir, name);
   await fs.copyFile(path.join(binaries, 'flyw8t-agent.exe'), agent);
