@@ -1,6 +1,7 @@
 //! Verify Windows Media Foundation can encode and decode a synthetic luma pattern.
-//! No desktop, network, microphone, input, credentials or device enrollment are used.
+//! The optional WebRTC experiment sends only those pixels to a loopback browser peer.
 use std::{error::Error, io, path::Path};
+mod stream;
 
 use windows::{
     core::{GUID, HSTRING},
@@ -55,6 +56,7 @@ fn write_fixture(path: &Path) -> Result<()> {
         let writer = MFCreateSinkWriterFromURL(&url, None, None)?;
         let output = media_type(&MFVideoFormat_H264)?;
         output.SetUINT32(&MF_MT_AVG_BITRATE, 800_000)?;
+        output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
         let stream = writer.AddStream(&output)?;
         writer.SetInputMediaType(stream, &media_type(&MFVideoFormat_NV12)?, None)?;
         writer.BeginWriting()?;
@@ -138,30 +140,43 @@ fn read_fixture(path: &Path) -> Result<u32> {
     Err("decoder did not report end of stream".into())
 }
 
-fn probe(emit_mp4: bool) -> Result<u32> {
+fn probe(mode: Mode) -> Result<u32> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("synthetic.mp4");
     write_fixture(&path)?;
     let frames = read_fixture(&path)?;
-    if emit_mp4 {
-        io::copy(&mut std::fs::File::open(path)?, &mut io::stdout().lock())?;
+    match mode {
+        Mode::Native => {}
+        Mode::Mp4 => {
+            io::copy(&mut std::fs::File::open(path)?, &mut io::stdout().lock())?;
+        }
+        Mode::Loopback => {
+            stream::run(&path)?;
+        }
     }
     Ok(frames)
 }
 
+enum Mode {
+    Native,
+    Mp4,
+    Loopback,
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let emit_mp4 = match (args.next(), args.next()) {
-        (None, None) => false,
-        (Some(flag), None) if flag == "--emit-mp4" => true,
-        _ => return Err("usage: flyw8t-windows-media-probe [--emit-mp4]".into()),
+    let mode = match (args.next(), args.next()) {
+        (None, None) => Mode::Native,
+        (Some(flag), None) if flag == "--emit-mp4" => Mode::Mp4,
+        (Some(flag), None) if flag == "--loopback" => Mode::Loopback,
+        _ => return Err("usage: flyw8t-windows-media-probe [--emit-mp4|--loopback]".into()),
     };
     // All COM interfaces in probe() drop before the runtime is shut down.
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         let result = match MFStartup(MF_VERSION, MFSTARTUP_FULL) {
             Ok(()) => {
-                let result = probe(emit_mp4);
+                let result = probe(mode);
                 let shutdown = MFShutdown();
                 result.and_then(|frames| {
                     shutdown?;
