@@ -11,7 +11,8 @@ runs:
       with:
         node-version: 22
     - name: Start PostgreSQL and check the desktop handoff
-      shell: pwsh
+      # Node starts Windows PowerShell 5.1 for enrollment and must inherit its module search path.
+      shell: powershell
       env:
         FLYW8T_TEST_BINARIES: ${{ inputs.binaries }}
       run: |

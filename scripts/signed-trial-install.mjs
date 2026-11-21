@@ -33,6 +33,7 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
       '} catch {',
       "  $hint = 'PowerShell'",
       '  switch -Regex ($_.Exception.Message) {',
+      "    'module could not be loaded' { $hint = 'module-load'; break }",
       "    'owned by .+, not Administrators or SYSTEM' { $hint = 'file-owner'; break }",
       "    'is not as .+ made it|permissions from the folder above|could not be locked' { $hint = 'directory-permissions'; break }",
       "    'access is denied|error 5\\b' { $hint = 'access-denied'; break }",
@@ -53,7 +54,7 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
     if (child.error || child.status !== 0) {
       // Only return our own labels and numeric source locations. Other child output may
       // include a token, a command line or untrusted server text.
-      const marker = /^FLYW8T-TRIAL-FAIL (\d{1,5}) (PowerShell|file-owner|directory-permissions|access-denied|token-refused|server-connection|checksum|publisher-signature|version)\r?$/m.exec(child.stderr ?? '');
+      const marker = /^FLYW8T-TRIAL-FAIL (\d{1,5}) (PowerShell|module-load|file-owner|directory-permissions|access-denied|token-refused|server-connection|checksum|publisher-signature|version)\r?$/m.exec(child.stderr ?? '');
       let detail = child.error?.code === 'ETIMEDOUT' ? ', timed out' : '';
       if (marker) {
         const line = Number(marker[1]);
