@@ -22,3 +22,4 @@ Each ADR records one decision, the alternatives, and what would make us revisit 
 | [0016](ADR-0016-network-operations.md) | flyw8t owns network operations; site-bound NetViz collectors, agentless assets and an explicit PortGlass handoff | accepted |
 | [0017](ADR-0017-directory-sso.md) | Optional OIDC sign-in, SCIM directory authorization and independent local break-glass sign-in | accepted |
 | [0018](ADR-0018-attended-elevation-and-persistence.md) | Reduced-rights attended support with separate elevation/persistence consents and an independently authenticated credential path | proposed |
+| [0019](ADR-0019-native-webrtc-streaming.md) | Native WebRTC desktop streaming, scoped capture, H.264 and revocable media delivery | proposed |

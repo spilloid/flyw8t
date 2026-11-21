@@ -196,6 +196,23 @@ CI follow-up: all five jobs passed on implementation ref **a48f7e6**, [run 43171
 - **The attended-support code (`support.rs`, `support.js`) has had no cross-family review.** It must have one before anyone relies on it.
 - TLA+ (`docs/spec/JobDelivery.tla`) is written but **not model-checked**: running the downloaded Java runtime was not permitted in this session.
 
+## Independent review of native streaming, 2026-11-21
+
+The operator requested an independent adversarial review. A separate Codex Astra reviewer examined draft #54 at `71e9d26`, fixture #55 at `3b010a6` and main at `8c70374`. This was a same-family review with a separate media reader. The reviewers inspected source. The implementer ran the Windows and browser tests.
+
+| Finding | Disposition |
+|---|---|
+| Policy signing, anti-rollback and independent per-session authority were unspecified. Full sessions can exist without demonstrated MFA. | Accepted as release blockers. ADR-0019 now states the binding and denial requirements. Endpoint enforcement, key provisioning/rotation and deployed MFA proof remain open. |
+| A WGC window or monitor does not confine keyboard input. Local revocation and held-input cleanup are unimplemented. | Accepted. Narrow grants stay view-only, while desktop-wide control requires its own authority. Physical Stop, in-flight work, locally held keys, crash and session replacement need real negative tests. |
+| A list of known luma bands did not count every presented frame. Successful exit alone did not bound revocation. | Accepted. The fixture now checks presentation callbacks and receiver/decode counters, a two-second process-stop limit and stability after a defined drain. These observations are specific to a test process on loopback. |
+| CI environment metadata, trigger coverage and release scope needed reconciliation. | Accepted. The fixture reports browser/OS and records toolchain information. ADR-0019 and the roadmap distinguish Windows 0.10.0, macOS 0.11.0 and the 1.0 obligations. |
+
+The reviewer reread ADR `17f0788` and media fixture `09d5674`, and inspected WGC probe `ad34a73`. The WGC sequence originally asserted four states, or three transitions. The implementer changed it to five alternating states and ran it in an interactive Windows session with a 25-second external watchdog. The independent review found no remaining material experiment-only merge blocker conditional on exact-revision checks. Production unattended access still requires the full release evidence. The operator selected organization SSO with TOTP and an independent grant signer after the review. Evidence and remaining gates are tracked in [issue #57](https://github.com/spilloid/flyw8t/issues/57).
+
+At `c498383` the reviewer identified three remaining details for unattended access. The endpoint also needs to authenticate to the viewer, update and recovery credentials can cross custody boundaries, and cross-origin launches can substitute transaction parameters. The operator selected an independently administered authorization service with an external non-exportable KMS key, a provider-neutral interface and independently distributed viewer code. ADR-0019 at `3e7a267` incorporates these requirements. Testing the complete deployed boundary remains a condition for production input.
+
+The reviewer examined that ADR and [the live Windows fixture](https://github.com/spilloid/flyw8t/pull/58) at `9a1a6b1`. No material fixture merge blocker was reported. The implementer observed 37 decoded frames at the four-state chart check, process exit 43 ms after closing the private pipe, stable receiver counters after drain, and zero browser frames on certificate mismatch. A temporary mutation that sampled the left panel twice failed the spatial assertion. Capture starts after the peer check in source. The refusal test also checks the startup diagnostic. Each captured state is repeated for twelve ticks, and synchronous GPU/encoder calls still depend on the external test watchdog. The reviewer inspected the diff and check structure. The positive desktop execution was performed by the implementer.
+
 ## Standing rules (STD-001)
 
 - A finding can be right about the problem and wrong about the fix: adjudicate, then choose the fix.
