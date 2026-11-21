@@ -42,24 +42,31 @@ function sign(payload, type, key) {
   return new SignJWT(payload).setProtectedHeader({ alg: 'EdDSA', typ: type }).sign(key);
 }
 
-export function makeEndpointOffer(p, key, { session, viewerFingerprint, endpointFingerprint, nonce, policyRevision }, now) {
-  requireEvidence(matches(idPattern, session) && matches(noncePattern, nonce)
-    && matches(fpPattern, viewerFingerprint) && matches(fpPattern, endpointFingerprint)
-    && viewerFingerprint !== endpointFingerprint && Number.isSafeInteger(policyRevision) && policyRevision > 0);
+export function validChartPeer(session, loginBinding, viewerFingerprint, endpointFingerprint) {
+  return matches(idPattern, session) && matches(fpPattern, loginBinding) &&
+    matches(fpPattern, viewerFingerprint) && matches(fpPattern, endpointFingerprint) &&
+    viewerFingerprint !== endpointFingerprint;
+}
+
+export function makeEndpointOffer(p, key, { session, loginBinding, viewerFingerprint, endpointFingerprint, connectionBinding, nonce, policyRevision }, now) {
+  requireEvidence(validChartPeer(session, loginBinding, viewerFingerprint, endpointFingerprint)
+    && matches(fpPattern, connectionBinding) && matches(noncePattern, nonce)
+    && Number.isSafeInteger(policyRevision) && policyRevision > 0);
   return sign({
     iss: p.endpointIssuer, sub: p.enrollment, aud: p.authority,
     iat: now, exp: now + maxEvidenceAge, tenant: p.tenant, device: p.device,
     generation: p.generation, policy_revision: policyRevision, session, scope, viewer_origin: p.viewerOrigin,
+    login_binding: loginBinding, connection_binding: connectionBinding,
     viewer_fp: viewerFingerprint, endpoint_fp: endpointFingerprint, nonce,
   }, offerType, key);
 }
 
-export function confirmInFixtureViewer(p, viewerKey, { offer, subject, session, observedViewerFingerprint, observedEndpointFingerprint }, now) {
-  requireEvidence(matches(fpPattern, observedViewerFingerprint) && matches(fpPattern, observedEndpointFingerprint) && matches(idPattern,session));
+export function confirmInFixtureViewer(p, viewerKey, { offer, subject, session, expectedLoginBinding, observedViewerFingerprint, observedEndpointFingerprint }, now) {
+  requireEvidence(validChartPeer(session, expectedLoginBinding, observedViewerFingerprint, observedEndpointFingerprint));
   return sign({
     iss: p.viewerIssuer, sub: subject, aud: p.authority, iat: now, exp: now + maxEvidenceAge,
     viewer_origin: p.viewerOrigin, binding: digest(offer), viewer_fp: observedViewerFingerprint,
-    endpoint_fp:observedEndpointFingerprint, session,
+    endpoint_fp:observedEndpointFingerprint, session, login_binding:expectedLoginBinding,
   }, viewerType, viewerKey);
 }
 
@@ -99,13 +106,12 @@ export function grantAuthority({ policy, identityKey, endpointKey, viewerKey, si
     const now = clock();
     const transaction = await verified(offer, { key: endpointKey, issuer: p.endpointIssuer,
       audience: p.authority, type: offerType, now, age: maxEvidenceAge,
-      claims: ['tenant','device','generation','policy_revision','session','scope','viewer_origin','viewer_fp','endpoint_fp','nonce'] });
+      claims: ['tenant','device','generation','policy_revision','session','scope','viewer_origin','viewer_fp','endpoint_fp','login_binding','connection_binding','nonce'] });
     requireEvidence(transaction.sub === p.enrollment && transaction.tenant === p.tenant
       && transaction.device === p.device && transaction.generation === p.generation
       && transaction.scope === scope && transaction.viewer_origin === p.viewerOrigin
-      && matches(idPattern, transaction.session) && matches(noncePattern, transaction.nonce)
-      && matches(fpPattern, transaction.viewer_fp) && matches(fpPattern, transaction.endpoint_fp)
-      && transaction.viewer_fp !== transaction.endpoint_fp);
+      && validChartPeer(transaction.session, transaction.login_binding, transaction.viewer_fp, transaction.endpoint_fp)
+      && matches(fpPattern, transaction.connection_binding) && matches(noncePattern, transaction.nonce));
     const user = await verified(identity, { key: identityKey, issuer: p.identityIssuer,
       audience: p.identityAudience, type: 'JWT', now, claims: ['auth_time','acr','amr','nonce'] });
     requireEvidence(user.sub === p.operatorSubject && user.nonce === transaction.nonce
@@ -116,10 +122,10 @@ export function grantAuthority({ policy, identityKey, endpointKey, viewerKey, si
     const binding = digest(offer);
     const viewer = await verified(confirmation, { key: viewerKey, issuer: p.viewerIssuer,
       audience: p.authority, type: viewerType, now, age: maxEvidenceAge,
-      claims: ['viewer_origin','viewer_fp','endpoint_fp','session','binding'] });
+      claims: ['viewer_origin','viewer_fp','endpoint_fp','session','login_binding','binding'] });
     requireEvidence(viewer.sub === user.sub && viewer.viewer_origin === p.viewerOrigin
       && viewer.viewer_fp === transaction.viewer_fp && viewer.endpoint_fp===transaction.endpoint_fp
-      && viewer.session===transaction.session && viewer.binding === binding);
+      && viewer.session===transaction.session && viewer.login_binding===transaction.login_binding && viewer.binding === binding);
     const selected = selections.allowed(p, clock());
     requireEvidence(selected && selected.revision === transaction.policy_revision);
     const endsAt = Math.min(now + maxGrantAge, transaction.exp, viewer.exp, user.exp, selected.expires,

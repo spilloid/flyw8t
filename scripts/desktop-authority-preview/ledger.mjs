@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { digest, makeEndpointOffer, nowSeconds, requireEvidence, verifyGrant } from './evidence.mjs';
+import { digest, makeEndpointOffer, nowSeconds, requireEvidence, validChartPeer, verifyGrant } from './evidence.mjs';
 import { WorkstationSelections } from './selection.mjs';
 
 const schema = `
@@ -19,6 +19,9 @@ const schema = `
   CREATE TABLE IF NOT EXISTS challenge_policies(
     nonce TEXT PRIMARY KEY REFERENCES challenges(nonce), revision INTEGER NOT NULL
   ) STRICT;
+  CREATE TABLE IF NOT EXISTS chart_connections(
+    nonce TEXT PRIMARY KEY REFERENCES challenges(nonce), binding TEXT NOT NULL
+  ) STRICT;
   CREATE TABLE IF NOT EXISTS revocations(
     id TEXT PRIMARY KEY REFERENCES leases(id), occurred INTEGER NOT NULL,
     journaled INTEGER NOT NULL DEFAULT 0 CHECK(journaled IN (0,1))
@@ -35,6 +38,38 @@ const schema = `
 
 function keyDigest(key) {
   return createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('hex');
+}
+
+// Only a local endpoint adapter holds these handles. No serialized observation,
+// nonce, certificate pair or lease ID can recreate an existing handle.
+const connections = new WeakMap();
+
+function currentPeer(handle) {
+  const entry = connections.get(handle);
+  if (!entry) return null;
+  try {
+    const { transport, connected, session, loginBinding, viewerFingerprint, endpointFingerprint } = entry.observe();
+    requireEvidence(connected === true && transport !== null && typeof transport === 'object'
+      && (entry.transport === undefined || entry.transport === transport)
+      && validChartPeer(session, loginBinding, viewerFingerprint, endpointFingerprint));
+    const binding = digest(JSON.stringify(['flyw8t.chart.connection.v1', entry.incarnation,
+      session, loginBinding, viewerFingerprint, endpointFingerprint]));
+    requireEvidence((entry.binding === undefined || entry.binding === binding) && connections.has(handle));
+    entry.binding = binding;
+    entry.transport = transport;
+    return { session, loginBinding, viewerFingerprint, endpointFingerprint, connectionBinding:binding };
+  } catch {
+    connections.delete(handle);
+    return null;
+  }
+}
+
+export function openChartConnection(observe) {
+  requireEvidence(typeof observe === 'function');
+  const handle = Object.freeze({ close() { connections.delete(handle); } });
+  connections.set(handle, { observe, incarnation:randomBytes(32).toString('hex') });
+  requireEvidence(currentPeer(handle));
+  return handle;
 }
 
 // Independent endpoint state. All callers use their own connection to the same
@@ -116,15 +151,17 @@ export class EndpointLedger {
     return result.value;
   }
 
-  async prepare(endpointKey, session) {
+  async prepare(endpointKey, connection) {
     const nonce = randomBytes(32).toString('base64url');
     const now = this.#sampleClock();
     requireEvidence(this.#observeTime(now) === now);
     const selected = this.#selections.allowed(this.#policy, now);
     requireEvidence(selected);
+    const peer = currentPeer(connection);
+    requireEvidence(peer);
     let offer;
     try {
-      offer = await makeEndpointOffer(this.#policy, endpointKey, { ...session, nonce, policyRevision: selected.revision }, now);
+      offer = await makeEndpointOffer(this.#policy, endpointKey, { ...peer, nonce, policyRevision: selected.revision }, now);
     } catch (error) {
       this.#observeTime(this.#sampleClock());
       throw error;
@@ -132,13 +169,15 @@ export class EndpointLedger {
     this.#timedDecision((atCommit, highWater) => {
       requireEvidence(atCommit === highWater && atCommit < now + 60 && this.#advanceClock(atCommit));
       requireEvidence(this.#selections.allowed(this.#policy, atCommit)?.revision === selected.revision);
+      requireEvidence(currentPeer(connection)?.connectionBinding === peer.connectionBinding);
       this.#db.prepare('INSERT INTO challenges VALUES(?,?,?)').run(nonce, digest(offer), now + 60);
       this.#db.prepare('INSERT INTO challenge_policies VALUES(?,?)').run(nonce, selected.revision);
+      this.#db.prepare('INSERT INTO chart_connections VALUES(?,?)').run(nonce, peer.connectionBinding);
     });
     return { offer, nonce };
   }
 
-  async admit(token) {
+  async admit(token, connection) {
     let grant;
     const verifiedAt = this.#sampleClock();
     // This observation is durable before yielding to the signature verifier.
@@ -148,7 +187,8 @@ export class EndpointLedger {
       } catch { /* Record a denial in the same decision path. */ }
     }
     const lease = this.#timedDecision((now, highWater) => {
-      const accepted = grant && now === highWater ? this.#redeem(grant, now) : null;
+      const peer = currentPeer(connection);
+      const accepted = grant && peer && now === highWater ? this.#redeem(grant, now, peer.connectionBinding) : null;
       this.#log(accepted ? 'admitted' : 'denied', accepted, highWater);
       return accepted;
     });
@@ -156,30 +196,35 @@ export class EndpointLedger {
     return lease;
   }
 
-  #redeem(grant, now) {
+  #redeem(grant, now, connectionBinding) {
     const selected = this.#selections.allowed(this.#policy, now);
     if (!selected || now < grant.iat) return null;
     const inserted = this.#db.prepare(`INSERT INTO leases(id,nonce,expires)
       SELECT ?,nonce,? FROM challenges WHERE nonce=? AND binding=? AND expires>? AND ?>?
       AND EXISTS (SELECT 1 FROM configuration WHERE singleton=1 AND stopped_at IS NULL)
       AND EXISTS (SELECT 1 FROM challenge_policies WHERE nonce=challenges.nonce AND revision=?)
+      AND EXISTS (SELECT 1 FROM chart_connections WHERE nonce=challenges.nonce AND binding=?)
       AND NOT EXISTS (SELECT 1 FROM offer_vetoes WHERE nonce=challenges.nonce)
       ON CONFLICT DO NOTHING`).run(grant.jti, grant.exp, grant.nonce,
-        grant.binding, now, grant.exp, now, selected.revision);
+        grant.binding, now, grant.exp, now, selected.revision, connectionBinding);
     return inserted.changes === 1 ? grant.jti : null;
   }
 
-  // For the rehearsal this predicate guards a simulated use of a lease. Each use
-  // consults durable state. Production work must stop an existing transport too.
-  active(lease) {
+  // The live connection observation and durable policy decision are both required on every use.
+  active(lease, connection) {
     try {
       return this.#write(() => {
-        const now = this.#clock();
+        const now = this.#sampleClock();
+        const highWater = this.#observeTime(now);
+        const peer = currentPeer(connection);
+        if (!peer || now !== highWater) return false;
         const selected = this.#selections.allowed(this.#policy, now);
-        return Boolean(selected && this.#advanceClock(now) && this.#db.prepare(`SELECT 1 FROM leases WHERE id=? AND expires>?
+        return Boolean(selected && this.#db.prepare(`SELECT 1 FROM leases WHERE id=? AND expires>?
+          AND EXISTS (SELECT 1 FROM configuration WHERE singleton=1 AND stopped_at IS NULL)
           AND EXISTS (SELECT 1 FROM challenge_policies WHERE nonce=leases.nonce AND revision=?)
+          AND EXISTS (SELECT 1 FROM chart_connections WHERE nonce=leases.nonce AND binding=?)
           AND NOT EXISTS (SELECT 1 FROM revocations WHERE id=leases.id)
-          AND NOT EXISTS (SELECT 1 FROM offer_vetoes WHERE nonce=leases.nonce)`).get(lease, now, selected.revision));
+          AND NOT EXISTS (SELECT 1 FROM offer_vetoes WHERE nonce=leases.nonce)`).get(lease, now, selected.revision, peer.connectionBinding));
       });
     } catch {
       return false;
