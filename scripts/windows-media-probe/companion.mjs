@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { readFileSync, accessSync } from 'node:fs';
-import { htmlText, relayAnswer, secureParticipantCookie } from './participant-transport.mjs';
+import { htmlText, secureParticipantCookie, waitForViewerRelay } from './participant-transport.mjs';
 import { publicConnection } from './public-connection.mjs';
 import { nativeParticipant } from './native-participant.mjs';
 
@@ -36,6 +36,7 @@ function finish(s,state,message,notify) {
   s.state=state;
   s.message=message;
   s.native?.stop();
+  s.viewerRelay?.cancel();
   if (s.native) s.draining = s.native.dispose().catch(() => {});
   s.abort.abort();
   if (notify && s.socket?.readyState===WebSocket.OPEN) {
@@ -65,27 +66,18 @@ async function signal(s,msg) {
       s.stage='native-offer';
       const offer=await s.native.offer(s.session,msg.data.commit);
       if (!active(s)) return;
+      s.viewerRelay=waitForViewerRelay(s.relay.allocation, () => finish(s,'error',
+        'The technician’s browser did not reach the configured UDP video relay. Check its network route.',{type:'media',state:'failed'}));
+      s.message='Waiting for the technician’s browser to reach the video relay.';
       send(s,{type:'signal',data:{sdp:offer,relayOnly:true}});
       void s.native.closed.then(()=>{
         if (!active(s)) return;
         if (s.native.endMessage) finish(s,'ended',s.native.endMessage,{type:'end'});
-        else finish(s,'error','The native source ended before the support session was closed.',{type:'media',state:'failed'});
+        else finish(s,'error',s.native.failureMessage ?? 'The native source ended before the support session was closed.',{type:'media',state:'failed'});
       }).catch(()=>finish(s,'error','Windows could not start the native source.',{type:'end'}));
-    } else if (s.native && !s.answered && (msg.data?.sdp?.type==='answer' || s.relay && msg.data?.candidate)) {
-      let answer=msg.data.sdp;
-      if(s.relay) {
-        if(answer) {
-          if(s.answer) throw Error('Duplicate console answer.');
-          s.answer=answer;
-        }
-        if(msg.data.candidate) {
-          s.candidates??=[];
-          if(s.candidates.length>=48) throw Error('Too many ICE candidates.');
-          s.candidates.push(msg.data.candidate);
-        }
-        answer=relayAnswer(s.answer,s.candidates??[],s.relay.allocation);
-        if(!answer) return;
-      }
+    } else if (s.viewerRelay && !s.answered && (msg.data?.sdp?.type==='answer' || msg.data?.candidate)) {
+      const answer=s.viewerRelay.receive(msg.data);
+      if(!answer) return;
       s.answered=true;
       s.stage='native-answer';
       s.message='Choose a window or screen in the Windows picker.';
@@ -177,7 +169,7 @@ async function join(s,code) {
     try { void signal(s,JSON.parse(event.data)).catch(error=>{
       const message=error.code==='RELAY_UNREACHABLE'
         ? 'The video relay did not answer over UDP. Ask the technician to check the network route.'
-        : 'The native video connection could not be verified or started.';
+        : s.native?.failureMessage ?? 'The native video connection could not be verified or started.';
       finish(s,'error',message,{type:'end'});
     }); }
     catch { finish(s,'error','Invalid support message.',{type:'end'}); }

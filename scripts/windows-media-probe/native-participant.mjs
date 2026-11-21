@@ -14,7 +14,7 @@ export function nativeParticipant(binary, session, relay) {
   if (!relay) throw Error('Choose a window using an authenticated relay.');
   const marker = 'selected-surface';
   let child, closed, verifiedCode, sent = false, forced = false, stopped = false;
-  let reachedLimit = false;
+  let reachedLimit = false, failureMessage;
   let offered = false, noSelection = false, relayUnreachable = false;
   function stop() {
     stopped = true;
@@ -36,8 +36,9 @@ export function nativeParticipant(binary, session, relay) {
     get stopped() {return stopped;},
     get closed() {return closed;},
     get forced() {return forced;},
+    get failureMessage() {return failureMessage;},
     get endMessage() {
-      if (reachedLimit && verifiedCode && sent && child?.exitCode === 0) return "This beta session reached its two-minute sharing limit.";
+      if (reachedLimit && verifiedCode && child?.exitCode === 0) return "This beta session reached its two-minute sharing limit.";
       return selectedEndMessage({
         selected:true, verified:!!verifiedCode, sent, noSelection,
         code:child?.exitCode, signal:child?.signalCode,
@@ -81,7 +82,11 @@ export function nativeParticipant(binary, session, relay) {
       createInterface({input:child.stderr}).on('line', line => {
         if (line === 'Error: "UDP relay did not answer before the allocation deadline"')
           relayUnreachable = true;
-        if (line === 'Selected-surface frame budget reached.') reachedLimit = true;
+        if (line === 'Selected-surface sharing time limit reached.') reachedLimit = true;
+        if (line === 'Error: "the verified video transport disconnected"')
+          failureMessage = 'The video connection to the technician disconnected. Sharing stopped.';
+        if (line === 'Error: "the technician DTLS connection did not complete"')
+          failureMessage = 'Both peers reached the relay, but the secure video connection did not complete.';
         if (line === 'First ' + marker + ' access unit sent.') sent = true;
         if (line === 'Error: "no desktop or window was selected"') noSelection = true;
       });

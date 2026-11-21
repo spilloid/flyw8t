@@ -284,6 +284,7 @@ fn choose(
 /// The callback should enqueue with a bound and return promptly.
 pub fn capture_selected(
     stopped: impl Fn() -> bool,
+    on_start: impl FnOnce(),
     on_stop: impl Fn() + Send + Sync,
     mut observe: impl FnMut(Vec<u8>) -> Result<()>,
 ) -> Result<()> {
@@ -309,7 +310,15 @@ pub fn capture_selected(
             while !cancel.load(Ordering::Acquire) && !stopped() {
                 match rx.recv_timeout(Duration::from_millis(20)) {
                     Ok((item, login)) => {
-                        return stream_item(item, &login, &cancel, &stopped, &revoke, &mut observe)
+                        return stream_item(
+                            item,
+                            &login,
+                            &cancel,
+                            &stopped,
+                            on_start,
+                            &revoke,
+                            &mut observe,
+                        )
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -329,6 +338,7 @@ fn stream_item(
     login: &Login,
     cancel: &Arc<AtomicBool>,
     stopped: &impl Fn() -> bool,
+    on_start: impl FnOnce(),
     revoke: &impl Fn(),
     observe: &mut impl FnMut(Vec<u8>) -> Result<()>,
 ) -> Result<()> {
@@ -396,6 +406,7 @@ fn stream_item(
             return Ok(());
         }
         session.StartCapture()?;
+        on_start();
         while active() {
             if rx.recv_timeout(Duration::from_millis(25)).is_err() {
                 continue;
@@ -505,6 +516,7 @@ mod tests {
         let calls = std::sync::atomic::AtomicUsize::new(0);
         capture_selected(
             || true,
+            || panic!("cancelled capture started"),
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
             },

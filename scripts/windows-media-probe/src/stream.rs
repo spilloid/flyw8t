@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, watch, Notify};
 use webrtc::media_stream::track_local::{static_sample::TrackLocalStaticSample, TrackLocal};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCIceGatheringState,
@@ -134,10 +134,11 @@ fn access_units(path: &Path) -> Result<Vec<Vec<u8>>> {
     Err("compressed stream did not end".into())
 }
 
-#[derive(Default)]
 struct Events {
     gathered: Notify,
     connected: Notify,
+    lost: watch::Sender<bool>,
+    capture_stop: watch::Sender<bool>,
 }
 
 #[async_trait::async_trait]
@@ -148,9 +149,39 @@ impl PeerConnectionEventHandler for Events {
         }
     }
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
-        if state == RTCPeerConnectionState::Connected {
-            self.connected.notify_one();
+        match state {
+            RTCPeerConnectionState::Connected => self.connected.notify_one(),
+            RTCPeerConnectionState::Disconnected
+            | RTCPeerConnectionState::Failed
+            | RTCPeerConnectionState::Closed => {
+                self.lost.send_replace(true);
+                self.capture_stop.send_replace(true);
+            }
+            _ => {}
         }
+    }
+}
+
+async fn sharing_limit(started: oneshot::Receiver<tokio::time::Instant>, limit: Duration) {
+    if let Ok(when) = started.await {
+        tokio::time::sleep_until(when + limit).await;
+    } else {
+        // Synthetic fixtures and a cancelled picker never start this clock.
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn while_connected(
+    lost: &mut watch::Receiver<bool>,
+    operation: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    if *lost.borrow() {
+        return Err("the verified video transport disconnected".into());
+    }
+    tokio::select! {
+        biased;
+        _ = lost.changed() => Err("the verified video transport disconnected".into()),
+        result = operation => result,
     }
 }
 
@@ -271,7 +302,14 @@ async fn send<'scope>(
     let mut media = MediaEngine::default();
     media.register_codec(codec.clone(), RtpCodecKind::Video)?;
     let interceptors = register_default_interceptors(Registry::new(), &mut media)?;
-    let events = Arc::new(Events::default());
+    let (lost, mut transport_lost) = watch::channel(false);
+    let (local_stop, mut revoked) = watch::channel(false);
+    let events = Arc::new(Events {
+        gathered: Notify::new(),
+        connected: Notify::new(),
+        lost,
+        capture_stop: local_stop.clone(),
+    });
     let mut settings = SettingEngineBuilder::new().with_include_loopback_candidate(true);
     if relay.is_some() {
         // A relay-only chart has no higher-priority direct path to wait for.
@@ -379,7 +417,10 @@ async fn send<'scope>(
     tokio::select! {
         biased;
         _ = control.fill_buf() => { peer.close().await?; return Ok(()); }
-        _ = events.connected.notified() => {}
+        _ = transport_lost.changed() => return Err("the verified video transport disconnected".into()),
+        handshake = tokio::time::timeout(Duration::from_secs(15), events.connected.notified()) => {
+            handshake.map_err(|_| "the technician DTLS connection did not complete")?;
+        }
     }
     let report = peer.get_stats(Instant::now(), StatsSelector::None).await;
     let remote = report
@@ -471,7 +512,10 @@ async fn send<'scope>(
     let mut clock = tokio::time::interval(duration);
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    let (local_stop, mut revoked) = tokio::sync::watch::channel(false);
+    let (selected_start, capture_started) = oneshot::channel();
+    if *transport_lost.borrow() {
+        return Err("the verified video transport disconnected".into());
+    }
     let worker = match &source {
         Source::Live(surface) => {
             let surface = *surface;
@@ -480,7 +524,11 @@ async fn send<'scope>(
                 "Verified loopback peer. Starting {} capture.",
                 surface.label()
             );
-            Some(scope.spawn(move || super::live::produce(tx, session_mode, surface, stop)))
+            Some(scope.spawn(move || {
+                super::live::produce(tx, session_mode, surface, stop, move || {
+                    let _ = selected_start.send(tokio::time::Instant::now());
+                })
+            }))
         }
         Source::Clip { .. } => {
             drop(tx);
@@ -490,7 +538,7 @@ async fn send<'scope>(
     let transmit = async {
         let budget = match source {
             #[cfg(feature = "attended-picker")]
-            Source::Live(super::live::Surface::Selected) => FPS as usize * 120,
+            Source::Live(super::live::Surface::Selected) => usize::MAX, // timed from WGC StartCapture
             _ => FRAMES as usize * 10,
         };
         for index in 0..budget {
@@ -529,18 +577,21 @@ async fn send<'scope>(
                 }
             }
         }
-        #[cfg(feature = "attended-picker")]
-        if matches!(source, Source::Live(super::live::Surface::Selected)) {
-            eprintln!("Selected-surface frame budget reached.");
-            return Ok(());
-        }
         Err("fixture controller did not stop the stream".into())
     };
-    let transmission: Result<()> = tokio::select! {
-        biased;
-        ended = control_stopped(&mut control, grant_deadline) => ended,
-        result = transmit => result,
-    };
+    let transmission = while_connected(&mut transport_lost, async {
+        tokio::select! {
+            biased;
+            ended = control_stopped(&mut control, grant_deadline) => ended,
+            _ = sharing_limit(capture_started, Duration::from_secs(120)) => {
+                eprintln!("Selected-surface sharing time limit reached.");
+                Ok(())
+            }
+            result = transmit => result,
+        }
+    })
+    .await;
+    local_stop.send_replace(true);
     drop(rx);
     peer.close().await?;
     if let Some(worker) = worker {
@@ -549,4 +600,69 @@ async fn send<'scope>(
             .map_err(|_| "owned-window capture worker panicked")??;
     }
     transmission
+}
+
+#[cfg(test)]
+mod selected_lifetime_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn permission_clock_starts_at_capture_and_expires_without_a_frame() {
+        let (started, receiver) = oneshot::channel();
+        let limit = Duration::from_secs(120);
+        let cutoff = sharing_limit(receiver, limit);
+        tokio::pin!(cutoff);
+        assert!(tokio::time::timeout(Duration::from_millis(2), &mut cutoff)
+            .await
+            .is_err());
+        // A stalled sender might first poll the clock long after WGC started.
+        started.send(tokio::time::Instant::now() - limit).unwrap();
+        tokio::time::timeout(Duration::from_millis(200), cutoff)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_loss_ends_a_pending_send_and_fences_an_already_queued_frame() {
+        for end in [
+            RTCPeerConnectionState::Disconnected,
+            RTCPeerConnectionState::Failed,
+            RTCPeerConnectionState::Closed,
+        ] {
+            let (lost, mut receiver) = watch::channel(false);
+            let (capture_stop, source) = watch::channel(false);
+            let events = Events {
+                gathered: Notify::new(),
+                connected: Notify::new(),
+                lost,
+                capture_stop,
+            };
+            events
+                .on_connection_state_change(RTCPeerConnectionState::Connected)
+                .await;
+            let (polling, first_poll) = oneshot::channel();
+            let pending = while_connected(&mut receiver, async {
+                polling.send(()).unwrap();
+                std::future::pending().await
+            });
+            let disconnect = async {
+                first_poll.await.unwrap();
+                events.on_connection_state_change(end).await;
+            };
+            let (result, ()) = tokio::join!(pending, disconnect);
+            assert!(result.is_err());
+            assert!(
+                *source.borrow(),
+                "capture stopped at the transport callback"
+            );
+            events
+                .on_connection_state_change(RTCPeerConnectionState::Connected)
+                .await;
+            assert!(while_connected(&mut receiver, async {
+                panic!("queued frame escaped after loss")
+            })
+            .await
+            .is_err());
+        }
+    }
 }

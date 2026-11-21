@@ -169,6 +169,7 @@ fn capture(
     session_mode: bool,
     surface: Surface,
     stop: &tokio::sync::watch::Sender<bool>,
+    _on_selected_start: impl FnOnce(),
 ) -> Result<()> {
     assert_eq!((WIDTH, HEIGHT), (CHART_WIDTH, CHART_HEIGHT));
     let encoder = Encoder::new(surface)?;
@@ -210,7 +211,8 @@ fn capture(
         #[cfg(feature = "attended-picker")]
         Surface::Selected => {
             return flyw8t_windows_capture_probe::capture_selected(
-                || tx.is_closed(),
+                || tx.is_closed() || *stop.borrow(),
+                _on_selected_start,
                 || {
                     stop.send_replace(true);
                 },
@@ -243,9 +245,10 @@ pub fn produce(
     session_mode: bool,
     surface: Surface,
     stop: tokio::sync::watch::Sender<bool>,
+    on_selected_start: impl FnOnce(),
 ) -> std::result::Result<(), String> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }.map_err(|e| e.to_string())?;
-    let result = capture(&tx, session_mode, surface, &stop);
+    let result = capture(&tx, session_mode, surface, &stop, on_selected_start);
     unsafe {
         CoUninitialize();
     }

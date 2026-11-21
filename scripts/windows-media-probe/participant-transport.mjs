@@ -38,3 +38,29 @@ export function relayAnswer(answer, candidates, allocation) {
   if(!offered.length) return;
   return {type:'answer',sdp:[...lines.filter(line=>line && line!=='a=end-of-candidates' && !line.startsWith('a=candidate:')),...new Set(offered),'a=end-of-candidates',''].join('\r\n')};
 }
+
+// Start only after the native offer is ready. A browser behind an egress filter
+// can answer the SDP without ever producing a usable candidate.
+export function waitForViewerRelay(allocation, expired, timeoutMs = 15000) {
+  let answer, closed = false;
+  const candidates = [];
+  const timer = setTimeout(() => { closed = true; expired(); }, timeoutMs);
+  function cancel() { closed = true; clearTimeout(timer); }
+  return {
+    cancel,
+    receive(data) {
+      if (closed) return;
+      if (data.sdp) {
+        if (answer) throw Error('Duplicate console answer.');
+        answer = data.sdp;
+      }
+      if (data.candidate) {
+        if (candidates.length >= 48) throw Error('Too many ICE candidates.');
+        candidates.push(data.candidate);
+      }
+      const accepted = relayAnswer(answer, candidates, allocation);
+      if (accepted) cancel();
+      return accepted;
+    },
+  };
+}
