@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flyw8t · Windows practice board</title>
+<style>
+:root{font:18px system-ui;color:#172530;background:#f4f7f7}main{max-width:36rem;margin:3rem auto}
+#board{box-sizing:border-box;display:grid;grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(4,1fr);padding:0;width:100%;aspect-ratio:2/1;background:#263943;gap:1px;touch-action:none}
+#board:focus-visible,button:focus-visible{outline:4px solid #176884;outline-offset:3px}
+#board span{background:#fff;display:grid;place-items:center;pointer-events:none}
+#board [data-marked]{background:#b7e5cf}kbd,output{font:inherit}output{display:block;min-height:1.6rem;white-space:pre-wrap;overflow-wrap:anywhere}
+button{font:inherit;padding:.5rem .9rem} h1{font-size:1.6rem}
+</style><main><h1>Windows practice board</h1><p id="status" role="status">Connecting…</p>
+<p>Compare this code with the participant’s Windows window. <strong id="code">Waiting…</strong></p>
+<div role="application" tabindex="0" aria-label="Practice board, eight columns and four rows" id="board"></div>
+<p>Click a cell and type to change the participant’s board.</p><output id="typed" aria-label="Text on the board"></output>
+<button id="end" type="button">End session</button></main><script src="/viewer.mjs" type="module"></script></html>

@@ -8,6 +8,20 @@ license = "MIT"
 # Development fixture with its own lockfile; excluded from shipping artifacts.
 [workspace]
 
+[features]
+owned-board = ["windows/Win32_System_RemoteDesktop"]
+
+[[example]]
+name = "owned-control"
+path = "examples/owned-control/main.rs"
+required-features = ["owned-board"]
+
+[dev-dependencies]
+hex = "0.4"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+uuid = "1"
+
 [dependencies]
 flyw8t-windows-capture-probe = { path = "../windows-capture-probe" }
 tempfile = "3"
