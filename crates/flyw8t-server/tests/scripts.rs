@@ -161,6 +161,15 @@ async fn every_save_is_a_permanent_revision_with_its_hash_diff_and_file() {
         .contains("script-src 'self'"));
     assert!(page.body.contains("/static/editor.js"));
 
+    let copy = admin
+        .get(&server, &format!("/scripts/{id}/revisions/1/edit"))
+        .await;
+    assert_eq!(copy.status, StatusCode::OK);
+    assert!(copy.body.contains("Based on revision 1"));
+    assert!(copy.body.contains("Save as revision 3"));
+    assert!(copy.body.contains("Write-Output 'two'"));
+    assert_eq!(revisions(&server, id).await, 2);
+
     let diff = admin
         .get(&server, &format!("/scripts/{id}/revisions/2"))
         .await;

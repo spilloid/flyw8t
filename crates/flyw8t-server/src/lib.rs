@@ -222,6 +222,10 @@ pub fn router(state: Shared) -> Router {
             get(scripts::revision_page),
         )
         .route(
+            "/scripts/{id}/revisions/{number}/edit",
+            get(scripts::edit_revision),
+        )
+        .route(
             "/scripts/{id}/revisions/{number}/download",
             get(scripts::download),
         )
