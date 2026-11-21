@@ -28,11 +28,47 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
   function powershell(stage, script, env = {}) {
     // The single-use token is supplied only through the child environment. Capture all child
     // output, including errors, so an unexpected server/agent response cannot log the token.
-    const encoded = Buffer.from("$ErrorActionPreference = 'Stop'\n" + script, 'utf16le').toString('base64');
+    const input = "$ErrorActionPreference = 'Stop'\ntry {\n" + lines(script);
+    const reportFailure = [
+      '} catch {',
+      "  $hint = 'PowerShell'",
+      '  switch -Regex ($_.Exception.Message) {',
+      "    'module could not be loaded' { $hint = 'module-load'; break }",
+      "    'owned by .+, not Administrators or SYSTEM' { $hint = 'file-owner'; break }",
+      "    'is not as .+ made it|permissions from the folder above|could not be locked' { $hint = 'directory-permissions'; break }",
+      "    'access is denied|error 5\\b' { $hint = 'access-denied'; break }",
+      "    'enrollment refused' { $hint = 'token-refused'; break }",
+      "    'connecting to .+|connect timed out' { $hint = 'server-connection'; break }",
+      "    'does not match SHA256SUMS' { $hint = 'checksum'; break }",
+      "    'timestamped Flyw8t publisher signature' { $hint = 'publisher-signature'; break }",
+      "    'belongs to a different release' { $hint = 'version'; break }",
+      '  }',
+      "  [Console]::Error.WriteLine(('FLYW8T-TRIAL-FAIL {0} {1}' -f $_.InvocationInfo.ScriptLineNumber, $hint))",
+      '  exit 1',
+      '}'
+    ].join('\n');
+    const encoded = Buffer.from(input + '\n' + reportFailure, 'utf16le').toString('base64');
     const child = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
       cwd: dir, env: { ...process.env, ...env }, encoding: 'utf8', timeout: 90000, windowsHide: true
     });
-    if (child.error || child.status !== 0) throw Error(stage + ' failed (exit ' + child.status + ')');
+    if (child.error || child.status !== 0) {
+      // Only return our own labels and numeric source locations. Other child output may
+      // include a token, a command line or untrusted server text.
+      const marker = /^FLYW8T-TRIAL-FAIL (\d{1,5}) (PowerShell|module-load|file-owner|directory-permissions|access-denied|token-refused|server-connection|checksum|publisher-signature|version)\r?$/m.exec(child.stderr ?? '');
+      let detail = child.error?.code === 'ETIMEDOUT' ? ', timed out' : '';
+      if (marker) {
+        const line = Number(marker[1]);
+        detail = ', ' + marker[2] + ', PowerShell line ' + line;
+        const offset = input.indexOf(expected);
+        if (offset >= 0) {
+          const templateLine = line - input.slice(0, offset).split('\n').length + 1;
+          if (templateLine > 0 && templateLine <= expected.trimEnd().split('\n').length) {
+            detail += ', enroll-windows.ps1 line ' + templateLine;
+          }
+        }
+      }
+      throw Error(stage + ' failed (exit ' + child.status + detail + ')');
+    }
     return child.stdout.trim();
   }
 
