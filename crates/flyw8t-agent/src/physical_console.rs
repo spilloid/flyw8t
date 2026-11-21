@@ -42,9 +42,9 @@ mod windows {
     use super::PhysicalConsoleState;
     use std::{ptr, slice};
     use windows_sys::Win32::System::RemoteDesktop::{
-        WTSActive, WTSClientProtocolType, WTSConnectState, WTSConnected, WTSFreeMemory,
-        WTSGetActiveConsoleSessionId, WTSQuerySessionInformationW, WTSUserName,
-        WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS,
+        WTSActive as WTS_ACTIVE, WTSClientProtocolType, WTSConnectState,
+        WTSConnected as WTS_CONNECTED, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+        WTSQuerySessionInformationW, WTSUserName, WTS_CURRENT_SERVER_HANDLE, WTS_INFO_CLASS,
     };
 
     #[derive(PartialEq, Eq)]
@@ -82,8 +82,8 @@ mod windows {
             return Unavailable;
         }
         match (first.state, first.protocol, first.user_present) {
-            (WTSActive, 0, true) => ActiveConsole,
-            (WTSActive | WTSConnected, 0, false) => NoInteractiveUser,
+            (WTS_ACTIVE, 0, true) => ActiveConsole,
+            (WTS_ACTIVE | WTS_CONNECTED, 0, false) => NoInteractiveUser,
             _ => Unavailable,
         }
     }
@@ -157,13 +157,13 @@ mod windows {
         #[test]
         fn reports_only_consistent_local_console_facts() {
             for (state, protocol, user, expected) in [
-                (WTSActive, 0, true, ActiveConsole),
-                (WTSActive, 0, false, NoInteractiveUser),
-                (WTSConnected, 0, false, NoInteractiveUser),
-                (WTSConnected, 0, true, Unavailable),
+                (WTS_ACTIVE, 0, true, ActiveConsole),
+                (WTS_ACTIVE, 0, false, NoInteractiveUser),
+                (WTS_CONNECTED, 0, false, NoInteractiveUser),
+                (WTS_CONNECTED, 0, true, Unavailable),
                 (WTSDisconnected, 0, true, Unavailable),
-                (WTSActive, 2, true, Unavailable),
-                (WTSActive, 1, true, Unavailable),
+                (WTS_ACTIVE, 2, true, Unavailable),
+                (WTS_ACTIVE, 1, true, Unavailable),
             ] {
                 assert_eq!(observe(|| 7, |_| evidence(state, protocol, user)), expected);
             }
@@ -180,13 +180,13 @@ mod windows {
             for ids in [[7, 8, 8], [7, 7, 8], [u32::MAX, 7, 7]] {
                 let mut ids = ids.into_iter();
                 assert_eq!(
-                    observe(|| ids.next().unwrap(), |_| evidence(WTSActive, 0, true)),
+                    observe(|| ids.next().unwrap(), |_| evidence(WTS_ACTIVE, 0, true)),
                     Unavailable
                 );
             }
             let mut users = [true, false].into_iter();
             assert_eq!(
-                observe(|| 7, |_| evidence(WTSActive, 0, users.next().unwrap())),
+                observe(|| 7, |_| evidence(WTS_ACTIVE, 0, users.next().unwrap())),
                 Unavailable
             );
             assert_eq!(user_present(&[0, 0]), Some(false));

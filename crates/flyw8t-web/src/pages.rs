@@ -1146,7 +1146,7 @@ pub fn physical_console_result(
             "Check the device’s connection before trying again.",
         ),
         PhysicalConsoleCheck::Busy => (
-            "The agent connection is busy.",
+            "The agent or console is busy.",
             "Wait a moment, then run the check again.",
         ),
         PhysicalConsoleCheck::TimedOut => (

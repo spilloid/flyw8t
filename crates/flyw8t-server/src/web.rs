@@ -524,8 +524,13 @@ pub async fn check_physical_console(
             Err(ConsoleCheckError::Busy) => (PhysicalConsoleCheck::Busy, "busy"),
             Err(ConsoleCheckError::Timeout) => (PhysicalConsoleCheck::TimedOut, "timeout"),
         };
+        let mut tx = state.db.begin().await?;
+        let (current_org, name) = physical_console_target(&mut tx, &p, device).await?;
+        if current_org != org {
+            return Err(AppError::NotFound);
+        }
         let audit = Audit::user(&p, "device.physical_console.result")
-            .org(org)
+            .org(current_org)
             .target("device", device)
             .detail(json!({"request_id":request, "status":outcome}));
         if reply.is_err() {
@@ -533,14 +538,8 @@ pub async fn check_physical_console(
         } else {
             audit
         }
-        .record(&state.db)
+        .record(&mut *tx)
         .await?;
-
-        let mut tx = state.db.begin().await?;
-        let (current_org, name) = physical_console_target(&mut tx, &p, device).await?;
-        if current_org != org {
-            return Err(AppError::NotFound);
-        }
         tx.commit().await?;
         html(flyw8t_web::physical_console_result(
             &ctx(&p, None),

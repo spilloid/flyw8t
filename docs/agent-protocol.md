@@ -10,6 +10,10 @@ Windows agents advertise the optional `physical_console_check` boolean in `authe
 
 A signed-in physical console can be locked. This observation contains no account name or Windows session ID. Starting a stream and authorizing input require the remote desktop session policy and separate grants.
 
+Live checks use the server instance holding the agent connection. An installation with multiple console replicas needs routing to that instance. If the HTTP request or server stops before recording an outcome, Audit retains the initial request as incomplete.
+
+Windows reports the session attached to the physical console and identifies its local versus RDP protocol separately. [Physical console session ID](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-wtsgetactiveconsolesessionid) and [Windows session information classes](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ne-wtsapi32-wts_info_class).
+
 ## Limits
 
 | Limit | Value | Enforced by |

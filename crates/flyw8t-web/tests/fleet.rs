@@ -142,7 +142,7 @@ fn physical_console_result_distinguishes_observations_from_agent_delivery_failur
         (Unknown, "could not determine the physical console state"),
         (Unsupported, "requires an updated Windows agent"),
         (Offline, "no live connection to the agent"),
-        (Busy, "agent connection is busy"),
+        (Busy, "agent or console is busy"),
         (TimedOut, "timed out waiting for the agent"),
     ] {
         let page = physical_console_result(&context, id, "<img src=x>", status);

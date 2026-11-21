@@ -145,11 +145,24 @@ async fn physical_console_check_uses_the_enrolled_connection_and_audits_the_repl
     assert_eq!(server.request(invalid).await.status, StatusCode::FORBIDDEN);
 
     let legacy = RawAgent::authenticate(&server, &agent).await;
+    wait_connected(&server, device).await;
+    let legacy_connection = server.state.registry.current_conn(device).unwrap();
     let response = admin.post(&server, &path, &[]).await;
     assert_eq!(response.status, StatusCode::OK);
-    assert!(server.state.registry.current_conn(device).is_some());
-    drop(legacy);
     let mut current = RawAgent::authenticate_with_console(&server, &agent, true).await;
+    wait_for(
+        "the new console-capable connection",
+        Duration::from_secs(10),
+        || async {
+            server
+                .state
+                .registry
+                .current_conn(device)
+                .is_some_and(|id| id != legacy_connection)
+        },
+    )
+    .await;
+    drop(legacy);
     let (_, served) = tokio::join!(
         async {
             let ServerMsg::CheckPhysicalConsole { request_id } = next(&mut current.ws).await else {
