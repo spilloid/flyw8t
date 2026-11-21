@@ -382,13 +382,42 @@ async fn newer_connection_supersedes_older() {
     server.stop().await;
 }
 
+/// Exercise a restored job before background redelivery repairs its state.
+/// Admin creation and the authenticated gateway still dispatch and handle real messages.
+async fn start_before_redelivery() -> TestServer {
+    let state = flyw8t_server::init(test_config(&fresh_database().await))
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = flyw8t_server::router(state.clone())
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let stop = shutdown.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await?;
+        Ok(())
+    });
+    TestServer {
+        state,
+        addr,
+        shutdown,
+        task,
+        admin_key: Default::default(),
+    }
+}
+
 /// A device reports progress on a job the server records as `queued` (e.g. the database was
 /// restored from a backup taken before the dispatch committed). The server records the
 /// implied dispatch and accepts the evidence instead of rejecting it into a resend loop.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn report_for_job_recorded_as_queued_is_accepted_not_looped() {
-    let server = start_fresh().await;
+    let server = start_before_redelivery().await;
     let (admin, _org, agent) = enrolled(&server).await;
     let mut raw = RawAgent::authenticate(&server, &agent).await;
     let r = admin
@@ -402,38 +431,16 @@ async fn report_for_job_recorded_as_queued_is_accepted_not_looped() {
         .unwrap()
         .parse()
         .unwrap();
-    raw.expect_offer().await;
-    // Keep the row locked from the edit until the server is waiting to apply the report.
-    // Otherwise the sweeper (every 200 ms here) or a late dispatch announcement can find the
-    // job `queued` first and dispatch it in the ordinary way, and the report implies nothing.
-    let mut edit = server.state.db.begin().await.unwrap();
+    assert_eq!(raw.expect_offer().await, job);
+    // A live sweeper or notification listener could produce an ordinary redispatch
+    // during this interval. Its SELECT FOR UPDATE is identical to the report's.
     sqlx::query("UPDATE jobs SET state = 'queued' WHERE id = $1")
         .bind(job)
-        .execute(&mut *edit)
+        .execute(&server.state.db)
         .await
         .unwrap();
     raw.report(job, finished_exit0("Windows IP Configuration"))
         .await;
-    let waiting_since = std::time::Instant::now();
-    loop {
-        let (waiting,): (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM pg_stat_activity
-              WHERE datname = current_database() AND wait_event_type = 'Lock'
-                AND query LIKE '%FROM jobs WHERE id = $1 FOR UPDATE'",
-        )
-        .fetch_one(&server.state.db)
-        .await
-        .unwrap();
-        if waiting > 0 {
-            break;
-        }
-        assert!(
-            waiting_since.elapsed() < Duration::from_secs(15),
-            "the report never reached the job's row lock"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    edit.commit().await.unwrap();
     let reply = next(&mut raw.ws).await;
     assert!(
         matches!(reply, ServerMsg::ReportAck { job_id } if job_id == job),
@@ -454,6 +461,7 @@ async fn report_for_job_recorded_as_queued_is_accepted_not_looped() {
             .is_some(),
         "connection survives"
     );
+    drop(raw);
     server.stop().await;
 }
 

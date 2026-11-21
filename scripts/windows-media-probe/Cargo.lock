@@ -469,10 +469,14 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "flyw8t-windows-capture-probe",
+ "hex",
+ "ring",
  "rtc",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
  "webrtc",
  "windows",
 ]
