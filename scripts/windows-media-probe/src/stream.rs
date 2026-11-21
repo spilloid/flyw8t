@@ -100,18 +100,44 @@ impl PeerConnectionEventHandler for Events {
 
 pub fn run(path: &Path) -> Result<()> {
     let units = access_units(path)?;
+    let profile = profile(&units[0])?;
+    run_source(Some(units), profile)
+}
+
+fn profile(bytes: &[u8]) -> Result<String> {
+    let sps = bytes
+        .windows(7)
+        .find(|p| p[..3] == [0, 0, 1] && p[3] & 31 == 7)
+        .ok_or("missing Annex B H.264 sequence header")?;
+    Ok(format!("{:02x}{:02x}{:02x}", sps[4], sps[5], sps[6]))
+}
+
+pub fn run_window() -> Result<()> {
+    run_source(None, profile(&super::live::sequence_header()?)?)
+}
+
+fn run_source(units: Option<Vec<Vec<u8>>>, profile: String) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let result = runtime
-        .block_on(async { tokio::time::timeout(Duration::from_secs(25), send(units)).await? });
+    // Even cancellation of the whole handshake/transmission joins the capture
+    // thread before the caller shuts down process-wide Media Foundation.
+    let result = std::thread::scope(|scope| {
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(25), send(units, profile, scope)).await?
+        })
+    });
     // A cancelled asynchronous stdin read can otherwise hold up process exit on Windows.
     runtime.shutdown_background();
     result
 }
 
-async fn send(units: Vec<Vec<u8>>) -> Result<()> {
+async fn send<'scope>(
+    units: Option<Vec<Vec<u8>>>,
+    codec_profile: String,
+    scope: &'scope std::thread::Scope<'scope, '_>,
+) -> Result<()> {
     let mut control = BufReader::new(tokio::io::stdin());
     // The harness pins the browser certificate on a private pipe before seeing the offer.
     let mut identity = String::new();
@@ -124,18 +150,13 @@ async fn send(units: Vec<Vec<u8>>) -> Result<()> {
     {
         return Err("invalid fixture peer fingerprint".into());
     }
-    let sps = units[0]
-        .windows(7)
-        .find(|p| p[..3] == [0, 0, 1] && p[3] & 31 == 7)
-        .ok_or("missing H.264 sequence header")?;
-    let profile = format!("{:02x}{:02x}{:02x}", sps[4], sps[5], sps[6]);
     let codec = RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
             mime_type: MIME_TYPE_H264.to_owned(),
             clock_rate: 90_000,
             channels: 0,
             sdp_fmtp_line: format!(
-                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile}"
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={codec_profile}"
             ),
             rtcp_feedback: vec![],
         },
@@ -226,21 +247,51 @@ async fn send(units: Vec<Vec<u8>>) -> Result<()> {
     let duration = Duration::from_secs_f64(1.0 / f64::from(FPS));
     let mut clock = tokio::time::interval(duration);
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    for payload in units.iter().cycle().take(units.len() * 10) {
-        tokio::select! {
-            biased;
-            _ = control.fill_buf() => { peer.close().await?; return Ok(()); }
-            _ = clock.tick() => {}
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let worker = if units.is_none() {
+        eprintln!("Verified loopback peer. Starting owned-window capture.");
+        Some(scope.spawn(move || super::live::produce(tx)))
+    } else {
+        drop(tx);
+        None
+    };
+    let transmission: Result<()> = async {
+        for index in 0..FRAMES as usize * 10 {
+            tokio::select! {
+                biased;
+                _ = control.fill_buf() => { return Ok(()); }
+                _ = clock.tick() => {}
+            }
+            let payload = if let Some(clip) = &units {
+                clip[index % clip.len()].clone()
+            } else {
+                let unit = tokio::select! {
+                    biased;
+                    _ = control.fill_buf() => return Ok(()),
+                    unit = rx.recv() => unit.ok_or("owned-window producer stopped before fixture revocation")?,
+                };
+                if index == 0 && profile(&unit)? != codec_profile {
+                    return Err("live encoder profile differs from offer".into());
+                }
+                unit
+            };
+            track
+                .sample_writer(ssrc, pt)
+                .write_sample(&Sample {
+                    data: payload.into(),
+                    duration,
+                    ..Sample::new(Instant::now())
+                })
+                .await?;
         }
-        track
-            .sample_writer(ssrc, pt)
-            .write_sample(&Sample {
-                data: payload.clone().into(),
-                duration,
-                ..Sample::new(Instant::now())
-            })
-            .await?;
-    }
+        Err("fixture controller did not stop the stream".into())
+    }.await;
+    drop(rx);
     peer.close().await?;
-    Err("fixture controller did not stop the stream".into())
+    if let Some(worker) = worker {
+        worker
+            .join()
+            .map_err(|_| "owned-window capture worker panicked")??;
+    }
+    transmission
 }

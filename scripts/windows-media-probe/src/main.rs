@@ -1,6 +1,7 @@
 //! Verify Windows Media Foundation can encode and decode a synthetic luma pattern.
-//! The optional WebRTC experiment sends only those pixels to a loopback browser peer.
+//! Loopback WebRTC sends generated tiles or a live WGC capture of the test window.
 use std::{error::Error, io, path::Path};
+mod live;
 mod stream;
 
 use windows::{
@@ -48,6 +49,23 @@ fn media_type(subtype: &GUID) -> windows::core::Result<IMFMediaType> {
     }
 }
 
+fn input_sample(frame: u32, nv12: &[u8]) -> windows::core::Result<IMFSample> {
+    unsafe {
+        let buffer = MFCreateMemoryBuffer(nv12.len() as u32)?;
+        let mut target = std::ptr::null_mut();
+        buffer.Lock(&mut target, None, None)?;
+        // The allocation is exactly nv12.len(), distinct from the source, and locked.
+        std::ptr::copy_nonoverlapping(nv12.as_ptr(), target, nv12.len());
+        buffer.Unlock()?;
+        buffer.SetCurrentLength(nv12.len() as u32)?;
+        let sample = MFCreateSample()?;
+        sample.AddBuffer(&buffer)?;
+        sample.SetSampleTime(timestamp(frame))?;
+        sample.SetSampleDuration(timestamp(frame + 1) - timestamp(frame))?;
+        Ok(sample)
+    }
+}
+
 fn write_fixture(path: &Path) -> Result<()> {
     let pixels = (WIDTH * HEIGHT) as usize;
     let mut nv12 = vec![128u8; pixels + pixels / 2];
@@ -62,17 +80,7 @@ fn write_fixture(path: &Path) -> Result<()> {
         writer.BeginWriting()?;
         for frame in 0..FRAMES {
             nv12[..pixels].fill(luma(frame));
-            let buffer = MFCreateMemoryBuffer(nv12.len() as u32)?;
-            let mut target = std::ptr::null_mut();
-            buffer.Lock(&mut target, None, None)?;
-            // The allocation is exactly nv12.len(), distinct from the source, and locked.
-            std::ptr::copy_nonoverlapping(nv12.as_ptr(), target, nv12.len());
-            buffer.Unlock()?;
-            buffer.SetCurrentLength(nv12.len() as u32)?;
-            let sample = MFCreateSample()?;
-            sample.AddBuffer(&buffer)?;
-            sample.SetSampleTime(timestamp(frame))?;
-            sample.SetSampleDuration(timestamp(frame + 1) - timestamp(frame))?;
+            let sample = input_sample(frame, &nv12)?;
             writer.WriteSample(stream, &sample)?;
         }
         writer.Finalize()?;
@@ -140,13 +148,17 @@ fn read_fixture(path: &Path) -> Result<u32> {
     Err("decoder did not report end of stream".into())
 }
 
-fn probe(mode: Mode) -> Result<u32> {
+fn probe(mode: Mode) -> Result<()> {
+    if matches!(mode, Mode::WindowLoopback) {
+        return stream::run_window();
+    }
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("synthetic.mp4");
     write_fixture(&path)?;
     let frames = read_fixture(&path)?;
     match mode {
         Mode::Native => {}
+        Mode::WindowLoopback => unreachable!(),
         Mode::Mp4 => {
             io::copy(&mut std::fs::File::open(path)?, &mut io::stdout().lock())?;
         }
@@ -154,13 +166,15 @@ fn probe(mode: Mode) -> Result<u32> {
             stream::run(&path)?;
         }
     }
-    Ok(frames)
+    eprintln!("H.264 round trip: {frames}/{FRAMES} synthetic frames, {WIDTH}x{HEIGHT} at {FPS} fps; luma and presentation timestamps verified.");
+    Ok(())
 }
 
 enum Mode {
     Native,
     Mp4,
     Loopback,
+    WindowLoopback,
 }
 
 fn main() -> Result<()> {
@@ -169,7 +183,13 @@ fn main() -> Result<()> {
         (None, None) => Mode::Native,
         (Some(flag), None) if flag == "--emit-mp4" => Mode::Mp4,
         (Some(flag), None) if flag == "--loopback" => Mode::Loopback,
-        _ => return Err("usage: flyw8t-windows-media-probe [--emit-mp4|--loopback]".into()),
+        (Some(flag), None) if flag == "--window-loopback" => Mode::WindowLoopback,
+        _ => {
+            return Err(
+                "usage: flyw8t-windows-media-probe [--emit-mp4|--loopback|--window-loopback]"
+                    .into(),
+            )
+        }
     };
     // All COM interfaces in probe() drop before the runtime is shut down.
     unsafe {
@@ -178,16 +198,12 @@ fn main() -> Result<()> {
             Ok(()) => {
                 let result = probe(mode);
                 let shutdown = MFShutdown();
-                result.and_then(|frames| {
-                    shutdown?;
-                    Ok(frames)
-                })
+                result.and_then(|()| Ok(shutdown?))
             }
             Err(error) => Err(error.into()),
         };
         CoUninitialize();
-        let decoded = result?;
-        eprintln!("H.264 round trip: {decoded}/{FRAMES} synthetic frames, {WIDTH}x{HEIGHT} at {FPS} fps; luma and presentation timestamps verified.");
+        result?;
     }
     Ok(())
 }

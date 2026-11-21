@@ -9,6 +9,7 @@ license = "MIT"
 [workspace]
 
 [dependencies]
+flyw8t-windows-capture-probe = { path = "../windows-capture-probe" }
 tempfile = "3"
 windows = { version = "=0.62.2", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
 webrtc = "=0.21.1"

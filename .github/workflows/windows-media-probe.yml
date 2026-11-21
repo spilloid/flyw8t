@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - 'scripts/windows-media-probe/**'
+      - 'scripts/windows-capture-probe/**'
       - '.github/workflows/windows-media-probe.yml'
       - '.cargo/config.toml'
       - 'rust-toolchain.toml'
@@ -25,9 +26,11 @@ jobs:
         with:
           node-version: 22
       - run: cargo fmt --check
+      - run: cargo fmt --manifest-path ../windows-capture-probe/Cargo.toml --check
       - run: rustc -Vv
       - run: cargo clippy --locked -- -D warnings
       - run: cargo build --locked
       - run: npm ci --ignore-scripts
       - run: node browser.mjs ./target/x86_64-pc-windows-msvc/debug/flyw8t-windows-media-probe.exe
       - run: node loopback.mjs ./target/x86_64-pc-windows-msvc/debug/flyw8t-windows-media-probe.exe
+      - run: node loopback.mjs ./target/x86_64-pc-windows-msvc/debug/flyw8t-windows-media-probe.exe --owned-window --refusal-only

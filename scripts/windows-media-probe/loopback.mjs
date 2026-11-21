@@ -1,4 +1,4 @@
-// Same-machine H.264 WebRTC test. Only generated pixels and loopback ICE are allowed.
+// Same-machine H.264 WebRTC test. Sources are synthetic tiles or the fixture's own window.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -8,7 +8,11 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 
-assert.equal(process.argv.length, 3, 'usage: node loopback.mjs <probe executable>');
+const chart = process.argv[3] === '--owned-window';
+const refusalOnly = chart && process.argv[4] === '--refusal-only';
+assert.ok(process.argv.length === 3 || (process.argv.length === 4 && chart) ||
+  (process.argv.length === 5 && refusalOnly),
+  'usage: node loopback.mjs <probe executable> [--owned-window [--refusal-only]]');
 const browser = await chromium.launch({
   channel: 'msedge',
   headless: true,
@@ -24,7 +28,7 @@ async function counts(page) {
 }
 
 async function run(mismatch) {
-  const source = spawn(resolve(process.argv[2]), ['--loopback'], {
+  const source = spawn(resolve(process.argv[2]), [chart ? '--window-loopback' : '--loopback'], {
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, timeout: 30_000,
   });
   const done = once(source, 'close');
@@ -45,21 +49,22 @@ async function run(mismatch) {
       offer = JSON.parse(line);
       break;
     }
-    assert.equal(offer?.type, 'offer', 'native sender must provide an SDP offer');
+    assert.equal(offer?.type, 'offer', 'native sender must provide an SDP offer. ' + diagnostics);
     const media = offer.sdp.split(/\r?\n/).filter(l => l.startsWith('m='));
     assert.equal(media.length, 1);
     assert.match(media[0], /^m=video /);
     const candidates = offer.sdp.split(/\r?\n/).filter(l => l.startsWith('a=candidate:'));
     assert.ok(candidates.length > 0);
     assert.ok(candidates.every(l => l.split(/\s+/)[4] === '127.0.0.1'));
-    const answer = await page.evaluate(async offer => {
+    const answer = await page.evaluate(async ({ offer, chart }) => {
       const peer = new RTCPeerConnection({ iceServers: [], bundlePolicy: 'max-bundle', certificates: [window.fixtureCert] });
       window.fixturePeer = peer;
       const video = document.createElement('video');
       document.body.append(video);
       video.autoplay = video.muted = true;
       const canvas = document.createElement('canvas');
-      canvas.width = canvas.height = 1;
+      canvas.width = 2;
+      canvas.height = 1;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       window.fixtureBands = [];
       window.presented = 0;
@@ -67,9 +72,15 @@ async function run(mismatch) {
         video.srcObject = new MediaStream([e.track]);
         function frame() {
           window.presented++;
-          ctx.drawImage(video, 0, 0, 1, 1);
-          const level = ctx.getImageData(0, 0, 1, 1).data[0];
-          const band = level <= 50 ? 'dark' : level >= 190 ? 'light' : null;
+          const centerY = Math.floor(video.videoHeight / 2);
+          for (const [i, x] of [0.25, 0.75].entries()) {
+            ctx.drawImage(video, Math.floor(video.videoWidth * x), centerY, 1, 1, i, 0, 1, 1);
+          }
+          const samples = ctx.getImageData(0, 0, 2, 1).data;
+          const [left, right] = [samples[0], samples[4]];
+          const dark = left <= 50 && (chart ? right >= 190 : right <= 50);
+          const light = left >= 190 && (chart ? right <= 50 : right >= 190);
+          const band = dark ? 'dark' : light ? 'light' : null;
           if (band && band !== window.fixtureBands.at(-1)) window.fixtureBands.push(band);
           video.requestVideoFrameCallback(frame);
         }
@@ -80,12 +91,13 @@ async function run(mismatch) {
       await peer.setLocalDescription(await peer.createAnswer());
       return { type: peer.localDescription.type, sdp: peer.localDescription.sdp
         .split('\r\n').filter(line => !line.startsWith('a=candidate:') || line.split(/\s+/)[4] === '127.0.0.1').join('\r\n') };
-    }, offer);
+    }, { offer, chart });
     source.stdin.write(JSON.stringify(answer) + '\n');
     if (mismatch) {
       const [status] = await done;
       assert.equal(status, 1, diagnostics);
       assert.match(diagnostics, /actual DTLS peer does not match/);
+      assert.doesNotMatch(diagnostics, /Starting owned-window capture/);
       await delay(500);
       assert.deepEqual(await counts(page), { presented: 0, received: 0, decoded: 0 });
       console.log('Mismatched certificate rejected; no received, decoded or presented frames at drain check.');
@@ -101,12 +113,13 @@ async function run(mismatch) {
     assert.equal(result.codec.toLowerCase(), 'video/h264');
     assert.ok(result.frames >= 4);
     assert.deepEqual(result.bands.slice(0, 4), ['dark', 'light', 'dark', 'light']);
-    console.log('Native H.264 over loopback WebRTC:', result);
+    console.log(chart ? 'WGC two-panel chart over H.264 WebRTC:' : 'Native H.264 over loopback WebRTC:', result);
     // Revoking the private fixture pipe must stop the native sender before its frame budget.
     const stopAt = performance.now();
     source.stdin.end();
     const [status] = await done;
-    assert.equal(status, 0, 'native sender did not finish cleanly');
+    assert.equal(status, 0, diagnostics);
+    if (chart) assert.match(diagnostics, /Starting owned-window capture/);
     const stopMs = performance.now() - stopAt;
     assert.ok(stopMs < 2000, 'fixture took ' + stopMs + ' ms to stop');
     await delay(500);
@@ -121,7 +134,7 @@ async function run(mismatch) {
 }
 
 try {
-  await run(false);
+  if (!refusalOnly) await run(false);
   await run(true);
 } finally {
   await browser.close();
