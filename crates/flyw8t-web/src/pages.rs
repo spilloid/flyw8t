@@ -2166,7 +2166,7 @@ pub fn support_list_page(
         .into_any()
     };
     let control_choice = ctx.can_control.then(|| view! {
-        <label class="inline"><input type="radio" name="capability" value="control"/>" View and control (needs the helper)"</label>
+        <label class="inline"><input type="radio" name="capability" value="control"/>" Pair Windows control helper (preview)"</label>
     });
     let no_orgs = orgs.is_empty().then(|| view! { <p class="flash bad">"You are not assigned to any organization, so you cannot start a session. Ask an administrator."</p> });
     let org_options = orgs
@@ -2179,7 +2179,7 @@ pub fn support_list_page(
         {invite}
         <section class="card">
             <h2>"Start an attended session"</h2>
-            <p>"The person you are helping opens a link in their browser and chooses a tab, a window, or their screen to show you. With "<strong>"view"</strong>" you can see it and nothing more. With "<strong>"control"</strong>" they also run the flyw8t helper and allow it there, and you can use their mouse and keyboard. Nothing is installed, and the session ends when either of you ends it."</p>
+            <p>"Choose View screen to see the surface the participant shares. They can open the invitation link in their browser or enter the code in the Windows participant. Either person can stop sharing. The control helper preview tests pairing and local approval."</p>
             <form method="post" action="/support" class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                 <label>"Organization"<select name="organization" required=true>{org_options}</select></label>

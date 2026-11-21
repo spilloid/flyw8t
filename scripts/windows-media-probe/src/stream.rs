@@ -529,6 +529,11 @@ async fn send<'scope>(
                 }
             }
         }
+        #[cfg(feature = "attended-picker")]
+        if matches!(source, Source::Live(super::live::Surface::Selected)) {
+            eprintln!("Selected-surface frame budget reached.");
+            return Ok(());
+        }
         Err("fixture controller did not stop the stream".into())
     };
     let transmission: Result<()> = tokio::select! {

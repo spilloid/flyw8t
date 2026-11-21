@@ -209,7 +209,7 @@ person can end sharing. The participant can also close the local page.
 
 The candidate uses the configured authenticated IPv4 UDP TURN relay. The
 relay's listener and allocated candidates must use the same IPv4 address on
-both peers. The native session has a three-minute ceiling. The portable
+both peers. The beta sends up to two minutes of video and allows three minutes in total for connecting, choosing a surface, and sharing. The portable
 participant advertises attended viewing. Technician input and per-workstation
 unattended control have separate acceptance gates.
 
