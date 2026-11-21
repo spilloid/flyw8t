@@ -128,10 +128,18 @@ async fn send(units: Vec<Vec<u8>>) -> Result<()> {
         .windows(7)
         .find(|p| p[..3] == [0, 0, 1] && p[3] & 31 == 7)
         .ok_or("missing H.264 sequence header")?;
-    let codec=RTCRtpCodecParameters {
-        rtp_codec: RTCRtpCodec { mime_type:MIME_TYPE_H264.to_owned(),clock_rate:90_000,channels:0,
-            sdp_fmtp_line:format!("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={:02x}{:02x}{:02x}",sps[4],sps[5],sps[6]),rtcp_feedback:vec![] },
-        payload_type:102,..Default::default()
+    let profile = format!("{:02x}{:02x}{:02x}", sps[4], sps[5], sps[6]);
+    let codec = RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            clock_rate: 90_000,
+            channels: 0,
+            sdp_fmtp_line: format!(
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile}"
+            ),
+            rtcp_feedback: vec![],
+        },
+        payload_type: 102,
     };
     let mut media = MediaEngine::default();
     media.register_codec(codec.clone(), RtpCodecKind::Video)?;
