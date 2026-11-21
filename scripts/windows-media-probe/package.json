@@ -1,0 +1,8 @@
+{
+  "name": "flyw8t-windows-media-probe",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "playwright-core": "1.65.1"
+  }
+}
