@@ -1979,6 +1979,7 @@ pub fn admin_page(
     orgs: Vec<OrgRef>,
     revealed: Option<RevealedSecret>,
     oidc: bool,
+    reauth_for_mcp: bool,
 ) -> String {
     let now = ctx.now;
     let user_rows = users
@@ -2054,6 +2055,19 @@ pub fn admin_page(
         </section>
         <section>
             <h2>"API tokens"</h2>
+            <form id="mcp-client" method="post" action="/admin/tokens" class="card stack">
+                <h3>"Connect an MCP client"</h3>
+                <p>"The client can request screenshots during a shared support session. The participant chooses whether to allow them."</p>
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <input type="hidden" name="scope" value="support:screenshot"/>
+                <input type="hidden" name="ttl_days" value="30"/>
+                {if reauth_for_mcp {
+                    view! { <a href="/login/oidc?resume=mcp">"Confirm organization sign-in to continue"</a> }.into_any()
+                } else {
+                    view! { <label>"Name shown to the participant"<input name="name" value="Codex" required=true maxlength="100"/></label>
+                        <button type="submit">"Create 30-day screenshot token"</button> }.into_any()
+                }}
+            </form>
             <p class="muted">"For integrations such as AnchorDesk. A token acts as the user who created it, never with more access than that user; its scopes can only narrow it."</p>
             <table class="list">
                 <thead><tr><th scope="col">"Token"</th><th scope="col">"Owner"</th><th scope="col">"Scopes"</th><th scope="col">"Last used"</th><th scope="col">"Status"</th></tr></thead>
@@ -3273,10 +3287,27 @@ pub fn script_revision_page(
 }
 
 /// A committed same-origin document lets the following user navigation send Strict cookies.
-pub fn oidc_complete_page() -> String {
+pub fn passkey_reauth_page() -> String {
+    card_page(
+        "Confirm your sign-in",
+        view! {
+            <h1>"Confirm your sign-in to add a passkey"</h1>
+            <p>"Your organization sign-in must be less than five minutes old."</p>
+            <a class="button" href="/login/oidc?resume=passkey">"Sign in and continue"</a>
+        },
+    )
+}
+
+pub fn oidc_return_page(
+    href: &'static str,
+    label: &'static str,
+    missing_freshness: bool,
+) -> String {
     card_page(
         "Sign-in complete",
-        view! {<h1>"Sign-in complete"</h1><p>"Your organization has signed you in."</p><p><a class="button" href="/">"Continue to flyw8t"</a></p>},
+        view! {<h1>"Sign-in complete"</h1><p>"Your organization has signed you in."</p>
+        {missing_freshness.then(|| view! { <p class="flash bad">"Your identity provider did not confirm a recent authentication. Ask your administrator to check the auth_time claim."</p> })}
+        <p><a class="button" href=href>{label}</a></p>},
     )
 }
 

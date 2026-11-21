@@ -81,6 +81,7 @@ Beyond the milestone:
 | AT-59 | Authorized Windows device links open the local client with the selected computer and mode. Connection requires another click. | Web fleet and server device tests, native URI and picker tests, `scripts/test-technician-handoff.ps1` |
 | AT-60 | The viewer waits for a displayable frame, retains early ICE candidates and reports the selected connection route. | `support.test.mjs` and `tests/support_browser.rs` |
 | AT-61 | An MCP screenshot requires its own participant grant and an authorized requester. Revocation takes effect before image release. | `tests/support/screenshot.rs`, MCP framing and API tests, two-browser screenshot checks |
+| AT-63 | A directory administrator with a recent verified organization sign-in can mint a screenshot-only credential. Missing, stale and future authentication times require reauthentication. Adding a read scope requires passkey confirmation. | `only_recent_provider_authentication_bootstraps_a_directory_sudo_key` in `tests/oidc.rs` |
 
 | AT-62 | Enroll a Windows PC from Devices. The setup commands verify the release, prompt separately for the token and start the service. The console shows its live connection. | Fleet view tests, `a_new_enrollment_token_comes_with_the_commands_to_run`, signed Windows trial rehearsal |
 

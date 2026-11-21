@@ -9,6 +9,7 @@ mod tests;
 use std::io::{self, BufRead, Write};
 
 use api::Api;
+use clap::Parser;
 use frame::Arguments;
 use serde_json::{json, Value};
 
@@ -162,7 +163,7 @@ fn next_line(reader: &mut impl BufRead) -> io::Result<Line> {
 async fn main() -> io::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut server = Server {
-        api: Api::from_env(),
+        api: Api::from_settings(api::Settings::parse()),
         version: None,
     };
     let mut input = io::stdin().lock();
