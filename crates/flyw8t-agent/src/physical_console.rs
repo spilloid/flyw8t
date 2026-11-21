@@ -106,7 +106,8 @@ mod windows {
     // Only a presence bit leaves this callback. Do not format or retain WTSUserName.
     fn user_present(bytes: &[u8]) -> Option<bool> {
         let text = bytes.strip_suffix(&[0, 0])?;
-        if !text.len().is_multiple_of(2) || text.chunks_exact(2).any(|unit| unit == [0, 0]) {
+        let (units, remainder) = text.as_chunks::<2>();
+        if !remainder.is_empty() || units.contains(&[0, 0]) {
             return None;
         }
         Some(!text.is_empty())
