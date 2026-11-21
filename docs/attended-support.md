@@ -198,6 +198,26 @@ The operator decided (2026-10-30) that attended remote control is a distinct pro
 
 For two machines on different networks, set `FLYW8T_ICE_SERVERS` (for example `[{"urls":"stun:stun.example.org:3478"}]`, plus a TURN server for restrictive networks) and serve over HTTPS: browsers allow screen capture only in secure contexts (`https://` or `localhost`).
 
+### Windows participant beta candidate
+
+Create a **View screen** invitation in Support. On the participating PC, open the
+portable Windows participant from its extracted folder. Enter the organization's
+HTTPS Flyw8t console address and the technician's nine-digit invitation code.
+Check the technician's name, choose **Choose a window or screen**, and select a
+surface in the Windows picker. Compare the six digits on both ends. Either
+person can end sharing. The participant can also close the local page.
+
+The candidate uses the configured authenticated IPv4 UDP TURN relay. The
+relay's listener and allocated candidates must use the same IPv4 address on
+both peers. The participant waits up to 15 seconds for a matching browser relay
+candidate and another 15 seconds for the secure connection. A lost connection
+ends sharing. The two-minute sharing limit starts when Windows starts capture,
+including time spent on an unchanged screen. Connecting, choosing a surface
+and sharing together have a three-minute limit. The portable
+participant advertises attended viewing. Technician input and per-workstation
+unattended control have separate acceptance gates.
+
+
 The automated `support_browser` integration test checks the selected route
 with Chrome, a disposable database, and the real flyw8t consent flow.
 With `FLYW8T_TEST_TURN_SERVERS` unset it expects **Direct**. Provide an

@@ -32,8 +32,8 @@ $ErrorActionPreference = 'Stop'
 $failed = @()
 
 foreach ($file in $Files) {
-    $path = (Resolve-Path $file).Path
-    $sig = Get-AuthenticodeSignature -FilePath $path
+    $path = (Resolve-Path -LiteralPath $file).Path
+    $sig = Get-AuthenticodeSignature -LiteralPath $path
 
     if ($sig.Status -ne 'Valid') {
         $failed += "$path - signature status $($sig.Status): $($sig.StatusMessage)"
@@ -43,7 +43,11 @@ foreach ($file in $Files) {
         $failed += "$path - signed but not timestamped; the signature expires with the 3-day signing certificate"
         continue
     }
-    if ($ExpectedSubject -and $sig.SignerCertificate.Subject -notlike "*$ExpectedSubject*") {
+    if ($sig.SignerCertificate.GetNameInfo('SimpleName', $false) -cne 'Joseph Spillers') {
+        $failed += "$path - unexpected Flyw8t publisher: $($sig.SignerCertificate.Subject)"
+        continue
+    }
+    if ($ExpectedSubject -and $sig.SignerCertificate.Subject.IndexOf($ExpectedSubject, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
         $failed += "$path - signed by '$($sig.SignerCertificate.Subject)', expected it to contain '$ExpectedSubject'"
         continue
     }

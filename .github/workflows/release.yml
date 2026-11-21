@@ -104,8 +104,14 @@ jobs:
           echo "ref=${image}@${ref#*@}" >> "$GITHUB_OUTPUT"
           echo "Pushed \`${image}@${ref#*@}\`" >> "$GITHUB_STEP_SUMMARY"
 
+  participant:
+    uses: ./.github/workflows/windows-participant.yml
+    permissions:
+      contents: read
+      id-token: write
+
   publish:
-    needs: [build, image]
+    needs: [build, image, participant]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -114,13 +120,14 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           path: dist
+          pattern: bin-*
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - name: Notes from CHANGELOG
         run: |
           version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '$0 ~ "^## " v " " {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
+          awk -v v="$version" '$1 == "##" && $2 == v {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md has no section for $version"; exit 1; }
           printf '\n### Server image\n`%s` (unsigned; pin the digest)\n' "$IMAGE_REF" >> notes.md
         env:

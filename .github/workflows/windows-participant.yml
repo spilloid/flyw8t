@@ -1,0 +1,102 @@
+name: Package attended Windows participant
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the picker-enabled sender
+        shell: pwsh
+        run: |
+          cargo build --manifest-path scripts/windows-media-probe/Cargo.toml --release --locked --features attended-picker --target x86_64-pc-windows-msvc --target-dir target/participant
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/participant/x86_64-pc-windows-msvc/release/flyw8t-windows-media-probe.exe dist/flyw8t-participant.exe
+      - uses: actions/upload-artifact@v5
+        with:
+          name: compiled-windows-participant
+          path: dist/flyw8t-participant.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    runs-on: windows-latest
+    needs: compile
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: compiled-windows-participant
+          path: dist
+      - uses: ./.github/actions/sign-release
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          account: ${{ vars.SIGNING_ACCOUNT }}
+          profile: ${{ vars.SIGNING_PROFILE }}
+          expected-subject: ${{ vars.SIGNING_EXPECTED_SUBJECT }}
+      - uses: actions/upload-artifact@v5
+        with:
+          name: signed-windows-participant
+          path: dist/flyw8t-participant.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    runs-on: windows-latest
+    needs: sign
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: signed-windows-participant
+          path: dist
+      - name: Build the portable ZIP from pinned runtime archives
+        shell: pwsh
+        run: |
+          cargo fetch --manifest-path scripts/windows-media-probe/Cargo.toml --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          rustup component add rust-docs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Invoke-WebRequest https://nodejs.org/download/release/v24.22.3/node-v24.22.3-win-x64.zip -OutFile node-runtime.zip
+          $locked = Get-Content -Raw scripts/windows-media-probe/package-lock.json | ConvertFrom-Json
+          Invoke-WebRequest $locked.packages.'node_modules/undici'.resolved -OutFile undici.tgz
+          python scripts/participant-release/build.py --sender dist/flyw8t-participant.exe --node-zip node-runtime.zip --undici-tarball undici.tgz --output-dir participant-output
+      - uses: actions/upload-artifact@v5
+        with:
+          name: bin-windows-participant
+          path: participant-output/*.zip
+          if-no-files-found: error
+          retention-days: 1
+  clean-extraction:
+    runs-on: windows-latest
+    needs: package
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: bin-windows-participant
+          path: participant-output
+      - name: Verify the signed sender and run the extracted application offline
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem participant-output -Filter '*.zip')
+          if ($archives.Count -ne 1) { throw 'Expected exactly one participant ZIP.' }
+          $folder = Join-Path $env:RUNNER_TEMP 'Flyw8t participant test'
+          Expand-Archive -LiteralPath $archives[0].FullName -DestinationPath $folder
+          ./scripts/verify-signature.ps1 -Files (Join-Path $folder 'native/flyw8t-participant.exe')
+          & (Join-Path $folder 'runtime/node.exe') (Join-Path $folder 'app/public-participant.mjs') --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

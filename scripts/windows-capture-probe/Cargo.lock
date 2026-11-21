@@ -7,6 +7,7 @@ name = "flyw8t-windows-capture-probe"
 version = "0.0.0"
 dependencies = [
  "windows",
+ "windows-future",
 ]
 
 [[package]]

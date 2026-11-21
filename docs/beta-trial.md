@@ -99,3 +99,9 @@ The agent connects outbound to the server and can check in from behind NAT. Nati
 - **Enrolled device.** On the device page, an administrator opens **Revoke or retire this device**. **Revoke device credential** disconnects the agent and permanently invalidates its key on this server. **Retire device** also removes it from the active list and keeps its history. Re-enrollment requires a new device identity.
 - **Endpoint service.** In an elevated PowerShell, run `& "$env:ProgramFiles\flyw8t\flyw8t-agent.exe" service uninstall`. It stops and removes the service. The installed files and state remain. After retaining any required history, remove the trial's agent files from the flyw8t directories under Program Files and ProgramData according to your retention policy. [Service locations and removal](deployment.md#windows-agent)
 - **Technician workstation.** In the same Windows account, choose **Browser links → Remove for this Windows user**, close the app, then delete your copy if you no longer need it.
+
+## Attended native Windows participant trial
+
+For the 0.10.0-beta.1 candidate, the endpoint uses a portable ZIP. Your technician creates a **View screen** invitation in Support and gives you the console address and invitation code. Download the matching participant ZIP and `SHA256SUMS` from Flyw8t's GitHub release once published. Compare the ZIP's SHA-256 with the digest beside its exact filename before opening it. On Windows, `Get-FileHash -LiteralPath .\flyw8t-participant-v0.10.0-beta.1-x86_64-pc-windows-msvc.zip` prints that digest.
+
+Choose **Extract All** and run **Start Flyw8t Participant.cmd** in the extracted folder as your usual Windows user. Follow the foreground prompts, check the technician identity and select the window in the Windows picker. Choose **Stop** to end sharing. For an upgrade, close the participant and extract the new verified ZIP into a new folder. The portable app runs only while you have it open.

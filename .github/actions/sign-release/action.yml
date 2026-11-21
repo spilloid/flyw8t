@@ -25,7 +25,7 @@ inputs:
     description: Certificate profile name.
     required: true
   expected-subject:
-    description: Substring the signer subject must contain. Empty skips the subject check.
+    description: Optional additional literal subject fragment. Every file must have the exact Flyw8t publisher name.
     required: false
     default: ''
 

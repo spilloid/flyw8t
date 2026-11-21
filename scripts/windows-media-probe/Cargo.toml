@@ -5,10 +5,17 @@ edition = "2021"
 publish = false
 license = "MIT"
 
-# Development fixture with its own lockfile; excluded from shipping artifacts.
+# The portable Windows participant uses the explicitly built attended-picker feature.
 [workspace]
 
+[features]
+attended-picker = ["flyw8t-windows-capture-probe/attended-picker"]
+
 [dependencies]
+hex = "0.4"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+uuid = "1"
 flyw8t-windows-capture-probe = { path = "../windows-capture-probe" }
 tempfile = "3"
 windows = { version = "=0.62.2", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
