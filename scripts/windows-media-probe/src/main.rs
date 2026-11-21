@@ -2,6 +2,8 @@
 //! Loopback WebRTC sends generated tiles or a live WGC capture of the test window.
 use std::{error::Error, io, path::Path};
 mod live;
+mod peer;
+mod relay;
 mod stream;
 
 use windows::{
@@ -35,13 +37,13 @@ fn pair(high: u32, low: u32) -> u64 {
     (u64::from(high) << 32) | u64::from(low)
 }
 
-fn media_type(subtype: &GUID) -> windows::core::Result<IMFMediaType> {
+fn media_type(subtype: &GUID, width: u32, height: u32) -> windows::core::Result<IMFMediaType> {
     // All attributes are set on a newly created media type in this thread's COM apartment.
     unsafe {
         let ty = MFCreateMediaType()?;
         ty.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         ty.SetGUID(&MF_MT_SUBTYPE, subtype)?;
-        ty.SetUINT64(&MF_MT_FRAME_SIZE, pair(WIDTH, HEIGHT))?;
+        ty.SetUINT64(&MF_MT_FRAME_SIZE, pair(width, height))?;
         ty.SetUINT64(&MF_MT_FRAME_RATE, pair(FPS, 1))?;
         ty.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pair(1, 1))?;
         ty.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
@@ -66,20 +68,29 @@ fn input_sample(frame: u32, nv12: &[u8]) -> windows::core::Result<IMFSample> {
     }
 }
 
-fn write_fixture(path: &Path) -> Result<()> {
+fn write_fixture(path: &Path, two_panels: bool) -> Result<()> {
     let pixels = (WIDTH * HEIGHT) as usize;
     let mut nv12 = vec![128u8; pixels + pixels / 2];
     let url = HSTRING::from(path.as_os_str());
     unsafe {
         let writer = MFCreateSinkWriterFromURL(&url, None, None)?;
-        let output = media_type(&MFVideoFormat_H264)?;
+        let output = media_type(&MFVideoFormat_H264, WIDTH, HEIGHT)?;
         output.SetUINT32(&MF_MT_AVG_BITRATE, 800_000)?;
         output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
         let stream = writer.AddStream(&output)?;
-        writer.SetInputMediaType(stream, &media_type(&MFVideoFormat_NV12)?, None)?;
+        writer.SetInputMediaType(
+            stream,
+            &media_type(&MFVideoFormat_NV12, WIDTH, HEIGHT)?,
+            None,
+        )?;
         writer.BeginWriting()?;
         for frame in 0..FRAMES {
             nv12[..pixels].fill(luma(frame));
+            if two_panels {
+                for row in nv12[..pixels].as_chunks_mut::<{ WIDTH as usize }>().0 {
+                    row[WIDTH as usize / 2..].fill(luma(frame + 8));
+                }
+            }
             let sample = input_sample(frame, &nv12)?;
             writer.WriteSample(stream, &sample)?;
         }
@@ -98,7 +109,11 @@ fn read_fixture(path: &Path) -> Result<u32> {
         if native.GetGUID(&MF_MT_SUBTYPE)? != MFVideoFormat_H264 {
             return Err("container has no H.264 video stream".into());
         }
-        reader.SetCurrentMediaType(stream, None, &media_type(&MFVideoFormat_NV12)?)?;
+        reader.SetCurrentMediaType(
+            stream,
+            None,
+            &media_type(&MFVideoFormat_NV12, WIDTH, HEIGHT)?,
+        )?;
         // Some sources produce format notifications without a sample. Bound even that case.
         for _ in 0..(FRAMES * 4) {
             let mut flags = 0;
@@ -149,21 +164,25 @@ fn read_fixture(path: &Path) -> Result<u32> {
 }
 
 fn probe(mode: Mode) -> Result<()> {
-    if matches!(mode, Mode::WindowLoopback) {
-        return stream::run_window();
+    if let Mode::Window(surface, relay) = mode {
+        return stream::run_window(surface, relay);
     }
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("synthetic.mp4");
-    write_fixture(&path)?;
+    write_fixture(&path, matches!(mode, Mode::RelayChart))?;
     let frames = read_fixture(&path)?;
     match mode {
         Mode::Native => {}
-        Mode::WindowLoopback => unreachable!(),
+        Mode::Window(_, _) => unreachable!(),
         Mode::Mp4 => {
             io::copy(&mut std::fs::File::open(path)?, &mut io::stdout().lock())?;
         }
-        Mode::Loopback => {
-            stream::run(&path)?;
+        Mode::Loopback | Mode::RelayChart | Mode::GrantChart => {
+            stream::run(
+                &path,
+                matches!(mode, Mode::RelayChart),
+                matches!(mode, Mode::GrantChart),
+            )?;
         }
     }
     eprintln!("H.264 round trip: {frames}/{FRAMES} synthetic frames, {WIDTH}x{HEIGHT} at {FPS} fps; luma and presentation timestamps verified.");
@@ -174,7 +193,9 @@ enum Mode {
     Native,
     Mp4,
     Loopback,
-    WindowLoopback,
+    GrantChart,
+    RelayChart,
+    Window(live::Surface, Option<relay::Scope>),
 }
 
 fn main() -> Result<()> {
@@ -183,10 +204,33 @@ fn main() -> Result<()> {
         (None, None) => Mode::Native,
         (Some(flag), None) if flag == "--emit-mp4" => Mode::Mp4,
         (Some(flag), None) if flag == "--loopback" => Mode::Loopback,
-        (Some(flag), None) if flag == "--window-loopback" => Mode::WindowLoopback,
+        (Some(flag), None) if flag == "--grant-chart-loopback" => Mode::GrantChart,
+        (Some(flag), None) if flag == "--relay-chart" => Mode::RelayChart,
+        (Some(flag), None) if flag == "--window-loopback" => {
+            Mode::Window(live::Surface::Chart, None)
+        }
+        (Some(flag), None) if flag == "--owned-window-console-relay" => Mode::Window(live::Surface::Chart, Some(relay::Scope::Private)),
+        #[cfg(feature = "attended-picker")]
+        (Some(flag), None) if flag == "--selected-window-console" => {
+            Mode::Window(live::Surface::Selected, None)
+        }
+        #[cfg(feature = "attended-picker")]
+        (Some(flag), None) if flag == "--selected-window-console-relay" => Mode::Window(live::Surface::Selected, Some(relay::Scope::Private)),
+        #[cfg(feature = "attended-picker")]
+        (Some(flag), None) if flag == "--selected-window-attended-relay" => {
+            Mode::Window(live::Surface::Selected, Some(relay::Scope::Attended))
+        }
+        #[cfg(feature = "attended-picker")]
+        (Some(flag), None) if flag == "--detail-chart-loopback" => {
+            Mode::Window(live::Surface::DetailChart, None)
+        }
+        #[cfg(feature = "attended-picker")]
+        (Some(flag), None) if flag == "--detail-chart-console-relay" => {
+            Mode::Window(live::Surface::DetailChart, Some(relay::Scope::Private))
+        }
         _ => {
             return Err(
-                "usage: flyw8t-windows-media-probe [--emit-mp4|--loopback|--window-loopback]"
+                "usage: flyw8t-windows-media-probe [--emit-mp4|--loopback|--window-loopback|--relay-chart|--grant-chart-loopback]"
                     .into(),
             )
         }

@@ -118,6 +118,17 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
 const state = (s) => ({ type: 'state', state: s, label: s, peer_present: true });
 const candidate = (name) => ({ type: 'signal', data: { candidate: { candidate: name } } });
 
+test('an attended native offer can restrict its browser answer to relay ICE', async () => {
+  for (const relayOnly of [true, undefined]) {
+    const tech = await page({ role:'technician', localDer:der('tech'), remoteDer:der('participant') });
+    await tech.recv(state('connecting'));
+    const message = offer();
+    message.data.relayOnly = relayOnly;
+    await tech.recv(message);
+    assert.equal(tech.peers[0].cfg.iceTransportPolicy, relayOnly ? 'relay' : 'all');
+  }
+});
+
 const screenshotGrant = 'e6894a0b-e580-47d4-abd9-2459e0311001';
 const screenshotRequest = 'e6894a0b-e580-47d4-abd9-2459e0311002';
 const recipient = 'Support copilot';

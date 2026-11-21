@@ -294,9 +294,9 @@
     void drainIce(); // Applying candidates must not delay SDP, End, or revocation.
   }
 
-  function newPeerConnection() {
+  function newPeerConnection(relayOnly = false) {
     // One bundled transport for everything: the security code covers exactly that transport.
-    pc = new RTCPeerConnection({ iceServers: ice, certificates: [cert], bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
+    pc = new RTCPeerConnection({ iceServers: ice, iceTransportPolicy: relayOnly ? 'relay' : 'all', certificates: [cert], bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
     const conn = pc;
     const mine = epoch;
     let shown = false;
@@ -374,7 +374,7 @@
       if (!oneVideoSection(data.sdp)) { refuseTopology(); return; }
       await certReady;
       if (stale(undefined, mine)) return;
-      newPeerConnection();
+      newPeerConnection(data.relayOnly === true);
       const conn = pc;
       await acceptRemoteSdp(conn, data.sdp, mine);
       if (stale(conn, mine)) return;

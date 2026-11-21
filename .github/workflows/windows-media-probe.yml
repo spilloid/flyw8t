@@ -24,13 +24,15 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
       - run: cargo fmt --check
       - run: cargo fmt --manifest-path ../windows-capture-probe/Cargo.toml --check
       - run: rustc -Vv
       - run: cargo clippy --locked -- -D warnings
-      - run: cargo build --locked
+      - run: cargo test --locked --features attended-picker
+      - run: cargo build --locked --features attended-picker
       - run: npm ci --ignore-scripts
+      - run: node --test native-participant.test.mjs public-connection.test.mjs
       - run: node browser.mjs ./target/x86_64-pc-windows-msvc/debug/flyw8t-windows-media-probe.exe
       - run: node loopback.mjs ./target/x86_64-pc-windows-msvc/debug/flyw8t-windows-media-probe.exe
       - run: node loopback.mjs ./target/x86_64-pc-windows-msvc/debug/flyw8t-windows-media-probe.exe --owned-window --refusal-only

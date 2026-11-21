@@ -7,7 +7,17 @@ license = "MIT"
 
 [workspace]
 
+[features]
+attended-picker = [
+  "windows/Win32_System_RemoteDesktop",
+  "windows/Win32_System_StationsAndDesktops",
+  "windows/Win32_UI_Accessibility",
+  "windows/Win32_UI_Shell",
+  "dep:windows-future",
+]
+
 [dependencies]
+windows-future = { version = "=0.3.2", optional = true }
 windows = { version = "=0.62.2", features = [
   "Foundation", "Graphics_Capture", "Graphics_DirectX_Direct3D11",
   "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",

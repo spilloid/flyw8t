@@ -1,4 +1,8 @@
-//! Capture only a window which this process creates and paints. No monitor capture or input.
+//! Owned-window capture fixture, with a separate opt-in Windows participant picker.
+#[cfg(feature = "attended-picker")]
+mod selected;
+#[cfg(feature = "attended-picker")]
+pub use selected::capture_selected;
 use std::{
     error::Error,
     sync::{
@@ -35,6 +39,10 @@ static LIGHT: AtomicBool = AtomicBool::new(false);
 static CHART: AtomicBool = AtomicBool::new(false);
 pub const CHART_WIDTH: u32 = 320;
 pub const CHART_HEIGHT: u32 = 180;
+#[cfg(feature = "attended-picker")]
+pub const PREVIEW_WIDTH: u32 = 1280;
+#[cfg(feature = "attended-picker")]
+pub const PREVIEW_HEIGHT: u32 = 720;
 
 extern "system" fn paint(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
@@ -147,7 +155,7 @@ fn read_luma(
         for row in 0..height as usize {
             let start = map.pData.cast::<u8>().add(row * map.RowPitch as usize);
             let bytes = std::slice::from_raw_parts(start, width as usize * 4);
-            for bgra in bytes.chunks_exact(4) {
+            for bgra in bytes.as_chunks::<4>().0 {
                 // The fixture paints grayscale. Map full-range BGRA into video-range Y.
                 luma.push((16 + (219 * u32::from(bgra[1]) + 127) / 255) as u8);
             }
@@ -157,19 +165,7 @@ fn read_luma(
     }
 }
 
-fn probe(
-    chart: bool,
-    stopped: impl Fn() -> bool,
-    mut observe: impl FnMut(Vec<u8>) -> Result<()>,
-) -> Result<()> {
-    if !GraphicsCaptureSession::IsSupported()? {
-        return Err("WGC is unavailable in this interactive session".into());
-    }
-    CHART.store(chart, Ordering::Relaxed);
-    let window = TestWindow::new()?;
-    let interop: IGraphicsCaptureItemInterop = factory::<GraphicsCaptureItem, _>()?;
-    // No external handle is accepted. The capture item is derived exclusively from TestWindow.
-    let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window.0) }?;
+fn capture_device() -> Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice)> {
     let mut device = None;
     let mut context = None;
     unsafe {
@@ -190,6 +186,24 @@ fn probe(
     let dxgi: IDXGIDevice = device.cast()?;
     let rt_device: IDirect3DDevice =
         unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? }.cast()?;
+    Ok((device, ctx, rt_device))
+}
+
+fn probe(
+    chart: bool,
+    states: usize,
+    stopped: impl Fn() -> bool,
+    mut observe: impl FnMut(Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    if !GraphicsCaptureSession::IsSupported()? {
+        return Err("WGC is unavailable in this interactive session".into());
+    }
+    CHART.store(chart, Ordering::Relaxed);
+    let window = TestWindow::new()?;
+    let interop: IGraphicsCaptureItemInterop = factory::<GraphicsCaptureItem, _>()?;
+    // No external handle is accepted. The capture item is derived exclusively from TestWindow.
+    let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window.0) }?;
+    let (device, ctx, rt_device) = capture_device()?;
     let (width, height) = if chart {
         (CHART_WIDTH, CHART_HEIGHT)
     } else {
@@ -229,7 +243,8 @@ fn probe(
     }))?;
     session.StartCapture()?;
     let result = (|| -> Result<()> {
-        for light in [false, true, false, true, false] {
+        for index in 0..states {
+            let light = index % 2 == 1;
             LIGHT.store(light, Ordering::Relaxed);
             if !unsafe { InvalidateRect(Some(window.0), None, false) }.as_bool() {
                 return Err("fixture window closed".into());
@@ -280,13 +295,14 @@ fn probe(
 
 fn run(
     chart: bool,
+    states: usize,
     stopped: impl Fn() -> bool,
     observe: impl FnMut(Vec<u8>) -> Result<()>,
 ) -> Result<()> {
     unsafe {
         RoInitialize(RO_INIT_MULTITHREADED)?;
     }
-    let result = probe(chart, stopped, observe);
+    let result = probe(chart, states, stopped, observe);
     unsafe {
         RoUninitialize();
     }
@@ -294,13 +310,14 @@ fn run(
 }
 
 pub fn verify_window() -> Result<()> {
-    run(false, || false, |_| Ok(()))
+    run(false, 5, || false, |_| Ok(()))
 }
 
-/// Five alternating full-size grayscale planes from our own two-panel test window.
+/// Alternating full-size grayscale planes from our own two-panel test window.
 pub fn capture_chart(
+    states: usize,
     stopped: impl Fn() -> bool,
     observe: impl FnMut(Vec<u8>) -> Result<()>,
 ) -> Result<()> {
-    run(true, stopped, observe)
+    run(true, states, stopped, observe)
 }

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Share from this PC · Flyw8t</title>
+<link rel="stylesheet" href="/participant-ui.css"><script defer src="/participant-ui.js"></script>
+</head>
+<body>
+<header><strong>flyw8t</strong> <span>Windows support</span></header>
+<main>
+<h1>Share from this PC</h1>
+<section id="pair" hidden>
+<form id="invite"><div id="deployment">
+<label for="origin">Flyw8t console address</label>
+<input id="origin" type="url" required placeholder="https://support.example.org" autocomplete="off" spellcheck="false">
+</div><label for="code">Support invitation code</label>
+<p id="help">Enter the nine-digit code from your technician’s Flyw8t Support page.</p>
+<div class="row"><input id="code" type="text" autocomplete="off" inputmode="numeric" maxlength="15" placeholder="123 456 789" aria-describedby="help" required>
+<button type="submit" id="join">Join session</button></div>
+</form></section>
+<section id="approve" hidden>
+<h2>Allow this technician to view a window or screen?</h2>
+<p id="who"></p>
+<div class="row"><button id="choose">Choose a window or screen…</button><button id="decline" class="secondary">Decline</button></div>
+</section>
+<div id="live" hidden>
+<div id="verification" hidden><span>Compare this code with your technician</span><strong id="sas"></strong></div>
+<button id="end" class="stop">Stop sharing</button>
+</div>
+<p id="status" role="status" aria-live="polite">Connecting to the local participant app…</p>
+</main>
+</body></html>
