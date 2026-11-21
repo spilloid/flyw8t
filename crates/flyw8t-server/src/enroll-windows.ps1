@@ -14,9 +14,15 @@
         throw 'Use a PowerShell window with the default Flyw8t service state directory.'
     }
 
-    $agent = (Resolve-Path -LiteralPath $name).ProviderPath
+    $folder = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
+    $path = Join-Path $folder $name
+    $manifest = Join-Path $folder 'SHA256SUMS'
+    if (!(Test-Path -LiteralPath $path -PathType Leaf) -or !(Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "Put $name and SHA256SUMS together in $folder and try again."
+    }
+    $agent = (Resolve-Path -LiteralPath $path).ProviderPath
     $pattern = '^([0-9a-fA-F]{64})  ' + [regex]::Escape($name) + '$'
-    $entry = @(Select-String -LiteralPath '.\SHA256SUMS' -Pattern $pattern -CaseSensitive)
+    $entry = @(Select-String -LiteralPath $manifest -Pattern $pattern -CaseSensitive)
     $file = [IO.File]::OpenRead($agent)
     try {
         if ($entry.Count -ne 1 -or (Get-FileHash -InputStream $file).Hash -ine $entry[0].Matches[0].Groups[1].Value) {
@@ -34,6 +40,9 @@
 
         Write-Host "Enrolling this Windows PC with $server."
         $token = Read-Host 'Paste the enrollment token from the console' -AsSecureString
+        if ($null -eq $token -or $token.Length -eq 0) {
+            throw 'No enrollment token was entered. Run setup again and paste the token at the prompt.'
+        }
         $previous = $env:FLYW8T_ENROLL_TOKEN
         try {
             $env:FLYW8T_ENROLL_TOKEN = [Net.NetworkCredential]::new('', $token).Password
