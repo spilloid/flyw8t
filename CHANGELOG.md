@@ -2,6 +2,10 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## Unreleased
+
+- From a saved script revision, **Edit a copy of this revision** opens its source, parameters and risk class as a draft. Saving records a new revision if the content differs from the current one.
+
 ## 0.1.7 — 2026-11-20 (pre-release)
 
 - Start a Windows beta installation from **Devices → Enroll a Windows device**.

@@ -83,6 +83,7 @@ Beyond the milestone:
 | AT-61 | An MCP screenshot requires its own participant grant and an authorized requester. Revocation takes effect before image release. | `tests/support/screenshot.rs`, MCP framing and API tests, two-browser screenshot checks |
 
 | AT-62 | Enroll a Windows PC from Devices. The setup commands verify the release, prompt separately for the token and start the service. The console shows its live connection. | Fleet view tests, `a_new_enrollment_token_comes_with_the_commands_to_run`, signed Windows trial rehearsal |
+| AT-65 | Open a previous script revision as a draft while a newer revision exists. The draft contains the chosen source, offers the next revision number, and leaves history intact until saved. | `every_save_is_a_permanent_revision_with_its_hash_diff_and_file` |
 
 ## Manual checks still owed
 
