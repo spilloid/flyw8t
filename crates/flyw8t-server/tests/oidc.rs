@@ -424,6 +424,14 @@ async fn only_recent_provider_authentication_bootstraps_a_directory_sudo_key() {
         let r = fake.finish(&server, mode).await;
         assert_eq!(r.status, StatusCode::OK, "{}", r.body);
         let browser = server.browser(r.cookie().unwrap()).await;
+        let token = browser
+            .post(
+                &server,
+                "/admin/tokens",
+                &[("scope", "support:screenshot"), ("name", "Fixture")],
+            )
+            .await;
+        assert_eq!(token.location(), "/login/oidc?resume=mcp", "{mode}");
         assert_eq!(
             browser.get(&server, "/account/passkeys/new").await.status,
             StatusCode::CONFLICT,
@@ -451,6 +459,27 @@ async fn only_recent_provider_authentication_bootstraps_a_directory_sudo_key() {
     let r = fake.finish(&server, "valid").await;
     let browser = server.browser(r.cookie().unwrap()).await;
     let mut key = SoftKey::new(&server);
+    let token = browser
+        .post(
+            &server,
+            "/admin/tokens",
+            &[("scope", "support:screenshot"), ("name", "Fixture")],
+        )
+        .await;
+    assert_eq!(token.status, StatusCode::OK);
+    assert!(token.body.contains("fw8_"));
+    let mixed = browser
+        .post(
+            &server,
+            "/admin/tokens",
+            &[
+                ("scope", "support:screenshot"),
+                ("scope", "read"),
+                ("name", "Mixed"),
+            ],
+        )
+        .await;
+    assert!(mixed.location().starts_with("/sudo?"));
     let r = browser.add_passkey(&server, &key, &[]).await;
     assert_eq!(r.location(), "/account?m=passkey-added", "{}", r.body);
     assert!(browser.get(&server, "/sudo").await.body.contains("Confirm"));

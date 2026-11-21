@@ -10,6 +10,25 @@ use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 
 use crate::frame::{Arguments, Envelope, RequestKey, MAX_PNG};
+use clap::Parser;
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    version,
+    about = "Connect an MCP client to the Flyw8t technician API over stdio"
+)]
+pub struct Settings {
+    /// Console HTTPS origin (loopback HTTP is supported for local testing).
+    #[arg(long, env = "FLYW8T_SERVER_URL")]
+    server: Option<String>,
+    /// Private file containing the technician API token.
+    #[arg(long, env = "FLYW8T_MCP_TOKEN_FILE")]
+    token_file: Option<PathBuf>,
+    /// Additional trusted certificate authority in PEM format.
+    #[arg(long, env = "FLYW8T_MCP_CA_FILE")]
+    ca_cert: Option<PathBuf>,
+}
 
 #[cfg(test)]
 #[path = "api_tests.rs"]
@@ -59,13 +78,14 @@ fn read_file(path: &Path, limit: usize, name: &str) -> Result<Vec<u8>> {
 }
 
 impl Api {
-    pub fn from_env() -> Result<Self> {
-        let origin =
-            parse_origin(&env::var("FLYW8T_SERVER_URL").context("Set FLYW8T_SERVER_URL.")?)?;
-        let secret = match (
-            env::var("FLYW8T_MCP_TOKEN").ok(),
-            env::var_os("FLYW8T_MCP_TOKEN_FILE"),
-        ) {
+    pub fn from_settings(settings: Settings) -> Result<Self> {
+        let origin = parse_origin(
+            settings
+                .server
+                .as_deref()
+                .context("Set --server or FLYW8T_SERVER_URL.")?,
+        )?;
+        let secret = match (env::var("FLYW8T_MCP_TOKEN").ok(), settings.token_file) {
             (Some(token), None) => token,
             (None, Some(path)) => {
                 String::from_utf8(read_file(path.as_ref(), 4096, "FLYW8T_MCP_TOKEN_FILE")?)
@@ -90,7 +110,7 @@ impl Api {
         if local_origin(&origin) {
             builder = builder.no_proxy();
         }
-        if let Some(path) = env::var_os("FLYW8T_MCP_CA_FILE") {
+        if let Some(path) = settings.ca_cert {
             let pem = read_file(path.as_ref(), 1024 * 1024, "FLYW8T_MCP_CA_FILE")?;
             let certs = reqwest::Certificate::from_pem_bundle(&pem)
                 .context("Invalid PEM in FLYW8T_MCP_CA_FILE.")?;
