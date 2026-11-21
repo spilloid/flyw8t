@@ -18,3 +18,15 @@ The loopback harness starts a native video-only webrtc-rs sender, packetizes the
 The sink writer selects the encoder. The 320×180 synthetic clip exercises OS encoding, H.264 packetization, encrypted loopback transport and decoding. It does not identify a hardware MFT, measure interactive latency, use production support signaling, capture a desktop, authorize an operator or exercise remote input. It changes no release binaries.
 
 The Rust dependency lock is separate from the production workspace. The browser tooling uses Playwright Core under Apache-2.0 and the installed Edge. No browser is downloaded.
+
+### Live capture from the fixture window
+
+In an interactive Windows login with a hardware D3D11 device, run the following from this directory after building the fixture.
+
+```powershell
+node loopback.mjs ./target/x86_64-pc-windows-msvc/debug/flyw8t-windows-media-probe.exe --owned-window
+```
+
+After checking the actual browser certificate, the sender creates a visible two-panel Win32 chart and captures its centered 320×180 region using WGC. The probe reads each grayscale plane through D3D11 staging memory, converts its pixels to video-range NV12 and sends them through the Microsoft H.264 software transform directly to WebRTC. A queue holds at most one compressed access unit. The encoder repeats each captured state for twelve presentation ticks so the browser can observe it. Edge samples both panels and requires opposite values and changes of polarity. Closing the fixture pipe stops transmission and joins the capture worker. The negative run checks for refusal before capture starts and counts browser frames after the drain period.
+
+The hosted Windows job builds this path and exercises the certificate refusal without a desktop. The positive check requires an interactive workstation. Full-color encoding, GPU texture handoff to a hardware encoder, sustained frame rate under load, interactive latency and independent-network TURN are separate release measurements.
