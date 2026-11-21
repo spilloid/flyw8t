@@ -91,7 +91,7 @@ impl Api {
                 String::from_utf8(read_file(path.as_ref(), 4096, "FLYW8T_MCP_TOKEN_FILE")?)
                     .map_err(|_| anyhow!("Token file must contain UTF-8 text."))?
             }
-            _ => bail!("Set exactly one of FLYW8T_MCP_TOKEN and FLYW8T_MCP_TOKEN_FILE."),
+            _ => bail!("Select exactly one credential source: --token-file (FLYW8T_MCP_TOKEN_FILE) or FLYW8T_MCP_TOKEN."),
         };
         let secret = secret.trim();
         ensure!(

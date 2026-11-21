@@ -1979,6 +1979,7 @@ pub fn admin_page(
     orgs: Vec<OrgRef>,
     revealed: Option<RevealedSecret>,
     oidc: bool,
+    reauth_for_mcp: bool,
 ) -> String {
     let now = ctx.now;
     let user_rows = users
@@ -2060,8 +2061,12 @@ pub fn admin_page(
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                 <input type="hidden" name="scope" value="support:screenshot"/>
                 <input type="hidden" name="ttl_days" value="30"/>
-                <label>"Name shown to the participant"<input name="name" value="Codex" required=true maxlength="100"/></label>
-                <button type="submit">"Create 30-day screenshot token"</button>
+                {if reauth_for_mcp {
+                    view! { <a href="/login/oidc?resume=mcp">"Confirm organization sign-in to continue"</a> }.into_any()
+                } else {
+                    view! { <label>"Name shown to the participant"<input name="name" value="Codex" required=true maxlength="100"/></label>
+                        <button type="submit">"Create 30-day screenshot token"</button> }.into_any()
+                }}
             </form>
             <p class="muted">"For integrations such as AnchorDesk. A token acts as the user who created it, never with more access than that user; its scopes can only narrow it."</p>
             <table class="list">

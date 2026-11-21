@@ -1216,6 +1216,13 @@ async fn admin_view(
     let users = queries::users(state).await?;
     let tokens = queries::api_tokens(state).await?;
     let orgs = queries::org_refs(state, p).await?;
+    let reauth_for_mcp = if state.config.oidc.is_some() && !p.sudo {
+        let mut db = state.db.acquire().await?;
+        crate::directory::is_directory(&mut db, p.user_id).await?
+            && !crate::passkeys::recent_provider(&mut *db, p).await?
+    } else {
+        false
+    };
     let mut resp = Html(flyw8t_web::admin_page(
         &ctx(p, flash(flash_code)),
         users,
@@ -1223,6 +1230,7 @@ async fn admin_view(
         orgs,
         revealed.clone(),
         state.config.oidc.is_some(),
+        reauth_for_mcp,
     ))
     .into_response();
     if revealed.is_some() {
