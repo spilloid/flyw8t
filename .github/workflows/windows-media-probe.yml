@@ -1,0 +1,29 @@
+name: Windows media probe
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/windows-media-probe/**'
+      - '.github/workflows/windows-media-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-h264:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: scripts/windows-media-probe
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: cargo fmt --check
+      - run: cargo clippy --locked -- -D warnings
+      - run: cargo build --locked
+      - run: npm ci --ignore-scripts
+      - run: node browser.mjs ./target/x86_64-pc-windows-msvc/debug/flyw8t-windows-media-probe.exe

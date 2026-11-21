@@ -1,0 +1,17 @@
+[package]
+name = "flyw8t-windows-media-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+# Development fixture with its own lockfile; excluded from shipping artifacts.
+[workspace]
+
+[dependencies]
+tempfile = "3"
+windows = { version = "=0.62.2", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
+
+[profile.dev]
+debug = 0
+incremental = false
