@@ -50,7 +50,7 @@
             if ($LASTEXITCODE -ne 0) { throw 'Enrollment failed. Check the message above and the token in the console.' }
         } finally {
             $env:FLYW8T_ENROLL_TOKEN = $previous
-            $token.Dispose()
+            if ($null -ne $token) { $token.Dispose() }
         }
         & $agent service install
         if ($LASTEXITCODE -ne 0) { throw 'Enrollment succeeded, but service installation failed. Fix the reported error and run the verified agent with service install.' }
@@ -64,6 +64,6 @@
         $service | Select-Object Name, Status
         Write-Host 'Open Devices in the console and confirm this PC shows Connected.'
     } finally {
-        $file.Dispose()
+        if ($null -ne $file) { $file.Dispose() }
     }
 }
