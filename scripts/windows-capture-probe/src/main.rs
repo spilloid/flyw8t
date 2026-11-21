@@ -190,7 +190,7 @@ fn probe() -> Result<()> {
     }))?;
     session.StartCapture()?;
     let result = (|| -> Result<()> {
-        for light in [false, true, false, true] {
+        for light in [false, true, false, true, false] {
             LIGHT.store(light, Ordering::Relaxed);
             if !unsafe { InvalidateRect(Some(window.0), None, false) }.as_bool() {
                 return Err("fixture window closed".into());
