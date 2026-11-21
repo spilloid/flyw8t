@@ -1,0 +1,14 @@
+{
+  "name": "@flyw8t/desktop-authority-preview",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.22"
+  },
+  "scripts": {
+    "test": "node --test lifecycle.test.mjs"
+  },
+  "dependencies": {
+    "jose": "6.2.3"
+  }
+}
