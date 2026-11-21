@@ -645,6 +645,27 @@ if (process.argv[2] === '--reopened-observer') {
     });
   }
 
+  for (const failure of ['invalid lease argument','failed policy lookup']) {
+    test(failure + ' preserves the supervision time for an unrelated lease after reopening', async t => {
+      const f = await fixture(t);
+      const unrelated = await f.ledger.admit(await f.authorize(await f.request()), f.connection);
+      assert.equal(f.ledger.active(unrelated, f.connection), true);
+      f.advance(31);
+      if (failure === 'invalid lease argument') {
+        assert.equal(f.ledger.active({ invalid:1 }, f.connection), false);
+      } else {
+        f.raw.exec("CREATE TRIGGER fail_supervision BEFORE UPDATE ON workstation_selections BEGIN SELECT RAISE(ABORT,'lookup failure'); END");
+        assert.equal(f.ledger.active(unrelated, f.connection), false);
+        f.raw.exec('DROP TRIGGER fail_supervision');
+      }
+      f.close(f.ledger);
+      f.advance(-30);
+      const reopened = f.open();
+      assert.equal(reopened.active(unrelated, f.connection), false);
+      assert.equal(f.raw.prepare('SELECT checked_at FROM configuration').get().checked_at, clockStart + 31);
+    });
+  }
+
   test('rolling the wall clock back after expiry cannot resurrect a persisted lease', async t => {
     const f = await fixture(t);
     const token = await f.authorize(await f.request());

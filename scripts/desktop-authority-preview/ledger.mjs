@@ -213,9 +213,7 @@ export class EndpointLedger {
   // The live connection observation and durable policy decision are both required on every use.
   active(lease, connection) {
     try {
-      return this.#write(() => {
-        const now = this.#sampleClock();
-        const highWater = this.#observeTime(now);
+      return this.#timedDecision((now, highWater) => {
         const peer = currentPeer(connection);
         if (!peer || now !== highWater) return false;
         const selected = this.#selections.allowed(this.#policy, now);
