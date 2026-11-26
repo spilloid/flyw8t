@@ -37,6 +37,7 @@ pub mod support;
 pub mod totp;
 pub mod users;
 pub mod web;
+mod windows_installer;
 
 use anyhow::Context;
 use axum::extract::{Path, Request, State};
@@ -64,6 +65,7 @@ pub struct AppState {
     pub started_unix: u64,
     pub bodies: BodyGate,
     pub oidc_flows: oidc::Flows,
+    pub windows_agent_template: tokio::sync::OnceCell<Vec<u8>>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -96,6 +98,7 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         started_unix: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
         bodies: BodyGate::default(),
         oidc_flows: Default::default(),
+        windows_agent_template: Default::default(),
     });
     // The frame's product links are the process's configuration, like its version: the first server started in a
     // process sets them.

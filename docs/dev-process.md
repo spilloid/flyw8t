@@ -189,6 +189,10 @@ New validation mechanisms: Compose CI now has a real packaged-server/MFA/record/
 
 CI follow-up: all five jobs passed on implementation ref **a48f7e6**, [run 43171178365](https://github.com/spilloid/flyw8t/actions/runs/43171178365): Windows, Linux PostgreSQL/protocol/TLS/browser/UI, the actual packaged Compose startup/MFA/record/empty-database-restore round-trip, Mac probe compilation/ad-hoc signature verification, and standards. This is the first recorded Compose sign-in/restore evidence. Physical Mac permission/session testing, Windows enrollment against Compose, off-host/key recovery, power-loss/disk-exhaustion drills and independent adversarial review remain open. The observation probe's compile success does not pass G02-MAC.
 
+## Site-specific Windows enrollment, 2026-11-26
+
+The Windows installer uses the existing organization and site enrollment token policy. The package codec test recovers the exact release executable, and the fleet integration test verifies that the downloaded token enrolls one device into its selected site. The Windows trial should cover the destination screen, declined and accepted UAC, service startup, rerunning an installer on an enrolled PC, and verifying the installed binary's signature.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.

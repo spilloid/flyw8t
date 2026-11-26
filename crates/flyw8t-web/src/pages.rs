@@ -1562,7 +1562,7 @@ pub(crate) fn revealed_box(r: RevealedSecret) -> impl IntoView {
                     <span id="token-status" role="status"></span>
                 </div>
                 <h3>"On the Windows device"</h3>
-                <p>"The device owner or an authorized local administrator must "<a href="#enroll-device">"download the agent and SHA256SUMS"</a>" into the same folder. Open PowerShell as administrator in that folder."</p>
+                <p>"Under "<a href="#enroll-device">"Manual setup downloads"</a>", save the signed agent and SHA256SUMS to the same folder. Open PowerShell as administrator in that folder."</p>
                 <label for="enrollment-commands">"PowerShell setup commands"</label>
                 <textarea id="enrollment-commands" class="code" rows="9" wrap="off" readonly spellcheck="false">{textarea_text(&commands)}</textarea>
                 <div class="copy-controls">
@@ -1891,8 +1891,7 @@ pub fn organization_page(
             .map(|s| view! { <option value=s.id.to_string()>{s.name.clone()}</option> })
             .collect_view();
         view! {
-            {windows_downloads("agent", "Download Windows agent (x64)")}
-            <p>"Save both files together on the Windows device and keep their original names. The setup commands verify the download before enrollment."</p>
+            <p>"Choose the site, download the installer, and open it on the Windows PC. Setup shows the destination and asks for administrator approval."</p>
             {return_to_setup}
             <form method="post" action=url class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
@@ -1904,8 +1903,14 @@ pub fn organization_page(
                     <option value="1440">"24 hours"</option>
                 </select></label>
                 <label>"Devices"<input type="number" name="max_uses" value="1" min="1" max="100"/></label>
-                <button type="submit">"Create enrollment token"</button>
+                <button type="submit" name="download" value="windows">"Download Windows installer"</button>
+                <button type="submit" class="secondary">"Create manual token"</button>
             </form>
+            <p class="hint">"The installer contains the enrollment token. Share it only with the people setting up these PCs."</p>
+            <details>
+                <summary>"Manual setup downloads"</summary>
+                {windows_downloads("agent", "Download signed Windows agent (x64)")}
+            </details>
         }
     });
     let token_rows = tokens
@@ -1995,6 +2000,14 @@ pub fn organization_page(
 pub fn site_page(ctx: &PageCtx, site: SitePage, fields: Vec<ResolvedField>) -> String {
     let org_href = format!("/organizations/{}", site.organization.id);
     let none = site.devices.is_empty();
+    let installer = ctx.can_enroll.then(|| view! {
+        <form method="post" action=format!("/organizations/{}/enrollment-tokens", site.organization.id) class="inline-form">
+            <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+            <input type="hidden" name="site" value=site.id.to_string()/>
+            <button type="submit" name="download" value="windows">"Download Windows installer for this site"</button>
+        </form>
+        <p class="hint">"The installer enrolls one PC at this site and is valid for one hour."</p>
+    });
     let rename = ctx.is_admin.then(|| {
         let url = format!("/sites/{}/rename", site.id);
         view! {
@@ -2026,6 +2039,7 @@ pub fn site_page(ctx: &PageCtx, site: SitePage, fields: Vec<ResolvedField>) -> S
         </a>
         <section class="card">
             <h2>"Devices"</h2>
+            {installer}
             {none.then(|| view! { <p class="empty">"No devices in this site."</p> })}
             <ul class="plain">{devices}</ul>
         </section>

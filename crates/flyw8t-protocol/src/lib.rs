@@ -9,6 +9,7 @@ pub mod auth;
 pub mod catalog;
 pub mod desktop_link;
 pub mod display;
+pub mod enrollment_package;
 pub mod inventory;
 pub mod messages;
 pub mod physical_console;

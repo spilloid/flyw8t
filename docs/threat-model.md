@@ -77,6 +77,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 ### T11: Secrets in logs, URLs and responses (STD-006b)
 - **Control:** tokens are shown once and stored hashed; API token responses are never re-displayed; reveal pages send `Cache-Control: no-store`; audit records hold credential *prefixes*; agent logs never include tokens or keys; the enrollment token is passed by flag or environment, never in a URL.
 - **Residual:** the enrollment token appears on the agent's command line (`--token`), which a local administrator can see in the process list during enrollment. `FLYW8T_ENROLL_TOKEN` is supported as an alternative.
+- **Windows installer:** the downloaded executable contains the token for its configured organization and site. The console sends it once with `Cache-Control: no-store`, and the server retains only the token hash. Anyone with a copy can use its remaining enrollments until it expires or is revoked. The personalized download is unsigned. The installed service contains only the original release executable bytes.
 
 ### T12: Tampering with the record
 - **Control:** `job_events` and `audit_events` reject UPDATE, DELETE and TRUNCATE with database triggers.

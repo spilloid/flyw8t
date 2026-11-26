@@ -556,6 +556,7 @@ mod flow_expiry_tests {
             started_unix: 0,
             bodies: Default::default(),
             oidc_flows: Default::default(),
+            windows_agent_template: Default::default(),
         });
         state.oidc_flows.0.lock().unwrap().insert(
             auth::digest("state"),

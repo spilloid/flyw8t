@@ -38,7 +38,7 @@ pub fn install_path() -> Result<PathBuf> {
 /// exactly that and hold nothing but the agent. The state folder (which holds the device key) is never repaired:
 /// it must be as `enroll` made it, or install refuses. Only the default state folder may be used: the folders above
 /// a custom one are not checked, and could be swapped under a service running as SYSTEM.
-pub fn install(state_dir: &std::path::Path, source: std::fs::File) -> Result<()> {
+pub fn install(state_dir: &std::path::Path, source: impl std::io::Read) -> Result<()> {
     use crate::winsec::{check_tree, ensure_dir, READABLE};
     let default = crate::config::default_state_dir()?;
     anyhow::ensure!(
@@ -137,6 +137,17 @@ pub fn install(state_dir: &std::path::Path, source: std::fs::File) -> Result<()>
         .start::<OsString>(&[])
         .context("starting the service")?;
     Ok(())
+}
+
+pub fn status() -> Result<Option<ServiceState>> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(service) => Ok(Some(service.query_status()?.current_state)),
+        Err(windows_service::Error::Winapi(error)) if error.raw_os_error() == Some(1060) => {
+            Ok(None)
+        }
+        Err(error) => Err(error).context("checking the Flyw8t service"),
+    }
 }
 
 /// Stop the service, wait until it has stopped, and remove it. The program and state folders are left in place.
