@@ -90,6 +90,30 @@ the token. A successful first check-in is labeled **Connected · live**.
 The trial guide also covers installing the technician app and running a verified
 diagnostic. [Windows beta trial](beta-trial.md)
 
+### Silent deployment from a site enrollment package
+
+In the organization's enrollment form, choose the site, device count and validity and download **Flyw8t-Setup-x64.exe**. The package contains the enrollment credential. Distribute it through your managed deployment system and size the rollout to the credential's expiry and use limit.
+
+Run the downloaded package from a process that already has Windows administrator rights:
+
+```text
+Flyw8t-Setup-x64.exe --quiet
+```
+
+`/quiet` is equivalent. Setup enrolls the device, copies the original agent executable to Program Files, and starts the `flyw8t-agent` service. Quiet setup runs without dialogs, an elevation prompt, or a restart. It writes status to stdout and errors to stderr and waits for Windows to report that the service is running. Confirm check-in in the console. Retrying with the same package preserves the existing device identity and site. Setup can resume a stopped or missing service without consuming another enrollment use.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Windows reports that the agent service is running, including an existing enrollment for the same console. |
+| `1` | Enrollment or service setup failed. The error output identifies the failed step. |
+| `87` | The executable is missing a usable enrollment package. |
+| `740` | Setup needs a process that already has administrator rights. |
+
+- For **Intune**, package the EXE as a Win32 app, use the quiet install command, and set install behavior to **System**. For detection, check that the `flyw8t-agent` service is registered and the installed EXE exists in `%ProgramFiles%\flyw8t`. The installed `flyw8t-agent.exe service uninstall` command removes the service and retains the endpoint identity for recovery. [Microsoft Intune Win32 apps](https://learn.microsoft.com/en-us/intune/app-management/deployment/add-win32)
+- For **Group Policy**, run the EXE and its quiet argument from a computer startup script with access to the package. Capture its exit code in the deployment log.
+
+The site-specific download is an unsigned package containing the original signed agent and the enrollment credential. Use the copy issued by your console. If endpoint policy requires a signed installer, use the signed agent with the separate enrollment commands below.
+
 For a development build:
 
 ```powershell

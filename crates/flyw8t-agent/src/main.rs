@@ -6,6 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(windows)]
 mod windows_setup;
+#[cfg(any(windows, test))]
+mod windows_setup_mode;
 
 /// flyw8t endpoint agent.
 #[derive(Parser)]
@@ -72,8 +74,13 @@ fn main() -> Result<()> {
         })
     };
     #[cfg(windows)]
-    if let Some(finish) = windows_setup::entry() {
-        return windows_setup::run(own_file, finish);
+    if let Some(mode) = windows_setup_mode::SetupMode::parse(std::env::args_os().skip(1)) {
+        use windows_setup_mode::SetupMode;
+        match mode {
+            SetupMode::Interactive => return windows_setup::run(own_file, false),
+            SetupMode::Elevated => return windows_setup::run(own_file, true),
+            SetupMode::Quiet => std::process::exit(windows_setup::run_quiet(own_file)),
+        }
     }
     let cli = Cli::parse();
     let state_dir = match cli.state_dir {
