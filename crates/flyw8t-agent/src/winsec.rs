@@ -235,40 +235,60 @@ pub fn check_sddl(sddl: &str, readable: bool, top: bool) -> std::result::Result<
     Ok(())
 }
 
+/// Verify a protected directory without walking unrelated jobs that may be writing into it.
+pub fn check_private_dir(path: &Path) -> Result<()> {
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("{} is not a plain folder", path.display());
+    }
+    check_sddl(&sddl_of(path)?, false, true)
+        .map_err(|reason| anyhow::anyhow!("{} {reason}", path.display()))
+}
+
+/// Check a private file whose containing directory has already been checked.
+pub fn check_private_file(path: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_file() {
+        bail!("{} is not a plain file", path.display());
+    }
+    check_entry(path, false, false)
+}
+
 /// Refuse `root` unless it, and everything in it, is as flyw8t makes it: no junctions, symbolic links or other
 /// reparse points, no file with a second name (hard link), and every owner and permission passing [`check_sddl`].
 pub fn check_tree(root: &Path, readable: bool) -> Result<()> {
-    fn walk(path: &Path, readable: bool, top: bool) -> Result<()> {
-        let meta = std::fs::symlink_metadata(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            bail!("{} is a junction or link", path.display());
-        }
-        check_sddl(&sddl_of(path)?, readable, top)
-            .map_err(|why| anyhow::anyhow!("{} {why}", path.display()))?;
-        if meta.is_dir() {
-            for entry in std::fs::read_dir(path)? {
-                walk(&entry?.path(), readable, false)?;
-            }
-        } else {
-            let f =
-                std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-            // SAFETY: an open file handle and a zeroed out-struct.
-            if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
-                bail!(
-                    "reading {}: {}",
-                    path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-            if info.nNumberOfLinks != 1 {
-                bail!("{} has another name (a hard link)", path.display());
-            }
-        }
-        Ok(())
+    check_entry(root, readable, true)
+}
+
+fn check_entry(path: &Path, readable: bool, top: bool) -> Result<()> {
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("{} is a junction or link", path.display());
     }
-    walk(root, readable, true)
+    check_sddl(&sddl_of(path)?, readable, top)
+        .map_err(|why| anyhow::anyhow!("{} {why}", path.display()))?;
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            check_entry(&entry?.path(), readable, false)?;
+        }
+    } else {
+        let f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: an open file handle and a zeroed out-struct.
+        if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
+            bail!(
+                "reading {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+        if info.nNumberOfLinks != 1 {
+            bail!("{} has another name (a hard link)", path.display());
+        }
+    }
+    Ok(())
 }
 
 /// Make sure `dir` exists as flyw8t makes it: create it locked, or check what is there. `Ok(false)` when this

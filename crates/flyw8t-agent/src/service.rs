@@ -1,19 +1,21 @@
 //! Windows service integration: install, uninstall, and the service control loop.
 
 use anyhow::{Context, Result};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use windows_service::service::{
-    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
+    Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
     ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
+use windows_sys::Win32::{Foundation::LocalFree, UI::Shell::CommandLineToArgvW};
 
 pub const SERVICE_NAME: &str = "flyw8t-agent";
 const DISPLAY_NAME: &str = "flyw8t Agent";
@@ -115,6 +117,70 @@ pub fn install(state_dir: &std::path::Path, source: impl std::io::Read) -> Resul
     let service = manager
         .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)
         .context("creating the service")?;
+    configure_and_start(&service)
+}
+
+/// Resume only the service registration created by this installer.
+pub fn resume_installation() -> Result<()> {
+    let exe = install_path()?;
+    let state_dir = crate::config::default_state_dir()?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::QUERY_CONFIG
+            | ServiceAccess::QUERY_STATUS
+            | ServiceAccess::CHANGE_CONFIG
+            | ServiceAccess::START,
+    )?;
+    let config = service.query_config()?;
+    let expected = [
+        exe.as_os_str(),
+        OsStr::new("service"),
+        OsStr::new("run"),
+        OsStr::new("--state-dir"),
+        state_dir.as_os_str(),
+    ];
+    anyhow::ensure!(
+        config.service_type == ServiceType::OWN_PROCESS
+            && config.start_type == ServiceStartType::AutoStart
+            && config.account_name.as_deref().is_some_and(|account| {
+                account.eq_ignore_ascii_case("LocalSystem")
+                    || account.eq_ignore_ascii_case(r"NT AUTHORITY\SYSTEM")
+            })
+            && matches_command_line(config.executable_path.as_os_str(), &expected)?,
+        "the existing {SERVICE_NAME} registration differs from the standard Flyw8t installation"
+    );
+    crate::winsec::check_tree(exe.parent().context("install path has no folder")?, true)?;
+    anyhow::ensure!(exe.is_file(), "the installed agent executable is missing");
+    match service.query_status()?.current_state {
+        ServiceState::Stopped => configure_and_start(&service),
+        ServiceState::StartPending | ServiceState::Running => Ok(()),
+        _ => anyhow::bail!("the {SERVICE_NAME} service is busy or paused; check Windows Services"),
+    }
+}
+
+fn matches_command_line(command: &OsStr, expected: &[&OsStr]) -> Result<bool> {
+    let command = command.encode_wide().chain([0]).collect::<Vec<_>>();
+    let mut count = 0;
+    // Windows allocates a single block of pointers and terminated strings.
+    let argv = unsafe { CommandLineToArgvW(command.as_ptr(), &mut count) };
+    if argv.is_null() {
+        return Err(std::io::Error::last_os_error()).context("reading the service command line");
+    }
+    let matches = count as usize == expected.len()
+        && expected.iter().enumerate().all(|(index, expected)| {
+            let expected = expected.encode_wide().chain([0]);
+            // Stop at the first mismatch or terminator, so reads stay within the Windows string.
+            let arg = unsafe { *argv.add(index) };
+            expected
+                .enumerate()
+                .all(|(offset, unit)| unsafe { *arg.add(offset) == unit })
+        });
+    unsafe { LocalFree(argv.cast()) };
+    Ok(matches)
+}
+
+fn configure_and_start(service: &Service) -> Result<()> {
     service.set_description(DESCRIPTION)?;
     service.update_failure_actions(ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
@@ -133,10 +199,10 @@ pub fn install(state_dir: &std::path::Path, source: impl std::io::Read) -> Resul
     })?;
     // Also when the service stops itself with an error (exit code 1), not only when it crashes.
     service.set_failure_actions_on_non_crash_failures(true)?;
-    service
-        .start::<OsString>(&[])
-        .context("starting the service")?;
-    Ok(())
+    match service.start::<OsString>(&[]) {
+        Err(windows_service::Error::Winapi(error)) if error.raw_os_error() == Some(1056) => Ok(()),
+        result => result.context("starting the service"),
+    }
 }
 
 pub fn status() -> Result<Option<ServiceState>> {
@@ -204,26 +270,39 @@ fn run_service() -> Result<()> {
         current_state: state,
         controls_accepted: accept,
         exit_code: ServiceExitCode::Win32(code),
-        checkpoint: 0,
-        wait_hint: Duration::from_secs(10),
+        checkpoint: u32::from(state == ServiceState::StartPending),
+        wait_hint: if state == ServiceState::StartPending {
+            Duration::from_secs(30)
+        } else {
+            Duration::ZERO
+        },
         process_id: None,
     };
     handle.set_service_status(status(
-        ServiceState::Running,
-        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        ServiceState::StartPending,
+        ServiceControlAccept::empty(),
         0,
     ))?;
 
     let state_dir = STATE_DIR.get().cloned();
-    let result = tokio::runtime::Runtime::new()?.block_on(async {
-        let state_dir = match state_dir {
-            Some(d) => d,
-            None => crate::config::default_state_dir()?,
-        };
-        let cfg = crate::AgentConfig::load(&state_dir)?;
-        let agent = crate::Agent::new(cfg)?;
-        agent.run(shutdown).await.map_err(anyhow::Error::from)
-    });
+    let result = tokio::runtime::Runtime::new()
+        .context("starting the service runtime")
+        .and_then(|runtime| {
+            runtime.block_on(async {
+                let state_dir = match state_dir {
+                    Some(d) => d,
+                    None => crate::config::default_state_dir()?,
+                };
+                let cfg = crate::AgentConfig::load(&state_dir)?;
+                let agent = crate::Agent::new(cfg)?;
+                handle.set_service_status(status(
+                    ServiceState::Running,
+                    ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+                    0,
+                ))?;
+                agent.run(shutdown).await.map_err(anyhow::Error::from)
+            })
+        });
     // A nonzero exit makes the SCM apply the restart actions; a revoked credential is
     // reported the same way and will fail again on restart, visibly, in the agent's log
     // (`logs\agent.log` in the state directory). A crash shows in the System event log (7031).

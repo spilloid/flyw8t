@@ -1957,6 +1957,12 @@ pub fn organization_page(
             </form>
             <p class="hint">"The installer contains the enrollment token. Share it only with the people setting up these PCs."</p>
             <details>
+                <summary>"Deploy quietly with Intune or Group Policy"</summary>
+                <p>"Run the downloaded package as SYSTEM or from an elevated process."</p>
+                <pre><code>"Flyw8t-Setup-x64.exe --quiet"</code></pre>
+                <p class="hint">"Set the device count and validity for your rollout before downloading."</p>
+            </details>
+            <details>
                 <summary>"Manual setup downloads"</summary>
                 {windows_downloads("agent", "Download signed Windows agent (x64)")}
             </details>

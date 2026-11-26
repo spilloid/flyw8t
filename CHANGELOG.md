@@ -4,6 +4,11 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-26 (pre-release)
+
+- Deploy a site enrollment package silently with `--quiet` or `/quiet` from an elevated process. Setup reports a deployment exit code and can recover a stopped or missing service while preserving the existing enrollment.
+- Find the silent deployment command in the Windows enrollment form for use with Intune or Group Policy.
+
 - From a saved script revision, **Edit a copy of this revision** opens its source, parameters and risk class as a draft. Saving records a new revision if the content differs from the current one.
 - Connect an attended screenshot client from Administration with a dedicated scoped token. Directory administrators can confirm this action through a fresh organization sign-in, including provider TOTP. Tokens issued this way expire within 30 days. First-passkey setup links directly to reauthentication.
 - The MCP adapter accepts `--server`, `--token-file`, and `--ca-cert` alongside the existing environment settings. Run `flyw8t-mcp --help` for the corresponding names.
