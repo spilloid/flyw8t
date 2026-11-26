@@ -9,6 +9,21 @@ permissions:
   contents: read
 
 jobs:
+  workstation-policy:
+    name: Offline workstation policy and grant verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: scripts/desktop-authority-preview
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
   windows:
     name: Windows (agent target) - fmt, clippy, unit tests, model test
     runs-on: windows-latest

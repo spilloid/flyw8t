@@ -5,3 +5,4 @@
 /deploy/compose/.env
 /agent-state/
 /docs/img/
+/scripts/desktop-authority-preview/node_modules/
