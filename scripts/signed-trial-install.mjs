@@ -46,7 +46,7 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
       "    'Unexpected prompt|Expected one secure prompt' { $hint = 'setup-prompt'; break }",
       "    'service installation failed|Windows has not confirmed' { $hint = 'service-start'; break }",
       '  }',
-      "  if ($_.Exception -is [System.Management.Automation.PSSecurityException]) { $hint = 'script-policy' }",
+      "  if ($_.Exception -is [System.Management.Automation.PSSecurityException] -and $trialPrompt.Reads -eq 0) { $hint = 'download-policy' }",
       "  [Console]::Error.WriteLine(('FLYW8T-TRIAL-FAIL {0} {1} {2}' -f $_.InvocationInfo.ScriptLineNumber, $hint, $_.CategoryInfo.Category))",
       '  exit 1',
       '}'
@@ -58,7 +58,7 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
     if (child.error || child.status !== 0) {
       // Only return our own labels and numeric source locations. Other child output may
       // include a token, a command line or untrusted server text.
-      const marker = /^FLYW8T-TRIAL-FAIL (\d{1,5}) (PowerShell|module-load|file-owner|directory-permissions|access-denied|token-refused|server-connection|checksum|publisher-signature|version|setup-location|setup-prompt|service-start|script-policy) ([A-Za-z]+)\r?$/m.exec(child.stderr ?? '');
+      const marker = /^FLYW8T-TRIAL-FAIL (\d{1,5}) (PowerShell|module-load|file-owner|directory-permissions|access-denied|token-refused|server-connection|checksum|publisher-signature|version|setup-location|setup-prompt|service-start|download-policy) ([A-Za-z]+)\r?$/m.exec(child.stderr ?? '');
       let detail = child.error?.code === 'ETIMEDOUT' ? ', timed out' : '';
       if (marker) {
         const line = Number(marker[1]);
@@ -71,7 +71,9 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
           }
         }
       }
-      throw Error(stage + ' failed (exit ' + child.status + detail + ')');
+      const error = Error(stage + ' failed (exit ' + child.status + detail + ')');
+      error.trialHint = marker?.[2];
+      throw error;
     }
     return child.stdout.trim();
   }
@@ -132,9 +134,19 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
     // The file and clipboard script run in different PowerShell scopes. The prompt and
     // its caller share a state object so both paths can verify the same one prompt.
     const finish = "$trialSecret.Dispose(); if ($trialPrompt.Reads -ne 1) { throw 'Expected one secure prompt' }";
-    powershell('Run downloaded enrollment file', [...prompt, '& .\\Install-Flyw8t.ps1', finish].join('\n'), {
-      FLYW8T_TRIAL_INPUT: token
-    });
+    const input = { FLYW8T_TRIAL_INPUT: token };
+    let setupSource = 'downloaded setup file';
+    try {
+      powershell('Run downloaded enrollment file', [...prompt, '& .\\Install-Flyw8t.ps1', finish].join('\n'), input);
+    } catch (error) {
+      if (error.trialHint !== 'download-policy') throw error;
+      // The download and clipboard already matched the reviewed template. The runner's
+      // PowerShell policy can deny the file before enrollment. Exercise the copied commands
+      // in that case and keep the policy in effect.
+      setupSource = 'reviewed setup commands';
+      console.log('PowerShell policy refused the downloaded setup file before the enrollment prompt. Checking the clipboard setup path.');
+      powershell('Run reviewed enrollment commands', [...prompt, copied, finish].join('\n'), input);
+    }
 
     assert.equal(powershell('Read service status', '(Get-Service flyw8t-agent).Status.ToString()'), 'Running');
     const status = execFileSync(agent, ['status'], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
@@ -176,7 +188,7 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
     ]);
     const finding = await evaluate('document.querySelector("#console-finding")?.textContent');
     assert.ok(observations.has(finding), 'The signed Windows service must answer the physical console check');
-    console.log('Verified signed agent enrollment from the downloaded setup file, Running service and matching device console reply (' + observations.get(finding) + ').');
+    console.log('Verified signed agent enrollment from the ' + setupSource + ', Running service and matching device console reply (' + observations.get(finding) + ').');
   } finally {
     // The preflight required an empty service, program and state location. Check the registered
     // executable and its digest again before uninstalling the service created by this trial.
