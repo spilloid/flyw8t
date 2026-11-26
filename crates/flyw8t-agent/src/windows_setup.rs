@@ -180,8 +180,8 @@ fn enroll_and_install(
 
     let _ = stage.send("Enrolling this PC with your Flyw8t console…");
     let state_dir = cfg.state_dir.clone();
-    let (id, _) = super::runtime()?.block_on(async {
-        tokio::time::timeout(Duration::from_secs(90), flyw8t_agent::enroll(cfg, &package.token)).await
+    let (id, _, _) = super::runtime()?.block_on(async {
+        tokio::time::timeout(Duration::from_secs(90), flyw8t_agent::enroll(cfg, &package.token, None)).await
     }).context("Setup timed out while enrolling. Check connectivity and look for this PC in Devices before retrying.")?
         .context("Enrollment failed. Verify the installer is still valid in the console and that this PC can reach it.")?;
     let _ = stage.send("Installing and starting the Windows service…");

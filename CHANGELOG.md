@@ -2,6 +2,10 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## Unreleased
+
+- Run approved PowerShell revisions on Windows agents with pinned script trust. The agent validates script approvals and any required run authorization before it starts the job.
+
 ## 0.1.8 — 2026-11-26 (pre-release)
 
 - Download a Windows installer for a specific organization and site. Open it on the PC to see the destination, approve Windows elevation, and follow enrollment and service startup. Manual token setup remains available for the signed standalone download.
