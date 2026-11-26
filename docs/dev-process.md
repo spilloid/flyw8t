@@ -193,6 +193,10 @@ CI follow-up: all five jobs passed on implementation ref **a48f7e6**, [run 43171
 
 The Windows installer uses the existing organization and site enrollment token policy. The package codec test recovers the exact release executable, and the fleet integration test verifies that the downloaded token enrolls one device into its selected site. The Windows trial should cover the destination screen, declined and accepted UAC, service startup, rerunning an installer on an enrolled PC, and verifying the installed binary's signature.
 
+## Device activity, 2026-11-26
+
+The device Activity page reads organization-scoped audit records and job transitions from their existing append-only tables. All six console integration tests passed on local PostgreSQL 17.7. They cover a real agent diagnostic, the audit permission, cross-organization exclusion and older-page boundaries where events share a timestamp. The console screenshot suite includes the Activity page. The full browser suite and independent review remain pending.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.

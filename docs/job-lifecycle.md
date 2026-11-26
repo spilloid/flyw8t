@@ -118,6 +118,8 @@ The agent's journal fails closed if execution history is unreadable, mismatched,
 | `started_at`, `finished_at` | **device** | reported by the device; labelled "(device clock)" in the UI |
 | `deliver_by` | server | creation + delivery window |
 
+Use **Devices → device → View device activity** to see recorded agent connections and job activity in order of server observation. The timeline includes the requester and the reported execution events, with links to each job's complete record. A job completion entry records the agent's report. Check the linked job for its verification outcome.
+
 ## What is not done yet
 
 - Multi-device (fleet) jobs. A job targets exactly one device; the API has no batch endpoint.

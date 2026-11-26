@@ -199,6 +199,7 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/probe/heartbeat", post(network::heartbeat))
         .route("/devices/{id}", get(web::device))
+        .route("/devices/{id}/activity", get(web::device_activity))
         .route(
             "/devices/{id}/physical-console/check",
             post(web::check_physical_console),
@@ -244,6 +245,10 @@ pub fn router(state: Shared) -> Router {
             get(web::organizations).post(web::create_org),
         )
         .route("/organizations/{id}", get(web::organization))
+        .route(
+            "/downloads/Install-Flyw8t.ps1",
+            get(web::download_enrollment_setup),
+        )
         .route("/organizations/{id}/sites", post(web::add_site))
         .route("/organizations/{id}/rename", post(web::rename_org))
         .route("/sites/{id}/rename", post(web::rename_site))

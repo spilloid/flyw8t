@@ -1092,6 +1092,7 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
             <h2 id="desktop-launch-title">"Open in Flyw8t Technician"</h2>
             <p class="desktop-target">{target}" Use a Windows PC that can reach this device over the network or VPN."</p>
             <div class="actions">{choices}</div>
+            <p><a href=format!("flyw8t://open/terminal{query}")>"Open SSH terminal"</a>" · Requires SSH on the device and a LAN or VPN route."</p>
             <details class="desktop-link-help">
                 <summary>"Set up browser links on Windows"</summary>
                 {windows_downloads("technician", "Download Flyw8t Technician (Windows x64)")}
@@ -1257,6 +1258,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     let body = view! {
         <p class="crumbs"><a href="/devices">"Devices"</a>" / "</p>
         <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
+        {ctx.is_admin.then(|| view! { <p><a href=format!("/devices/{}/activity", d.row.id)>"View device activity"</a></p> })}
         {retired_note}
         <p>{tags}</p>
         {console_check}
@@ -1290,6 +1292,47 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         {manage}
         {fields_card(ctx, &d.fields, "device", d.row.id)}
         {danger}
+    };
+    shell(&title, ctx, Nav::Devices, None, body)
+}
+
+pub fn device_activity_page(
+    ctx: &PageCtx,
+    device: &DeviceRow,
+    events: Vec<DeviceActivityEvent>,
+    older: Option<String>,
+) -> String {
+    let title = format!("{} activity", device.name());
+    let device_href = format!("/devices/{}", device.id);
+    let content = if events.is_empty() {
+        view! { <p class="empty">"No activity on this page."</p> }.into_any()
+    } else {
+        view! {
+            <ol class="timeline">
+                {events.into_iter().map(|event| {
+                    let job = event.job.map(|id| view! {
+                        <p class="small"><a href=format!("/jobs/{id}")>{event.job_action.unwrap_or_else(|| "View job".into())}</a></p>
+                    });
+                    view! {
+                        <li>
+                            <time datetime=fmt::iso(event.at)>{fmt::timestamp(event.at)}</time>
+                            <p><strong>{event.action}</strong>" · "{event.actor}</p>
+                            {job}
+                        </li>
+                    }
+                }).collect_view()}
+            </ol>
+        }.into_any()
+    };
+    let body = view! {
+        <p class="crumbs"><a href="/devices">"Devices"</a>" / "<a href=device_href.clone()>{device.name().to_owned()}</a></p>
+        <h1>"Device activity"</h1>
+        <section class="card">
+            {content}
+            {older.map(|cursor| view! {
+                <p><a href=format!("{device_href}/activity?before={}", query_value(&cursor))>"Older activity →"</a></p>
+            })}
+        </section>
     };
     shell(&title, ctx, Nav::Devices, None, body)
 }
@@ -1563,6 +1606,11 @@ pub(crate) fn revealed_box(r: RevealedSecret) -> impl IntoView {
                 </div>
                 <h3>"On the Windows device"</h3>
                 <p>"Under "<a href="#enroll-device">"Manual setup downloads"</a>", save the signed agent and SHA256SUMS to the same folder. Open PowerShell as administrator in that folder."</p>
+                <p><a href="/downloads/Install-Flyw8t.ps1" download="Install-Flyw8t.ps1">"Download setup file"</a>" and save it beside the agent and SHA256SUMS. Run this command, then paste the token at the prompt."</p>
+                <pre class="output"><code>{r".\Install-Flyw8t.ps1"}</code></pre>
+                <p class="hint">"If Windows blocks unsigned scripts, follow the "
+                    <a href="https://github.com/spilloid/flyw8t/blob/main/docs/beta-trial.md#2-enroll-the-agent-locally">"manual signed-agent instructions"</a>"."</p>
+                <details><summary>"Manual setup commands"</summary>
                 <label for="enrollment-commands">"PowerShell setup commands"</label>
                 <textarea id="enrollment-commands" class="code" rows="9" wrap="off" readonly spellcheck="false">{textarea_text(&commands)}</textarea>
                 <div class="copy-controls">
@@ -1571,6 +1619,7 @@ pub(crate) fn revealed_box(r: RevealedSecret) -> impl IntoView {
                 </div>
                 <p>"Paste the commands into PowerShell. When prompted, copy and paste the enrollment token."</p>
                 <p class="hint">"To copy manually, select a field and use Ctrl+A, then Ctrl+C, or your device’s Select All and Copy commands."</p>
+                </details>
                 <p>"After setup, open "<a href="/devices">"Devices"</a>" and check for Connected · live."</p>
                 <script inner_html=crate::ENROLLMENT_COPY_JS></script>
             </section>
@@ -2070,6 +2119,7 @@ pub fn admin_page(
     orgs: Vec<OrgRef>,
     revealed: Option<RevealedSecret>,
     oidc: bool,
+    reauth_for_mcp: bool,
 ) -> String {
     let now = ctx.now;
     let user_rows = users
@@ -2145,6 +2195,19 @@ pub fn admin_page(
         </section>
         <section>
             <h2>"API tokens"</h2>
+            <form id="mcp-client" method="post" action="/admin/tokens" class="card stack">
+                <h3>"Connect an MCP client"</h3>
+                <p>"The client can request screenshots during a shared support session. The participant chooses whether to allow them."</p>
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <input type="hidden" name="scope" value="support:screenshot"/>
+                <input type="hidden" name="ttl_days" value="30"/>
+                {if reauth_for_mcp {
+                    view! { <a href="/login/oidc?resume=mcp">"Confirm organization sign-in to continue"</a> }.into_any()
+                } else {
+                    view! { <label>"Name shown to the participant"<input name="name" value="Codex" required=true maxlength="100"/></label>
+                        <button type="submit">"Create 30-day screenshot token"</button> }.into_any()
+                }}
+            </form>
             <p class="muted">"For integrations such as AnchorDesk. A token acts as the user who created it, never with more access than that user; its scopes can only narrow it."</p>
             <table class="list">
                 <thead><tr><th scope="col">"Token"</th><th scope="col">"Owner"</th><th scope="col">"Scopes"</th><th scope="col">"Last used"</th><th scope="col">"Status"</th></tr></thead>
@@ -3369,10 +3432,27 @@ pub fn script_revision_page(
 }
 
 /// A committed same-origin document lets the following user navigation send Strict cookies.
-pub fn oidc_complete_page() -> String {
+pub fn passkey_reauth_page() -> String {
+    card_page(
+        "Confirm your sign-in",
+        view! {
+            <h1>"Confirm your sign-in to add a passkey"</h1>
+            <p>"Your organization sign-in must be less than five minutes old."</p>
+            <a class="button" href="/login/oidc?resume=passkey">"Sign in and continue"</a>
+        },
+    )
+}
+
+pub fn oidc_return_page(
+    href: &'static str,
+    label: &'static str,
+    missing_freshness: bool,
+) -> String {
     card_page(
         "Sign-in complete",
-        view! {<h1>"Sign-in complete"</h1><p>"Your organization has signed you in."</p><p><a class="button" href="/">"Continue to flyw8t"</a></p>},
+        view! {<h1>"Sign-in complete"</h1><p>"Your organization has signed you in."</p>
+        {missing_freshness.then(|| view! { <p class="flash bad">"Your identity provider did not confirm a recent authentication. Ask your administrator to check the auth_time claim."</p> })}
+        <p><a class="button" href=href>{label}</a></p>},
     )
 }
 

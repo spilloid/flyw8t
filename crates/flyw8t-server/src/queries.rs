@@ -238,6 +238,129 @@ pub async fn device_summary(
     Ok(row.map(|t| device_row(state, t)))
 }
 
+pub struct ActivityCursor(OffsetDateTime, i16, i64);
+
+impl ActivityCursor {
+    pub fn parse(value: &str) -> Option<Self> {
+        let (at, rest) = value.split_once(':')?;
+        let (source, id) = rest.split_once(':')?;
+        let at = OffsetDateTime::from_unix_timestamp_nanos(at.parse().ok()?).ok()?;
+        let source = source.parse().ok().filter(|n| matches!(*n, 0 | 1))?;
+        let id = id.parse().ok().filter(|n| *n > 0)?;
+        Some(Self(at, source, id))
+    }
+
+    pub fn as_query_value(&self) -> String {
+        format!("{}:{}:{}", self.0.unix_timestamp_nanos(), self.1, self.2)
+    }
+}
+
+/// Combine durable records using the server's event time. The two tables have independent IDs.
+pub async fn device_activity(
+    state: &Shared,
+    p: &Principal,
+    device: Uuid,
+    before: Option<ActivityCursor>,
+) -> sqlx::Result<(Vec<DeviceActivityEvent>, Option<ActivityCursor>)> {
+    const PAGE: usize = 50;
+    type Row = (
+        OffsetDateTime,
+        i16,
+        i64,
+        String,
+        String,
+        String,
+        Option<Uuid>,
+        Option<String>,
+    );
+    let (all, orgs) = p.scope();
+    let (at, source, id) = before.map_or((None, None, None), |c| (Some(c.0), Some(c.1), Some(c.2)));
+    let rows: Vec<Row> = sqlx::query_as(
+        "WITH scoped_device AS (
+             SELECT id, organization_id FROM devices WHERE id = $1 AND ($2 OR organization_id = ANY($3))
+         ), device_jobs AS (
+             SELECT j.id, j.organization_id, j.action
+               FROM jobs j JOIN scoped_device d ON j.device_id = d.id AND j.organization_id = d.organization_id
+         ), activity AS (
+             SELECT a.at, 0::smallint AS source, a.id, a.actor_label AS actor, a.action, a.outcome,
+                    NULL::uuid AS job, NULL::text AS job_action
+               FROM audit_events a JOIN scoped_device d ON a.target_id = d.id
+              WHERE a.target_type = 'device' AND (
+                    a.organization_id = d.organization_id OR (
+                        a.organization_id IS NULL AND a.actor_type = 'device' AND a.actor_id = d.id
+                        AND a.action IN ('device.connect', 'device.disconnect')
+                    )
+              )
+             UNION ALL
+             SELECT a.at, 0::smallint, a.id, a.actor_label, a.action, a.outcome, j.id, j.action
+               FROM audit_events a JOIN device_jobs j ON a.target_id = j.id AND a.organization_id = j.organization_id
+              WHERE a.target_type = 'job'
+             UNION ALL
+             SELECT e.at, 1::smallint, e.id, e.actor, e.to_state, 'recorded', j.id, j.action
+               FROM job_events e JOIN device_jobs j ON e.job_id = j.id
+              WHERE e.to_state IN ('dispatched', 'acknowledged', 'running', 'completed', 'failed',
+                                   'timed_out', 'cancelled', 'expired', 'outcome_unknown')
+                 OR (e.from_state = 'dispatched' AND e.to_state = 'queued')
+         )
+         SELECT at, source, id, actor, action, outcome, job, job_action FROM activity
+          WHERE $4::timestamptz IS NULL OR (at, source, id) < ($4, $5, $6)
+          ORDER BY at DESC, source DESC, id DESC LIMIT $7",
+    )
+    .bind(device)
+    .bind(all)
+    .bind(&orgs)
+    .bind(at)
+    .bind(source)
+    .bind(id)
+    .bind((PAGE + 1) as i64)
+    .fetch_all(&state.db)
+    .await?;
+    let older = (rows.len() > PAGE).then(|| {
+        let (at, source, id, ..) = rows[PAGE - 1];
+        ActivityCursor(at, source, id)
+    });
+    let events = rows
+        .into_iter()
+        .take(PAGE)
+        .map(|(at, _, _, actor, action, outcome, job, job_action)| {
+            let label = match action.as_str() {
+                "device.enroll" => "Device enrolled",
+                "device.connect" => "Agent authenticated",
+                "device.disconnect" => "Agent connection closed",
+                "device.update" => "Device details changed",
+                "device.revoke" => "Device credential revoked",
+                "device.retire" => "Device retired",
+                "device.physical_console.requested" => "Physical console check requested",
+                "device.physical_console.result" => "Physical console check recorded",
+                "job.create" => "Job requested",
+                "job.cancel" => "Job cancellation requested",
+                "dispatched" => "Job dispatched",
+                "acknowledged" => "Agent accepted the job",
+                "running" => "Agent started the job",
+                "completed" => "Agent reported job completion",
+                "failed" => "Job failed",
+                "timed_out" => "Job timed out",
+                "cancelled" => "Job canceled",
+                "expired" => "Job expired before dispatch",
+                "outcome_unknown" => "Job outcome unknown",
+                "queued" => "Job returned to queue",
+                other => other,
+            };
+            DeviceActivityEvent {
+                at,
+                action: match outcome.as_str() {
+                    "failed" | "denied" => format!("{label} ({outcome})"),
+                    _ => label.to_string(),
+                },
+                actor: actor.strip_prefix("user:").unwrap_or(&actor).to_string(),
+                job,
+                job_action,
+            }
+        })
+        .collect();
+    Ok((events, older))
+}
+
 pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Option<DeviceDetail>> {
     let (all, orgs) = p.scope();
     let row: Option<DeviceTuple> = sqlx::query_as(&format!(
