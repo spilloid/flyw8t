@@ -1969,7 +1969,7 @@ pub fn organization_page(
     });
     let body = view! {
         <p class="crumbs"><a href="/organizations">"Organizations"</a>" / "</p>
-        <h1>{org.name.clone()}</h1>
+        <h1 class="enrollment-heading">{org.name.clone()}</h1>
         {revealed.map(revealed_box)}
         <div class="grid">
             <section class="card">
@@ -1980,7 +1980,6 @@ pub fn organization_page(
             </section>
             <section class="card" id="enroll-device">
                 <h2>"Enroll a Windows device"</h2>
-                <p class="muted">"An enrollment token joins a device to "{org.name.clone()}"."</p>
                 {enroll_form}
             </section>
         </div>
@@ -2004,7 +2003,7 @@ pub fn site_page(ctx: &PageCtx, site: SitePage, fields: Vec<ResolvedField>) -> S
         <form method="post" action=format!("/organizations/{}/enrollment-tokens", site.organization.id) class="inline-form">
             <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
             <input type="hidden" name="site" value=site.id.to_string()/>
-            <button type="submit" name="download" value="windows">"Download Windows installer for this site"</button>
+            <button type="submit" name="download" value="windows">"Download Windows installer"</button>
         </form>
         <p class="hint">"The installer enrolls one PC at this site and is valid for one hour."</p>
     });
@@ -2031,7 +2030,7 @@ pub fn site_page(ctx: &PageCtx, site: SitePage, fields: Vec<ResolvedField>) -> S
         .collect_view();
     let body = view! {
         <p class="crumbs"><a href="/organizations">"Organizations"</a>" / "<a href=org_href>{site.organization.name.clone()}</a>" / "</p>
-        <h1>{site.name.clone()}</h1>
+        <h1 class="enrollment-heading">{site.name.clone()}</h1>
         <a class="tile network-site-link" href=format!("/network?site={}",site.id)>
             <strong>"Network operations"</strong>
             <span>{format!("{} assets · {} collectors",site.network_assets,site.network_collectors)}</span>
