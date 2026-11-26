@@ -39,6 +39,14 @@ Until now the agent's rule was "read-only catalog actions only". Unattended cont
 - it is granted per session by the server and refused by the agent unless that device's policy (signed into its enrollment, not only stored on the server) allows it;
 - the catalog stays read-only for jobs.
 
+#### Trusted console for the Windows stable beta
+
+**Accepted by the operator on 2026-11-26.** The Flyw8t console may serve the browser viewer and authorize unattended sessions after verifying the technician's MFA, role and organization access. The session grant signer may operate within the same trust boundary with a protected key dedicated to desktop grants. Separate signer administration and an independently hosted viewer are optional hardening for this beta. This supersedes those deployment requirements in the original [Windows release gate](https://github.com/spilloid/flyw8t/issues/57).
+
+The agent independently enforces endpoint-approved opt-in and the permitted policy and capability. It verifies a short-lived, single-use signed grant bound to the device enrollment, organization, technician session, Windows desktop and verified WebRTC peer. Record authorization and session outcomes in the audit trail. Local Stop, policy demotion, technician or device revocation, and loss of authorization or transport end the affected session and release held input. Ask first requires local approval.
+
+The beta trusts the hosted console and its deployment administrators with the access each enrolled endpoint has enabled. A compromised console can issue grants or serve altered viewer code within that access, including access to an opted-in sign-in desktop. Endpoint policy and local disable are enforced on the agent. The [Windows stable beta gate](../roadmap.md#windows-stable-beta-gate) defines what to demonstrate before release.
+
 ### 4. Platforms, in order
 
 1. **Windows.** A service plus a per-session desktop process (CreateProcessAsUser into the active console session). Windows.Graphics.Capture / DXGI and `SendInput`; the secure desktop (UAC, lock screen) is reachable from a SYSTEM process in the user's session, which is in scope for unattended mode.

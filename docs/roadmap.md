@@ -15,15 +15,31 @@ Use the shared in-house flyw8t-desktop engine for the temporary attended helper 
 
 Diagnostics stay allowlisted. Scripts follow [ADR-0014](decisions/ADR-0014-scripts-and-custom-fields.md) and [ADR-0015](decisions/ADR-0015-script-trust-and-running.md): agent-side verification, keys outside the server and explicit approval rules. Remote input and updates need their own reviewed authorization and compromise models; script signatures do not protect them automatically.
 
+## Windows stable beta gate
+
+**Accepted by the operator on 2026-11-26.** The Windows beta includes unattended browser control of the physical console from cold boot, including the Windows sign-in screen and the transition to the signed-in desktop. Use the real hosted console, an enrolled physical Windows PC, and a separate technician browser. With RDP disabled and the endpoint unattended, verify that the technician reaches the sign-in screen, signs in and can drive the intended desktop. Confirm that agent check-in continues with everyone signed out.
+
+- Use the [trusted-console beta model](decisions/ADR-0013-unattended-access.md#trusted-console-for-the-windows-stable-beta) with MFA, tenant authorization, endpoint opt-in and agent-verified signed grants. Demonstrate view-only enforcement, Ask first, visible notification and local Stop under Notify with Stop, revocation, and safe cleanup on connection loss or a desktop change.
+- Run the physical pilot with a signed candidate. Record the build revisions, a successful session on direct and forced TURN routes, and evidence from clean installation, upgrade and rollback that device identity is preserved.
+
+### Windows MVP build order
+
+Use a Windows 11 x64 endpoint, Edge as the technician browser, and one responsive H.264 encoding path as the initial support target. Measure the supported path on the pilot PC. Expand browser and encoder coverage after the Windows MVP.
+
+1. **Verify the installed agent.** Start with [the enrolled-console integration](https://github.com/spilloid/flyw8t/pull/62). Check the installed service and live presence after a cold boot, run a diagnostic, and confirm that the device reports when it has a physical console with nobody signed in.
+2. **Prove the Windows sign-in path early.** Start with the [sign-in frame probe](../scripts/windows-secure-desktop-probe/README.md) to observe capture on the pilot hardware. Verify that the agent-supervised component can deliver keyboard and pointer input with normal Windows protections enabled. Verify the transition to the intended signed-in desktop and discard pending input when the desktop changes. Use a disposable account for this trial.
+3. **Finish the device-page workflow.** Connect the browser and Windows component using the existing outbound agent connection for signaling. Reuse the native media and input work from [the video fixture](https://github.com/spilloid/flyw8t/pull/58) and [input fixture](https://github.com/spilloid/flyw8t/pull/59). Enforce the signed session grant at the endpoint before viewing or control, and report connecting, ready and ended states with the selected route and actionable failure reasons.
+4. **Pilot the signed candidate.** Use the first enrolled PC to exercise cold boot, sign-in, inventory, a real diagnostic, WAN control and reconnect. Use a second physical PC to exercise Ask first. Check tenant and role isolation, Stop, revoked access, lock or user switch, direct and forced TURN, and upgrade and rollback. Record results against the exact candidate artifacts under [the release gate](https://github.com/spilloid/flyw8t/issues/57).
+5. **Put it into daily use.** Install the verified candidate on one regular managed PC first. Confirm ordinary check-in and support use, verify that the operator can disable control and roll back, and expand only after the canary works under normal use.
+
 ## Delivery sequence
 
 **Priority accepted 2026-11-15:** after SSO, bring forward a Windows logged-in desktop
 preview of **Take control** on already-enrolled hosts, ahead of additional findings and
 scheduling work. Use the shared engine, endpoint opt-in policy, a visible Notify state
 with local Stop, tenant authorization and revocation, and signed upgrades that preserve
-the device identity and journal. G02-TRUST and packaging evidence still gate delivery.
-This priority does not pass secure-desktop/UAC, macOS, TURN or other platform gates and
-does not renumber the full milestones below or promise a delivery date.
+the device identity and journal. The logged-in preview is an intermediate milestone
+toward the Windows stable beta gate above. G02-TRUST and packaging evidence still gate delivery.
 
 
 | Milestone | Deliverable | Required demonstration |
