@@ -20,12 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
-      - run: cargo build --release --locked --target x86_64-pc-windows-msvc -p flyw8t-server -p flyw8t-agent -p flyw8t-mcp -p flyw8t-technician
+      - run: cargo build --release --locked --target x86_64-pc-windows-msvc -p flyw8t-server -p flyw8t-agent -p flyw8t-mcp -p flyw8t-sign -p flyw8t-technician
       - name: Collect binaries
         shell: bash
         run: |
           mkdir dist
-          for binary in flyw8t-server flyw8t-agent flyw8t-mcp flyw8t-technician; do
+          for binary in flyw8t-server flyw8t-agent flyw8t-mcp flyw8t-sign flyw8t-technician; do
             cp "target/x86_64-pc-windows-msvc/release/$binary.exe" dist/
           done
       - name: Sign and verify binaries
@@ -57,10 +57,10 @@ jobs:
         with:
           name: signed-binaries
           path: dist
-      - name: Verify the four downloaded signed executables
+      - name: Verify the downloaded signed executables
         shell: pwsh
         run: |
-          $expected = 'flyw8t-agent.exe', 'flyw8t-mcp.exe', 'flyw8t-server.exe', 'flyw8t-technician.exe'
+          $expected = 'flyw8t-agent.exe', 'flyw8t-mcp.exe', 'flyw8t-server.exe', 'flyw8t-sign.exe', 'flyw8t-technician.exe'
           $files = Get-ChildItem dist -File
           if (Compare-Object $expected $files.Name) { throw 'Unexpected signed artifact contents.' }
           ./scripts/verify-signature.ps1 -Files $files.FullName -ExpectedSubject 'CN=Joseph Spillers'

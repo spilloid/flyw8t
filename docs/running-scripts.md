@@ -4,6 +4,8 @@ This is the operator's path through ADR-0015 as built in steps 2 to 4. Nothing h
 
 ## 1. The trust root (once per deployment)
 
+Download `flyw8t-sign` for your signing workstation from the GitHub release and verify its checksum. On Windows, verify the timestamped publisher signature as well. Keep the signing workstation separate from the server.
+
 On a machine you trust, not the server:
 
 ```text
