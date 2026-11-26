@@ -1,6 +1,8 @@
 # Roadmap and release gates
 
-**Accepted by the operator: 2026-11-12.** These milestones are evidence gates, not dates or claims that their code exists. The build stays a **0.1.x pre-release** (0.1.4 at this writing) until a release is cut. Accepting this plan does not pass any gate.
+**Accepted by the operator on 2026-11-12.** These milestones track the evidence required for supported releases.
+
+On 2026-11-26 the operator scoped the **0.2.0 pre-release** to Windows agent setup and enrollment, including silent deployment of a site package. Broader foundation checks remain listed below with their own evidence requirements.
 
 ## Product contract
 
@@ -17,7 +19,11 @@ Diagnostics stay allowlisted. Scripts follow [ADR-0014](decisions/ADR-0014-scrip
 
 ## Device operations and audit
 
-The 0.2.0 sprint scope was set on 2026-11-26. It includes a device workspace centered on stored telemetry and connection actions, an [audited background PowerShell terminal](background-terminal.md) through the enrolled agent, approved scripts with field inputs and scheduling, actual technician session evidence, and consented MCP screenshot and input operations. The background terminal acceptance test is software installation by an authorized technician while the employee stays in a meeting. The combined Windows workflow needs physical acceptance. The foundation checks below still apply to the capabilities they cover.
+The fleet follow-up includes a device workspace centered on stored telemetry and connection actions, an [audited background PowerShell terminal](background-terminal.md) through the enrolled agent, approved scripts with field inputs and scheduling, actual technician session evidence, and consented MCP screenshot and input operations. The background terminal acceptance test is software installation by an authorized technician while the employee stays in a meeting. The combined Windows workflow needs physical acceptance.
+
+The next desktop pilot targets a browser viewer on a Mac and one enrolled Windows PC. Verify consented keyboard and mouse control and actual connection events in Device Activity. Windows pre-login console access has its own physical acceptance check.
+
+Generate a site-scoped Intune Win32 kit from the same installer and deployment settings. Use the [SpoolSmith package workflow](https://github.com/spilloid/spoolsmith/blob/56801b87d0a4b334f3c459980549cb5682595ecd/docs/intune-deployment.md) as the reference for review, packaging and detection. Verify a real Intune rollout to the selected site, delayed enrollment and a repeat install that preserves device identity.
 
 Opening a discovered asset's web interface through an opted-in device belongs under Network. See the [proposed node selection flow](network-operations.md#proposed-network-node-selection).
 
