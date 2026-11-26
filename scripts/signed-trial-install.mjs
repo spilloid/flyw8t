@@ -46,7 +46,7 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
       "    'Unexpected prompt|Expected one secure prompt' { $hint = 'setup-prompt'; break }",
       "    'service installation failed|Windows has not confirmed' { $hint = 'service-start'; break }",
       '  }',
-      "  if ($_.Exception -is [System.Management.Automation.PSSecurityException] -and $script:reads -eq 0) { $hint = 'download-policy' }",
+      "  if ($_.Exception -is [System.Management.Automation.PSSecurityException] -and $trialPrompt.Reads -eq 0) { $hint = 'download-policy' }",
       "  [Console]::Error.WriteLine(('FLYW8T-TRIAL-FAIL {0} {1} {2}' -f $_.InvocationInfo.ScriptLineNumber, $hint, $_.CategoryInfo.Category))",
       '  exit 1',
       '}'
@@ -125,13 +125,15 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
     const prompt = [
       "$trialSecret = ConvertTo-SecureString $env:FLYW8T_TRIAL_INPUT -AsPlainText -Force",
       'Remove-Item Env:FLYW8T_TRIAL_INPUT',
-      '$script:reads = 0',
+      '$trialPrompt = @{ Reads = 0 }',
       'function Read-Host([string]$Prompt, [switch]$AsSecureString) {',
-      "  if (!$AsSecureString -or $script:reads -ne 0 -or $Prompt -cne 'Paste the enrollment token from the console') { throw 'Unexpected prompt' }",
-      '  $script:reads++; return $trialSecret.Copy()',
+      "  if (!$AsSecureString -or $trialPrompt.Reads -ne 0 -or $Prompt -cne 'Paste the enrollment token from the console') { throw 'Unexpected prompt' }",
+      '  $trialPrompt.Reads++; return $trialSecret.Copy()',
       '}'
     ];
-    const finish = "$trialSecret.Dispose(); if ($script:reads -ne 1) { throw 'Expected one secure prompt' }";
+    // The file and clipboard script run in different PowerShell scopes. The prompt and
+    // its caller share a state object so both paths can verify the same one prompt.
+    const finish = "$trialSecret.Dispose(); if ($trialPrompt.Reads -ne 1) { throw 'Expected one secure prompt' }";
     const input = { FLYW8T_TRIAL_INPUT: token };
     let setupSource = 'downloaded setup file';
     try {
