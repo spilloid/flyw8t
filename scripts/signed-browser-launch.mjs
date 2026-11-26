@@ -130,7 +130,7 @@ try {
   await call('Page.navigate',{url:origin+'/devices/'+id});
   await waitFor(()=>evaluate('document.querySelectorAll("a.desktop-choice").length === 3'),'Candidate device page did not offer the three session modes');
   console.log('Candidate '+process.env.GITHUB_SHA+', Chrome '+(await call('Browser.getVersion')).product+', Windows '+process.env.ImageVersion);
-  for (const mode of ['assist','console','sign-in']) {
+  for (const mode of ['assist','console','sign-in','terminal']) {
     await clickMode(mode);
     inspect('Confirm',mode);
   }

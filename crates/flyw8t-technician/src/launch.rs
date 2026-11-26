@@ -7,6 +7,7 @@ pub enum Intent {
     Share,
     SignIn,
     Console,
+    Terminal,
 }
 
 const INVALID_LINK: &str =
@@ -37,6 +38,7 @@ pub fn parse_link(args: &[OsString]) -> Result<(Intent, Option<String>), String>
         "assist" => Intent::Assist,
         "console" => Intent::Console,
         "sign-in" => Intent::SignIn,
+        "terminal" => Intent::Terminal,
         _ => return Err(INVALID_LINK.into()),
     };
     Ok((intent, host))
@@ -52,6 +54,7 @@ mod tests {
             ("assist", Intent::Assist),
             ("console", Intent::Console),
             ("sign-in", Intent::SignIn),
+            ("terminal", Intent::Terminal),
         ] {
             let link = format!("flyw8t://open/{path}");
             assert_eq!(parse_link(&[link.clone().into()]), Ok((intent, None)));

@@ -84,6 +84,7 @@ Beyond the milestone:
 | AT-63 | A directory administrator with a recent verified organization sign-in can mint a screenshot-only credential. Missing, stale and future authentication times require reauthentication. Adding a read scope requires passkey confirmation. | `only_recent_provider_authentication_bootstraps_a_directory_sudo_key` in `tests/oidc.rs` |
 
 | AT-62 | Enroll a Windows PC from Devices. The setup commands verify the release, prompt separately for the token and start the service. The console shows its live connection. | Fleet view tests, `a_new_enrollment_token_comes_with_the_commands_to_run`, signed Windows trial rehearsal |
+| AT-64 | A technician can open a separate interactive SSH terminal for a host. The browser link prefills the target and waits for the operator. | Fleet rendering, native chooser and argument tests, signed browser handoff |
 | AT-65 | Open a previous script revision as a draft while a newer revision exists. The draft contains the chosen source, offers the next revision number, and leaves history intact until saved. | `every_save_is_a_permanent_revision_with_its_hash_diff_and_file` |
 
 ## Manual checks still owed

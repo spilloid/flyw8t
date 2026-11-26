@@ -103,6 +103,10 @@ On the Windows device page, choose a mode under **Open in Flyw8t Technician**. A
 
 The agent connects outbound to the server and can check in from behind NAT. Native desktop access separately requires a route from the technician's PC to the Windows host, typically over the LAN or VPN, and the appropriate Windows permissions. For attended viewing across networks, use **Support** to invite the person to choose a tab, window or screen. The browser viewer uses WebRTC. A reachable TURN relay can carry the media when a direct connection fails. [Attended support and relay setup](deployment.md#attended-screen-sharing-across-networks)
 
+### SSH terminal in the next Technician build
+
+On the Windows device page, choose **Open SSH terminal**. Check the destination in Technician and choose **Open terminal**. Enter `user@host` for a different account or `user@host:port` for a different SSH port. Windows OpenSSH prompts for host verification and authentication in a separate terminal window. The endpoint needs an existing SSH service and a network route from your workstation. Closing the terminal ends the SSH session.
+
 ## End the trial
 
 - **Unused invitation to enroll.** Open the organization's **Enrollment tokens** list and choose **Revoke** for the unused token. An already enrolled device has its own credential.

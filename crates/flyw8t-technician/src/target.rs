@@ -16,6 +16,10 @@ pub struct Target {
 
 impl Target {
     pub fn parse(raw: &str) -> Result<Self, String> {
+        Self::parse_with_port(raw, RDP_PORT)
+    }
+
+    pub fn parse_with_port(raw: &str, default_port: u16) -> Result<Self, String> {
         let address = raw.trim();
         let invalid =
             || "Enter a computer name or IP address, optionally followed by a port.".to_owned();
@@ -25,14 +29,14 @@ impl Target {
         if let Ok(ip) = address.parse::<IpAddr>() {
             return Ok(Self {
                 host: ip.to_string(),
-                port: RDP_PORT,
+                port: default_port,
             });
         }
         if let Some(bracketed) = address.strip_prefix('[') {
             let (host, suffix) = bracketed.split_once(']').ok_or_else(invalid)?;
             let ip = host.parse::<std::net::Ipv6Addr>().map_err(|_| invalid())?;
             let port = if suffix.is_empty() {
-                RDP_PORT
+                default_port
             } else {
                 parse_port(suffix.strip_prefix(':').ok_or_else(invalid)?)?
             };
@@ -43,7 +47,7 @@ impl Target {
         }
         let (host, port) = match address.split_once(':') {
             Some((host, port)) => (host, parse_port(port)?),
-            None => (address, RDP_PORT),
+            None => (address, default_port),
         };
         let labels = host.strip_suffix('.').unwrap_or(host);
         if labels.is_empty()
