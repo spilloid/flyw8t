@@ -1258,6 +1258,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     let body = view! {
         <p class="crumbs"><a href="/devices">"Devices"</a>" / "</p>
         <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
+        {ctx.is_admin.then(|| view! { <p><a href=format!("/devices/{}/activity", d.row.id)>"View device activity"</a></p> })}
         {retired_note}
         <p>{tags}</p>
         {console_check}
@@ -1291,6 +1292,47 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         {manage}
         {fields_card(ctx, &d.fields, "device", d.row.id)}
         {danger}
+    };
+    shell(&title, ctx, Nav::Devices, None, body)
+}
+
+pub fn device_activity_page(
+    ctx: &PageCtx,
+    device: &DeviceRow,
+    events: Vec<DeviceActivityEvent>,
+    older: Option<String>,
+) -> String {
+    let title = format!("{} activity", device.name());
+    let device_href = format!("/devices/{}", device.id);
+    let content = if events.is_empty() {
+        view! { <p class="empty">"No activity on this page."</p> }.into_any()
+    } else {
+        view! {
+            <ol class="timeline">
+                {events.into_iter().map(|event| {
+                    let job = event.job.map(|id| view! {
+                        <p class="small"><a href=format!("/jobs/{id}")>{event.job_action.unwrap_or_else(|| "View job".into())}</a></p>
+                    });
+                    view! {
+                        <li>
+                            <time datetime=fmt::iso(event.at)>{fmt::timestamp(event.at)}</time>
+                            <p><strong>{event.action}</strong>" · "{event.actor}</p>
+                            {job}
+                        </li>
+                    }
+                }).collect_view()}
+            </ol>
+        }.into_any()
+    };
+    let body = view! {
+        <p class="crumbs"><a href="/devices">"Devices"</a>" / "<a href=device_href.clone()>{device.name().to_owned()}</a></p>
+        <h1>"Device activity"</h1>
+        <section class="card">
+            {content}
+            {older.map(|cursor| view! {
+                <p><a href=format!("{device_href}/activity?before={}", query_value(&cursor))>"Older activity →"</a></p>
+            })}
+        </section>
     };
     shell(&title, ctx, Nav::Devices, None, body)
 }

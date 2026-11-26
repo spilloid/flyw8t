@@ -15,6 +15,15 @@ Use the shared in-house flyw8t-desktop engine for the temporary attended helper 
 
 Diagnostics stay allowlisted. Scripts follow [ADR-0014](decisions/ADR-0014-scripts-and-custom-fields.md) and [ADR-0015](decisions/ADR-0015-script-trust-and-running.md): agent-side verification, keys outside the server and explicit approval rules. Remote input and updates need their own reviewed authorization and compromise models; script signatures do not protect them automatically.
 
+## Device operations and audit
+
+Company, site and device custom fields already ship. An administrator defines them in **Administration → Custom fields**. Technicians can edit values where the definition allows it. A device value overrides site, company and global values, and each change has a history entry.
+
+1. **Device activity.** Show existing agent and operator audit events alongside the device's job history. Record actual technician connection, disconnect and session identity when the remote desktop path reports them. A console launch request establishes operator intent. A session connection requires separate evidence.
+2. **Run approved revisions.** Integrate and review the signed Windows runner from [PR #35](https://github.com/spilloid/flyw8t/pull/35) and [the Windows hardening follow-up](https://github.com/spilloid/flyw8t/pull/37) against current main. Prove a real run from a device page, including who requested it, revision, approval, delivery, output and outcome. Resolve declared device/site/company inputs under the existing organization and signing rules.
+3. **Run when the device comes online.** Offer an explicit delivery window and show queued work on the device, with its expiration and cancel action. A reconnect can deliver an eligible queued run once. An interrupted or unknown execution stays visible for review.
+4. **Schedule one-time and recurring runs.** Pin the approved revision, target scope, timezone and delivery policy. Deduplicate each occurrence per device across restarts and workers. Show upcoming occurrences, cancellations, missed windows and results under the same device activity. Recheck authorization when materializing a run, including the lifetime and scope of any required signature.
+
 ## Delivery sequence
 
 **Priority accepted 2026-11-15:** after SSO, bring forward a Windows logged-in desktop

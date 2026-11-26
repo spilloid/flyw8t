@@ -454,6 +454,43 @@ pub async fn device(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct ActivityQs {
+    before: Option<String>,
+}
+
+pub async fn device_activity(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(id): Path<Uuid>,
+    Query(qs): Query<ActivityQs>,
+) -> Response {
+    page(&p, async {
+        p.require(Permission::ViewDevices)?;
+        let device = queries::device_summary(&state, &p, id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        p.require(Permission::ViewAudit)?;
+        let before = qs
+            .before
+            .as_deref()
+            .map(|value| {
+                queries::ActivityCursor::parse(value).ok_or_else(|| {
+                    AppError::BadRequest("That activity page link is invalid.".into())
+                })
+            })
+            .transpose()?;
+        let (events, older) = queries::device_activity(&state, &p, id, before).await?;
+        html(flyw8t_web::device_activity_page(
+            &ctx(&p, None),
+            &device,
+            events,
+            older.map(|cursor| cursor.as_query_value()),
+        ))
+    })
+    .await
+}
+
 // Read the device and its live enrollment again before displaying a reply. A membership change,
 // sign-out or retirement during the short agent round trip must take effect.
 async fn physical_console_target(

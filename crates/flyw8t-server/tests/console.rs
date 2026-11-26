@@ -6,6 +6,7 @@ mod common;
 use axum::http::StatusCode;
 use common::*;
 use serde_json::Value;
+use std::time::Duration;
 use uuid::Uuid;
 
 async fn technician(server: &TestServer, admin: &Browser, email: &str, org: Uuid) -> Browser {
@@ -33,6 +34,77 @@ fn rows(body: &str) -> usize {
 
 async fn seed(server: &TestServer, sql: &str) {
     sqlx::query(sql).execute(&server.state.db).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn device_activity_combines_scoped_audit_and_recorded_job_events() {
+    let server = start_fresh().await;
+    let admin = server.admin_sudo().await;
+    let acme = admin.create_org(&server, "Acme").await;
+    let foreign = admin.create_org(&server, "Other organization").await;
+    let tech = technician(&server, &admin, "tech@example.test", acme).await;
+    let token = admin.enrollment_token(&server, acme, "60", "1").await;
+    let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
+    let id = agent.device_id;
+    let (stop, session) = agent.connect(&server.url());
+    wait_connected(&server, id).await;
+    let job = admin.run(&server, id, &[("action", "system.info")]).await;
+    wait_state(&server, job, "completed", Duration::from_secs(15)).await;
+    stop.cancel();
+    let _ = session.await.unwrap();
+
+    sqlx::query("INSERT INTO audit_events (actor_type, actor_label, channel, organization_id, action, target_type, target_id, outcome)
+                 VALUES ('user', 'foreign-event@example.test', 'web', $1, 'device.update', 'device', $2, 'success')")
+        .bind(foreign).bind(id).execute(&server.state.db).await.unwrap();
+    let device_path = format!("/devices/{id}");
+    let path = format!("{device_path}/activity");
+    assert!(admin.get(&server, &device_path).await.body.contains(&path));
+    assert!(!tech.get(&server, &device_path).await.body.contains(&path));
+    let page = admin.get(&server, &path).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(page.body.contains("Agent authenticated"));
+    assert!(page.body.contains("Agent reported job completion"));
+    assert!(page.body.contains("Job requested"));
+    assert!(page.body.contains(ADMIN_EMAIL));
+    assert!(page.body.contains(&format!("/jobs/{job}")));
+    assert!(!page.body.contains("foreign-event@example.test"));
+    assert_eq!(tech.get(&server, &path).await.status, StatusCode::FORBIDDEN);
+    let foreign_token = admin.enrollment_token(&server, foreign, "60", "1").await;
+    let foreign_agent = TestAgent::enroll(&server.url(), &foreign_token)
+        .await
+        .unwrap();
+    assert_eq!(
+        tech.get(
+            &server,
+            &format!("/devices/{}/activity", foreign_agent.device_id),
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        admin
+            .get(&server, &format!("{path}?before=bad"))
+            .await
+            .status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    // The rows share a timestamp. The cursor must use their IDs, so exactly five of these
+    // 55 events remain on the second page even when all of the timestamps compare equal.
+    sqlx::query("INSERT INTO audit_events (actor_type, actor_label, channel, organization_id, action, target_type, target_id, outcome)
+                 SELECT 'user', 'fixture-actor-' || n, 'web', $1, 'device.update', 'device', $2, 'success'
+                   FROM generate_series(1, 55) n")
+        .bind(acme).bind(id).execute(&server.state.db).await.unwrap();
+    let page = admin.get(&server, &path).await;
+    assert_eq!(page.body.matches("fixture-actor-").count(), 50);
+    let older = extract(&page.body, r#"href="([^"]+/activity\?before=[^"]+)""#).unwrap();
+    let page = admin.get(&server, &older).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert_eq!(page.body.matches("fixture-actor-").count(), 5);
+    assert!(page.body.contains("Job requested"));
+    server.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

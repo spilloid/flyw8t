@@ -312,6 +312,10 @@ async fn console_renders_cleanly_everywhere() {
         ("/devices".into(), "devices"),
         (format!("/devices/{}", agent.device_id), "device"),
         (format!("/devices/{}", windows_device.0), "windows-device"),
+        (
+            format!("/devices/{}/activity", agent.device_id),
+            "device-activity",
+        ),
         ("/jobs".into(), "jobs"),
         (format!("/jobs/{ok}"), "job-succeeded"),
         (format!("/jobs/{info}"), "job-structured"),
