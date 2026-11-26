@@ -2,7 +2,15 @@
 
 Start with one Windows x64 PC you administer. Install the agent there to verify a live check-in and a diagnostic. You can run Flyw8t Technician on the same PC to test opening the desktop chooser from the browser. To try an actual remote session, use Technician on a second Windows x64 PC with a network route to the first.
 
-## 1. Get a console and the signed downloads
+## Install from a site package
+
+On a release that supports Windows installers, sign in to your console and open **Devices → Enroll a Windows device**. Choose the organization and site, then set how many PCs can enroll and how long the installer is valid. Choose **Download Windows installer**. You can also download a one-PC installer directly from a site's **Devices** card.
+
+Open `Flyw8t-Setup-x64.exe` on the target PC. Check the organization, site, and console shown in Setup, then approve the Windows administrator prompt. Setup reports when this PC has enrolled and the Windows service is running. Open **Devices** in the console and wait for **Connected · live**. You can then verify a diagnostic in step 3.
+
+The personalized installer is unsigned. It comes from your console and contains the revocable enrollment token, so share it only with the people setting up those PCs and discard it when you're done. The installer retains the original signed release binary when it installs the service. For a private CA or a PC that requires signed installers, use the manual process below.
+
+## 1. Get a console and the signed downloads for manual setup
 
 Sign in to your organization's flyw8t console as an administrator or an assigned technician. If you're hosting your first instance, follow the Compose setup using the release's source, set its public HTTPS URL, and complete the initial administrator sign-in. The default Compose address is loopback. For a separate endpoint, give it a reachable HTTPS hostname and allow WebSocket upgrades at the proxy. [Server setup and HTTPS](deployment.md#server-with-docker-compose)
 
@@ -37,7 +45,7 @@ if ($sig.Status -ne 'Valid' -or !$sig.TimeStamperCertificate -or
 ## 2. Enroll the agent locally
 
 1. Open **Devices → Enroll a Windows device** and choose the organization that owns this PC. An administrator can create an organization in **Organizations**.
-2. On the Windows PC, save **Download Windows agent (x64)** and **SHA256SUMS** from that page in the same folder. Keep their original names. Select a site if needed, leave **Devices** at **1**, and choose **Create enrollment token**. Keep the page open.
+2. On the Windows PC, save the signed Windows agent and **SHA256SUMS** in the same folder. Expand **Manual setup downloads** if that section is shown. Keep both filenames. Select a site if needed, leave **Devices** at **1**, and create a manual enrollment token. Keep the page open.
 3. Open PowerShell **as Administrator** in the download folder. Select **Copy setup commands** in the console, then paste and run the block. When PowerShell asks, select **Copy token** and paste it at the prompt. Setup verifies the download, enrolls this PC, and starts the Windows service. Copy the device ID printed during enrollment.
 
 Open **Devices** and look for **Connected · live** next to this PC. If the agent reports an existing identity, preserve its state and follow the [existing enrollment instructions](deployment.md#existing-test-enrollment).

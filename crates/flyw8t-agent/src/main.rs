@@ -4,6 +4,9 @@ use flyw8t_agent::{config, AgentConfig};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(windows)]
+mod windows_setup;
+
 /// flyw8t endpoint agent.
 #[derive(Parser)]
 #[command(version, about)]
@@ -68,6 +71,10 @@ fn main() -> Result<()> {
                 .open(p)
         })
     };
+    #[cfg(windows)]
+    if let Some(finish) = windows_setup::entry() {
+        return windows_setup::run(own_file, finish);
+    }
     let cli = Cli::parse();
     let state_dir = match cli.state_dir {
         Some(d) => d,
@@ -166,8 +173,12 @@ fn main() -> Result<()> {
         Command::Service { action } => match action {
             ServiceCmd::Install => {
                 AgentConfig::load(&state_dir)?;
-                let source = own_file.context("opening this program to copy it")?;
-                flyw8t_agent::service::install(&state_dir, source)?;
+                use std::io::Read;
+                let mut source = own_file.context("opening this program to copy it")?;
+                let base_len =
+                    flyw8t_protocol::enrollment_package::EnrollmentPackage::read(&mut source)?
+                        .map_or(u64::MAX, |(length, _)| length);
+                flyw8t_agent::service::install(&state_dir, source.take(base_len))?;
                 println!(
                     "Service {} installed and started, running {}. Its log: {}",
                     flyw8t_agent::service::SERVICE_NAME,

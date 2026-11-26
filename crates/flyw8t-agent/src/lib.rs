@@ -11,6 +11,7 @@ pub mod executor;
 pub mod identity;
 pub mod journal;
 pub mod logfile;
+mod physical_console;
 #[cfg(windows)]
 pub mod service;
 pub mod tls;

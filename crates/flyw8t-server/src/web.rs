@@ -454,6 +454,103 @@ pub async fn device(
     .await
 }
 
+// Read the device and its live enrollment again before displaying a reply. A membership change,
+// sign-out or retirement during the short agent round trip must take effect.
+async fn physical_console_target(
+    tx: &mut sqlx::PgConnection,
+    p: &Principal,
+    device: Uuid,
+) -> AppResult<(Uuid, String)> {
+    let (global, orgs) = p.scope();
+    let target: (Uuid, String) = sqlx::query_as(
+        "SELECT d.organization_id, COALESCE(d.display_name, d.hostname)
+         FROM devices d JOIN device_credentials c ON c.device_id = d.id
+         WHERE d.id = $1 AND ($2 OR d.organization_id = ANY($3))
+           AND d.retired_at IS NULL AND c.revoked_at IS NULL AND lower(d.os_family) = 'windows'
+         FOR SHARE OF d, c",
+    )
+    .bind(device)
+    .bind(global)
+    .bind(orgs)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    auth::recheck_actor(tx, p, Some(target.0), false).await?;
+    Ok(target)
+}
+
+pub async fn check_physical_console(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(device): Path<Uuid>,
+    body: Bytes,
+) -> Response {
+    use crate::registry::ConsoleCheckError;
+    use flyw8t_protocol::PhysicalConsoleState;
+    use flyw8t_web::PhysicalConsoleCheck;
+
+    page(&p, async {
+        check_csrf(&p, &Form::parse(&body))?;
+        p.require(Permission::ViewDevices)?;
+        p.require(Permission::RunSupportSessions)?;
+        let request = Uuid::new_v4();
+        let mut tx = state.db.begin().await?;
+        let (org, _) = physical_console_target(&mut tx, &p, device).await?;
+        Audit::user(&p, "device.physical_console.requested")
+            .org(org)
+            .target("device", device)
+            .detail(json!({"request_id":request}))
+            .record(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        // Never queue or repeat a desktop request across an agent reconnect.
+        let reply = state.registry.check_physical_console(device, request).await;
+        let (view, outcome) = match reply {
+            Ok(PhysicalConsoleState::ActiveConsole) => {
+                (PhysicalConsoleCheck::Active, "active_console")
+            }
+            Ok(PhysicalConsoleState::NoInteractiveUser) => {
+                (PhysicalConsoleCheck::NoActiveLogin, "no_interactive_user")
+            }
+            Ok(PhysicalConsoleState::NoConsole) => (PhysicalConsoleCheck::NoConsole, "no_console"),
+            Ok(PhysicalConsoleState::Unavailable) => (PhysicalConsoleCheck::Unknown, "unavailable"),
+            Err(ConsoleCheckError::NotConnected) => {
+                (PhysicalConsoleCheck::Offline, "not_connected")
+            }
+            Err(ConsoleCheckError::Unsupported) => {
+                (PhysicalConsoleCheck::Unsupported, "unsupported")
+            }
+            Err(ConsoleCheckError::Busy) => (PhysicalConsoleCheck::Busy, "busy"),
+            Err(ConsoleCheckError::Timeout) => (PhysicalConsoleCheck::TimedOut, "timeout"),
+        };
+        let mut tx = state.db.begin().await?;
+        let (current_org, name) = physical_console_target(&mut tx, &p, device).await?;
+        if current_org != org {
+            return Err(AppError::NotFound);
+        }
+        let audit = Audit::user(&p, "device.physical_console.result")
+            .org(current_org)
+            .target("device", device)
+            .detail(json!({"request_id":request, "status":outcome}));
+        if reply.is_err() {
+            audit.failed()
+        } else {
+            audit
+        }
+        .record(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        html(flyw8t_web::physical_console_result(
+            &ctx(&p, None),
+            device,
+            &name,
+            view,
+        ))
+    })
+    .await
+}
+
 pub async fn run_job(
     State(state): State<Shared>,
     WebUser(p): WebUser,
@@ -906,12 +1003,23 @@ pub async fn create_enrollment_token(
             return Err(AppError::BadRequest("Devices must be between 1 and 100.".into()));
         }
         let site: Option<Uuid> = form.get("site").filter(|s| !s.is_empty()).map(|s| s.parse()).transpose().map_err(|_| AppError::BadRequest("Unknown site.".into()))?;
-        if let Some(s) = site {
-            if !org.sites.iter().any(|x| x.id == s) {
-                return Err(AppError::BadRequest("Unknown site.".into()));
-            }
-        }
+        let site_name = site.map(|id| {
+            org.sites.iter().find(|view| view.id == id).map(|view| view.name.clone())
+                .ok_or_else(|| AppError::BadRequest("Unknown site.".into()))
+        }).transpose()?;
+        let download = form.get("download") == Some("windows");
+        let template = if download { Some(crate::windows_installer::template(&state).await?) } else { None };
         let secret = format!("{}{}", auth::ENROLL_PREFIX, auth::random_secret(32));
+        let installer = template.map(|base| -> AppResult<Vec<u8>> {
+            let mut exe = base.to_vec();
+            flyw8t_protocol::enrollment_package::EnrollmentPackage {
+                server_url: state.config.public_url.clone(),
+                organization: org.name.clone(),
+                site: site_name,
+                token: secret.clone(),
+            }.append(&mut exe).map_err(|error| AppError::Internal(error.into()))?;
+            Ok(exe)
+        }).transpose()?;
         let mut tx = state.db.begin().await?;
         auth::recheck_actor(&mut tx, &p, Some(id), false).await?;
         let (token_id,): (Uuid,) = sqlx::query_as(
@@ -933,6 +1041,13 @@ pub async fn create_enrollment_token(
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
+        if let Some(exe) = installer {
+            return Ok(([
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CONTENT_DISPOSITION, "attachment; filename=Flyw8t-Setup-x64.exe"),
+                (header::CACHE_CONTROL, "no-store"),
+            ], exe).into_response());
+        }
         let revealed = RevealedSecret {
             label: format!("Enrollment token for {}", org.name),
             hint: format!(
