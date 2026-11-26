@@ -833,9 +833,14 @@ mod tests {
         timeout: u64,
     ) -> Finished {
         let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        assert!(
+            crate::winsec::ensure_dir(&state_dir, crate::winsec::PRIVATE).unwrap(),
+            "PowerShell runner tests require an elevated Windows account"
+        );
         run(
             Run {
-                state_dir: dir.path(),
+                state_dir: &state_dir,
                 job_id: uuid::Uuid::new_v4(),
                 source,
                 values: values
