@@ -3,12 +3,12 @@
 1. In the release PR, set the workspace version in `Cargo.toml`, refresh `Cargo.lock`, update the version in `README.md`, and date the `## X.Y.Z — YYYY-MM-DD (...)` section in `CHANGELOG.md`. Merge the PR to `main`.
 2. Check that CI passed on the merge commit. Run `gh workflow run signing-check.yml --ref main`, confirm the run used that same SHA, and wait for it to pass. Use its `signed-binaries` artifact for the Windows browser launch check below. The artifact expires after one day.
 3. After the checks pass, tag that commit with `git tag -a vX.Y.Z -m "flyw8t X.Y.Z" <sha>` and push with `git push origin vX.Y.Z`.
-4. The release workflow publishes a GitHub **pre-release** with the version's changelog section as its notes. Download all seven binaries and `SHA256SUMS` into an empty directory. Confirm the asset names and run `sha256sum -c SHA256SUMS` there. Expect seven successful checks.
+4. The release workflow publishes a GitHub **pre-release** with the version's changelog section as its notes. Download all nine binaries and `SHA256SUMS` into an empty directory. Confirm the asset names and run `sha256sum -c SHA256SUMS` there. Expect nine successful checks.
 
    | Platform | Binaries |
    | --- | --- |
-   | Windows x64 (MSVC) | `flyw8t-server`, `flyw8t-agent`, `flyw8t-mcp`, `flyw8t-technician` |
-   | Linux x64 (GNU) | `flyw8t-server`, `flyw8t-agent`, `flyw8t-mcp` |
+   | Windows x64 (MSVC) | `flyw8t-server`, `flyw8t-agent`, `flyw8t-mcp`, `flyw8t-sign`, `flyw8t-technician` |
+   | Linux x64 (GNU) | `flyw8t-server`, `flyw8t-agent`, `flyw8t-mcp`, `flyw8t-sign` |
 
    Filenames include the tag and Rust target triple. Windows filenames end in `.exe`.
 5. Check the digest of `ghcr.io/spilloid/flyw8t-server:X.Y.Z` in the release notes and pin deployments to that digest. The image is unsigned. A new package on GitHub starts **private**. Give deployments a pull credential or make the package public once in its package settings.
@@ -17,7 +17,7 @@ Every release is a pre-release while `docs/threat-model.md` lists blocking open 
 
 ## Code signing
 
-Both the signing check and the release workflow use `.github/actions/sign-release` and the company's Azure Artifact Signing account (corporate-strategy D-0047). The action Authenticode-signs all four Windows executables, adds an RFC 3161 timestamp and checks each signature. Timestamping keeps signatures verifiable after the three-day signing certificate expires. Configure `SIGNING_EXPECTED_SUBJECT` to verify the publisher as well. Linux binaries are covered by `SHA256SUMS` only.
+Both the signing check and the release workflow use `.github/actions/sign-release` and the company's Azure Artifact Signing account (corporate-strategy D-0047). The action Authenticode-signs all Windows executables, adds an RFC 3161 timestamp and checks each signature. Timestamping keeps signatures verifiable after the three-day signing certificate expires. Configure `SIGNING_EXPECTED_SUBJECT` to verify the publisher as well. Linux binaries are covered by `SHA256SUMS` only.
 
 The job signs in with GitHub OIDC; no signing secret is stored. The `release` environment holds the settings and may deploy only from `main` and `v*` tags.
 
@@ -30,7 +30,7 @@ For initial Azure setup, run `scripts/setup-signing.ps1` as the subscription own
 ## Windows browser launch check
 
 The signing rehearsal runs this acceptance check on a second fresh Windows runner.
-It downloads the signing job's four executables, verifies them, starts the candidate
+It downloads the signing job's executables, verifies them, starts the candidate
 console on loopback and exercises the links in a new Chrome profile. Use the same
 sequence for a hands-on check or to investigate a failed automatic run.
 

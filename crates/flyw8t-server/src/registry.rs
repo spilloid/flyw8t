@@ -25,6 +25,8 @@ pub struct Conn {
     pub tx: mpsc::Sender<ServerMsg>,
     pub close: CancellationToken,
     pub physical_console_check: bool,
+    /// What the agent said it supports when it authenticated (ADR-0015 section 7).
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Default)]
@@ -169,6 +171,16 @@ impl Registry {
         tx.is_some_and(|tx| tx.try_send(msg).is_ok())
     }
 
+    /// Whether the device's connection `conn_id` said it supports `cap`.
+    pub fn has_capability(&self, device_id: Uuid, conn_id: Uuid, cap: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .conns
+            .get(&device_id)
+            .is_some_and(|c| c.conn_id == conn_id && c.capabilities.iter().any(|x| x == cap))
+    }
+
     /// Force-close a device's connection (credential revoked).
     pub fn kick(&self, device_id: Uuid) {
         let mut live = self.live.lock().unwrap();
@@ -286,6 +298,7 @@ mod tests {
             tx,
             close: CancellationToken::new(),
             physical_console_check: false,
+            capabilities: vec![],
         }
     }
 

@@ -66,6 +66,7 @@ impl RawAgent {
             signature: sig,
             agent_version: "raw".into(),
             physical_console_check,
+            capabilities: vec![],
         })
         .await;
         assert!(matches!(next(&mut raw.ws).await, ServerMsg::Welcome { .. }));
@@ -363,6 +364,7 @@ async fn replayed_authentication_is_refused() {
             signature: captured,
             agent_version: "x".into(),
             physical_console_check: false,
+            capabilities: vec![],
         })
         .await;
     assert!(matches!(
@@ -384,6 +386,7 @@ async fn replayed_authentication_is_refused() {
             signature: sig,
             agent_version: "x".into(),
             physical_console_check: false,
+            capabilities: vec![],
         })
         .await;
     assert!(matches!(
@@ -431,6 +434,7 @@ async fn hostile_frames_close_the_connection() {
         signature: String::new(),
         agent_version: "x".into(),
         physical_console_check: false,
+        capabilities: vec![],
     })
     .await;
     assert!(matches!(
