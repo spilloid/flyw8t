@@ -34,6 +34,14 @@ the device identity and journal. G02-TRUST and packaging evidence still gate del
 This priority does not pass secure-desktop/UAC, macOS, TURN or other platform gates and
 does not renumber the full milestones below or promise a delivery date.
 
+**Operator release split, 2026-11-21.** The 0.10.0 tag requires Windows browser control
+of an enrolled machine's existing desktop under endpoint-authorized Notify with Stop
+policy. Prove direct and forced TURN sessions on separate machines with RDP disabled,
+revocation and measured stream quality. macOS implementation and operator-run physical
+verification target 0.11.0. The numbered capability milestones and 1.0 platform
+obligations below remain release gates. See [ADR-0019](decisions/ADR-0019-native-webrtc-streaming.md)
+and the [Windows release evidence ledger](https://github.com/spilloid/flyw8t/issues/57).
+
 
 | Milestone | Deliverable | Required demonstration |
 |---|---|---|
