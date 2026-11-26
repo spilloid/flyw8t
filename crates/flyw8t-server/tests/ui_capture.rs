@@ -100,6 +100,7 @@ fn find_chrome() -> PathBuf {
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         "/usr/bin/google-chrome",
         "/usr/bin/chromium",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ];
     candidates
         .iter()
@@ -161,22 +162,28 @@ async fn console_renders_cleanly_everywhere() {
         .unwrap();
     let (stop, task) = agent.connect(&server.url());
     wait_connected(&server, agent.device_id).await;
-    let ok = admin
-        .run(&server, agent.device_id, &[("action", "net.ipconfig")])
-        .await;
+    let success_action: &[(&str, &str)] = if cfg!(target_os = "macos") {
+        &[("action", "process.top"), ("limit", "5")]
+    } else {
+        &[("action", "net.ipconfig")]
+    };
+    let ok = admin.run(&server, agent.device_id, success_action).await;
     wait_state(&server, ok, "completed", Duration::from_secs(30)).await;
     let info = admin
         .run(&server, agent.device_id, &[("action", "system.info")])
         .await;
     wait_state(&server, info, "completed", Duration::from_secs(30)).await;
-    let ping = admin
-        .run(
-            &server,
-            agent.device_id,
-            &[("action", "net.ping"), ("target", "127.0.0.1")],
-        )
-        .await;
-    wait_state(&server, ping, "completed", Duration::from_secs(30)).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let ping = admin
+            .run(
+                &server,
+                agent.device_id,
+                &[("action", "net.ping"), ("target", "127.0.0.1")],
+            )
+            .await;
+        wait_state(&server, ping, "completed", Duration::from_secs(30)).await;
+    }
     stop.cancel();
     task.await.unwrap().unwrap();
     wait_for("disconnect", Duration::from_secs(10), || {
@@ -307,11 +314,43 @@ async fn console_renders_cleanly_everywhere() {
     .fetch_one(&server.state.db)
     .await
     .unwrap();
+    for (index, (memory, disk)) in [
+        (45, 70),
+        (57, 71),
+        (52, 71),
+        (65, 74),
+        (60, 75),
+        (72, 77),
+        (68, 78),
+        (74, 80),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = time::OffsetDateTime::now_utc() - time::Duration::hours((7 - index as i64) * 6);
+        let snapshot = json!({
+            "collected_at": at.format(&time::format_description::well_known::Rfc3339).unwrap(),
+            "hostname": "workstation.example.test",
+            "os": {"family": "windows", "name": "Windows 11 Pro", "arch": "x86_64"},
+            "hardware": {"cpu_model": "Example CPU", "cpu_logical_cores": 8,
+                         "memory_total_bytes": 100u64 << 28, "memory_available_bytes": (100u64 - memory) << 28},
+            "disks": [{"mount_point": "C:\\", "file_system": "NTFS", "total_bytes": 100u64 << 32,
+                       "available_bytes": (100u64 - disk) << 32, "removable": false}],
+            "network": [{"name": "Ethernet", "addresses": ["192.0.2.12/24"]}],
+            "uptime_secs": index as u64 * 21600 + 3600, "agent_version": "0.1.8",
+        });
+        sqlx::query("INSERT INTO inventory_snapshots (device_id, collected_at, received_at, source, data) VALUES ($1, $2, $2, 'periodic', $3)")
+            .bind(windows_device.0).bind(at).bind(snapshot).execute(&server.state.db).await.unwrap();
+    }
     let pages: Vec<(String, &str)> = vec![
         ("/".into(), "overview"),
         ("/devices".into(), "devices"),
         (format!("/devices/{}", agent.device_id), "device"),
         (format!("/devices/{}", windows_device.0), "windows-device"),
+        (
+            format!("/devices/{}/schedules", windows_device.0),
+            "script-schedules",
+        ),
         (
             format!("/devices/{}/activity", agent.device_id),
             "device-activity",

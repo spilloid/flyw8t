@@ -14,6 +14,8 @@ mod registration;
 #[cfg(any(windows, test))]
 mod sessions;
 #[cfg(any(windows, test))]
+mod ssh;
+#[cfg(any(windows, test))]
 mod target;
 #[cfg(windows)]
 mod ui;

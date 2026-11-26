@@ -44,32 +44,84 @@ async fn device_activity_combines_scoped_audit_and_recorded_job_events() {
     let acme = admin.create_org(&server, "Acme").await;
     let foreign = admin.create_org(&server, "Other organization").await;
     let tech = technician(&server, &admin, "tech@example.test", acme).await;
+    let readonly = admin
+        .post(
+            &server,
+            "/admin/users",
+            &[
+                ("email", "readonly@example.test"),
+                ("display_name", "Read-only"),
+                ("password", "readonly-password-123"),
+                ("role", "readonly"),
+                ("org", &acme.to_string()),
+            ],
+        )
+        .await;
+    assert_eq!(readonly.location(), "/admin?m=user-created");
+    let readonly = server
+        .login("readonly@example.test", "readonly-password-123")
+        .await;
     let token = admin.enrollment_token(&server, acme, "60", "1").await;
     let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
     let id = agent.device_id;
     let (stop, session) = agent.connect(&server.url());
     wait_connected(&server, id).await;
-    let job = admin.run(&server, id, &[("action", "system.info")]).await;
+    let device_path = format!("/devices/{id}");
+    let refresh = tech
+        .post(
+            &server,
+            &format!("{device_path}/jobs"),
+            &[("action", "system.info"), ("return_to_device", "yes")],
+        )
+        .await;
+    let location = refresh.location();
+    assert!(location.starts_with(&format!("{device_path}?m=inventory-queued&refresh=")));
+    let job: Uuid = location.split_once("&refresh=").unwrap().1.parse().unwrap();
     wait_state(&server, job, "completed", Duration::from_secs(15)).await;
+    let updated = tech.get(&server, &location).await;
+    assert!(updated.body.contains("Refresh data"));
+    assert!(updated
+        .body
+        .contains("Memory used, readings from oldest to newest"));
     stop.cancel();
     let _ = session.await.unwrap();
 
     sqlx::query("INSERT INTO audit_events (actor_type, actor_label, channel, organization_id, action, target_type, target_id, outcome)
                  VALUES ('user', 'foreign-event@example.test', 'web', $1, 'device.update', 'device', $2, 'success')")
         .bind(foreign).bind(id).execute(&server.state.db).await.unwrap();
-    let device_path = format!("/devices/{id}");
     let path = format!("{device_path}/activity");
     assert!(admin.get(&server, &device_path).await.body.contains(&path));
-    assert!(!tech.get(&server, &device_path).await.body.contains(&path));
+    assert!(tech.get(&server, &device_path).await.body.contains(&path));
+    assert!(!readonly
+        .get(&server, &device_path)
+        .await
+        .body
+        .contains(&path));
     let page = admin.get(&server, &path).await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     assert!(page.body.contains("Agent authenticated"));
     assert!(page.body.contains("Agent reported job completion"));
     assert!(page.body.contains("Job requested"));
-    assert!(page.body.contains(ADMIN_EMAIL));
+    assert!(page.body.contains("tech@example.test"));
     assert!(page.body.contains(&format!("/jobs/{job}")));
     assert!(!page.body.contains("foreign-event@example.test"));
-    assert_eq!(tech.get(&server, &path).await.status, StatusCode::FORBIDDEN);
+    let tech_activity = tech.get(&server, &path).await;
+    assert_eq!(
+        tech_activity.status,
+        StatusCode::OK,
+        "{}",
+        tech_activity.body
+    );
+    assert!(tech_activity.body.contains("Agent reported job completion"));
+    assert!(!tech_activity.body.contains("foreign-event@example.test"));
+    assert_eq!(
+        tech.get(&server, "/audit").await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        readonly.get(&server, &path).await.status,
+        StatusCode::FORBIDDEN
+    );
     let foreign_token = admin.enrollment_token(&server, foreign, "60", "1").await;
     let foreign_agent = TestAgent::enroll(&server.url(), &foreign_token)
         .await

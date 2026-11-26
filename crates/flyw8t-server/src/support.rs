@@ -12,13 +12,13 @@ use crate::web::{check_csrf, error_response, Form};
 use crate::Shared;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use base64::Engine;
 use flyw8t_domain::support::{Capability, SupportState};
 use flyw8t_domain::Permission;
-use flyw8t_web::model::{SupportConsentView, SupportSessionView};
+use flyw8t_web::model::{SupportConsentView, SupportDevice, SupportSessionView};
 use futures_util::{SinkExt, StreamExt};
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
@@ -258,6 +258,9 @@ impl SupportHub {
         let peers = s.entry(session).or_default();
         if peers.side(side).is_some() {
             peers.revoke_screenshots();
+            if side == Side::Technician || side == peers.media_peer() {
+                peers.media = [false; 2];
+            }
         }
         // A session's capabilities never change; no socket can turn control off for it.
         peers.control |= control;
@@ -279,6 +282,9 @@ impl SupportHub {
                 .is_some_and(|p| p.conn_id == conn_id)
             {
                 peers.revoke_screenshots();
+                if side == Side::Technician || side == peers.media_peer() {
+                    peers.media = [false; 2];
+                }
                 *peers.side(side) = None;
             }
             if peers.technician.is_none() && peers.participant.is_none() && peers.helper.is_none() {
@@ -367,11 +373,20 @@ impl SupportHub {
 
     /// Record that `side` sees media flowing; `true` once the technician and its media peer
     /// have both said so. Anyone else's report counts for nothing.
-    fn media_connected(&self, session: Uuid, side: Side) -> bool {
+    fn media_connected(&self, session: Uuid, side: Side, conn_id: Uuid) -> bool {
         let mut s = self.sessions.lock().unwrap();
         let Some(p) = s.get_mut(&session) else {
             return false;
         };
+        if p.sealed
+            || !p.relay_open
+            || !p
+                .side(side)
+                .as_ref()
+                .is_some_and(|peer| peer.conn_id == conn_id)
+        {
+            return false;
+        }
         let slot = match side {
             Side::Technician => 0,
             s if s == p.media_peer() => 1,
@@ -427,14 +442,14 @@ impl SupportHub {
 async fn lock_state(
     tx: &mut PgConnection,
     id: Uuid,
-) -> sqlx::Result<Option<(SupportState, Option<Uuid>)>> {
-    let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT state, organization_id FROM support_sessions WHERE id = $1 FOR UPDATE",
+) -> sqlx::Result<Option<(SupportState, Option<Uuid>, Option<Uuid>)>> {
+    let row: Option<(String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT state, organization_id, linked_device_id FROM support_sessions WHERE id = $1 FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(tx)
     .await?;
-    Ok(row.and_then(|(s, org)| SupportState::parse(&s).map(|s| (s, org))))
+    Ok(row.and_then(|(s, org, device)| SupportState::parse(&s).map(|s| (s, org, device))))
 }
 
 async fn apply(
@@ -517,7 +532,7 @@ async fn change_with(
 ) -> anyhow::Result<Option<SupportState>> {
     let actor = who.actor();
     let mut tx = state.db.begin().await?;
-    let Some((current, org)) = lock_state(&mut tx, id).await? else {
+    let Some((current, org, device)) = lock_state(&mut tx, id).await? else {
         return Ok(None);
     };
     let Some(to) = decide(current) else {
@@ -566,6 +581,30 @@ async fn change_with(
             audit = audit.org(org);
         }
         audit.record(&mut *tx).await?;
+    }
+    let device_event = if kind == "media_connected" && to == SupportState::Connected {
+        Some("device.support.connected")
+    } else if current == SupportState::Connected && to.is_terminal() {
+        Some("device.support.ended")
+    } else {
+        None
+    };
+    if let (Some(action), Some(device), Some(org)) = (device_event, device, org) {
+        // The transition can be triggered by either peer. Retain that actor in the audit
+        // record and record the authenticated session owner separately for the timeline.
+        let (technician_id, technician): (Uuid, String) = sqlx::query_as(
+            "SELECT s.created_by, u.email FROM support_sessions s JOIN users u ON u.id = s.created_by WHERE s.id = $1",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        who.audit(action)
+            .org(org)
+            .target("device", device)
+            .detail(json!({"session_id": id, "technician_id": technician_id,
+                           "technician": technician, "state": to.as_str(), "reason": reason}))
+            .record(&mut *tx)
+            .await?;
     }
     if to.is_terminal() {
         let mut audit = who
@@ -707,8 +746,14 @@ pub async fn create(
     organization: Uuid,
     control: bool,
     note: Option<String>,
+    device: Option<Uuid>,
 ) -> AppResult<Created> {
     p.require(Permission::RunSupportSessions)?;
+    if control && device.is_some() {
+        return Err(AppError::BadRequest(
+            "Linked support sessions share the screen only.".into(),
+        ));
+    }
     if control {
         p.require(Permission::RunControlSessions)?;
     }
@@ -728,6 +773,16 @@ pub async fn create(
     // the same role and this organization, and be signed in with the session that asked. An administrator's change
     // to them holds the same row, so a session cannot be created after that change has ended the ones they had.
     auth::recheck_actor(&mut tx, p, Some(organization), false).await?;
+    if let Some(device) = device {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM devices WHERE id = $1 AND organization_id = $2 AND retired_at IS NULL FOR SHARE",
+        )
+        .bind(device)
+        .bind(organization)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    }
     // One technician's creations are serialized, so the cap below holds under concurrency.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!("support-create:{}", p.user_id))
@@ -746,8 +801,8 @@ pub async fn create(
         )));
     }
     let (id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO support_sessions (created_by, organization_id, capabilities, note, state, code_hash, invite_hash, invite_expires_at)
-         VALUES ($1, $2, $7, $3, 'created', $4, $5, now() + make_interval(secs => $6)) RETURNING id",
+        "INSERT INTO support_sessions (created_by, organization_id, capabilities, note, state, code_hash, invite_hash, invite_expires_at, linked_device_id)
+         VALUES ($1, $2, $7, $3, 'created', $4, $5, now() + make_interval(secs => $6), $8) RETURNING id",
     )
     .bind(p.user_id)
     .bind(organization)
@@ -756,6 +811,7 @@ pub async fn create(
     .bind(link_digest(&invite))
     .bind(state.config.support_invite_ttl.as_secs_f64())
     .bind(&capabilities)
+    .bind(device)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match &e {
@@ -777,7 +833,7 @@ pub async fn create(
     Audit::user(p, "support.create")
         .org(organization)
         .target("support_session", id)
-        .detail(json!({ "capabilities": capabilities }))
+        .detail(json!({ "capabilities": capabilities, "linked_device_id": device }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -917,6 +973,7 @@ fn session_view(row: SessionRow, viewer: Uuid, now: OffsetDateTime) -> SupportSe
         id: row.id,
         created_by: row.email,
         organization: row.organization.unwrap_or_else(|| "—".into()),
+        linked_device: row.linked_device_id.zip(row.linked_device_name),
         observer: row.created_by_id != viewer,
         note: row.note,
         state: st.as_str(),
@@ -937,6 +994,8 @@ struct SessionRow {
     created_by_id: Uuid,
     email: String,
     organization: Option<String>,
+    linked_device_id: Option<Uuid>,
+    linked_device_name: Option<String>,
     note: Option<String>,
     state: String,
     capabilities: Vec<String>,
@@ -947,9 +1006,11 @@ struct SessionRow {
 }
 
 const SESSION_SELECT: &str = "SELECT s.id, s.created_by AS created_by_id, u.email, o.name AS organization, s.note, s.state,
+                                     s.linked_device_id, coalesce(d.display_name, d.hostname) AS linked_device_name,
                                      s.capabilities, s.created_at, s.invite_expires_at, s.ended_at, s.end_reason
                                 FROM support_sessions s JOIN users u ON u.id = s.created_by
-                                LEFT JOIN organizations o ON o.id = s.organization_id";
+                                LEFT JOIN organizations o ON o.id = s.organization_id
+                                LEFT JOIN devices d ON d.id = s.linked_device_id AND d.organization_id = s.organization_id";
 
 /// Administrators see every session; a technician sees the sessions they created, in
 /// organizations they are still assigned to. Anything else is 404. Binds (all, user, orgs)
@@ -975,8 +1036,42 @@ async fn visible_session(state: &Shared, p: &Principal, id: Uuid) -> AppResult<S
     row.ok_or(AppError::NotFound)
 }
 
-pub async fn list_page(State(state): State<Shared>, WebUser(p): WebUser) -> Response {
-    match list(&state, &p, None).await {
+#[derive(Deserialize)]
+pub struct SupportQuery {
+    device: Option<Uuid>,
+}
+
+async fn linked_support_device(
+    state: &Shared,
+    p: &Principal,
+    device: Uuid,
+) -> AppResult<SupportDevice> {
+    p.require(Permission::RunSupportSessions)?;
+    let row = crate::queries::device_summary(state, p, device)
+        .await?
+        .filter(|d| !d.retired)
+        .ok_or(AppError::NotFound)?;
+    Ok(SupportDevice {
+        id: row.id,
+        name: row.name().to_string(),
+        organization: row.organization,
+    })
+}
+
+pub async fn list_page(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Query(query): Query<SupportQuery>,
+) -> Response {
+    let result = async {
+        let device = match query.device {
+            Some(id) => Some(linked_support_device(&state, &p, id).await?),
+            None => None,
+        };
+        list(&state, &p, None, device).await
+    }
+    .await;
+    match result {
         Ok(r) => r,
         Err(e) => error_response(Some(&crate::web::ctx(&p, None)), e),
     }
@@ -986,6 +1081,7 @@ async fn list(
     state: &Shared,
     p: &Principal,
     revealed: Option<(Uuid, String, String)>,
+    device: Option<SupportDevice>,
 ) -> AppResult<Response> {
     p.require(Permission::RunSupportSessions)?;
     let (all, orgs) = p.scope();
@@ -1016,6 +1112,7 @@ async fn list(
         sessions,
         orgs,
         revealed,
+        device,
     ))
     .into_response();
     resp.headers_mut()
@@ -1054,8 +1151,29 @@ pub async fn create_handler(
             "control" => true,
             _ => return Err(AppError::BadRequest("Unknown capability.".into())),
         };
-        let c = create(&state, &p, org, control, note).await?;
-        list(&state, &p, Some((c.id, c.code, c.invite))).await
+        let device = match form.get("device") {
+            Some(id) => {
+                let id = id
+                    .parse()
+                    .map_err(|_| AppError::BadRequest("Invalid device.".into()))?;
+                let device = linked_support_device(&state, &p, id).await?;
+                if device.organization.id != org {
+                    return Err(AppError::NotFound);
+                }
+                Some(device)
+            }
+            None => None,
+        };
+        let c = create(
+            &state,
+            &p,
+            org,
+            control,
+            note,
+            device.as_ref().map(|d| d.id),
+        )
+        .await?;
+        list(&state, &p, Some((c.id, c.code, c.invite)), device).await
     }
     .await;
     result.unwrap_or_else(|e| error_response(Some(&crate::web::ctx(&p, None)), e))
@@ -1662,7 +1780,7 @@ async fn on_message(
         }
         (_, In::Media { state: media }) => match media.as_str() {
             // Connected only when the technician and its media peer both say media flows.
-            "connected" if state.support.media_connected(id, side) => {
+            "connected" if state.support.media_connected(id, side, conn_id) => {
                 change(
                     state,
                     id,
@@ -2133,13 +2251,26 @@ mod tests {
         let hub = SupportHub::default();
         let id = Uuid::new_v4();
         let (t, _a, _) = peer();
+        let technician = t.conn_id;
+        let (p, _b, _) = peer();
+        let participant = p.conn_id;
         hub.attach(id, Side::Technician, false, t);
-        assert!(!hub.media_connected(id, Side::Technician));
+        hub.attach(id, Side::Participant, false, p);
+        assert!(!hub.media_connected(id, Side::Technician, technician));
+        assert!(!hub.media_connected(id, Side::Participant, participant));
+        hub.open_relay(id);
+        assert!(!hub.media_connected(id, Side::Technician, technician));
         assert!(
-            !hub.media_connected(id, Side::Technician),
+            !hub.media_connected(id, Side::Technician, technician),
             "one side twice is still one side"
         );
-        assert!(hub.media_connected(id, Side::Participant));
+        assert!(hub.media_connected(id, Side::Participant, participant));
+        let (t, _a, _) = peer();
+        let replacement = t.conn_id;
+        assert!(hub.attach(id, Side::Technician, false, t));
+        assert!(!hub.media_connected(id, Side::Technician, technician));
+        assert!(!hub.media_connected(id, Side::Technician, replacement));
+        assert!(hub.media_connected(id, Side::Participant, participant));
     }
 
     #[test]

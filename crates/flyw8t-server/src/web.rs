@@ -98,6 +98,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
         now: OffsetDateTime::now_utc(),
         can_run: p.can(Permission::RunDiagnostics),
         is_admin: p.role == Role::Admin,
+        can_view_device_activity: p.can(Permission::ViewDeviceActivity),
         can_enroll: p.can(Permission::ManageEnrollment),
         can_support: p.can(Permission::RunSupportSessions),
         can_control: p.can(Permission::RunControlSessions),
@@ -114,6 +115,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
 pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
     let (ok, message) = match code? {
         "job-cancelled" => (true, "Cancellation recorded."),
+        "inventory-queued" => (true, "Inventory refresh requested. See Job history for the outcome."),
         "org-created" => (true, "Organization created."),
         "site-added" => (true, "Site added."),
         "token-revoked" => (true, "Token revoked."),
@@ -144,7 +146,7 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "mfa-reset" => (true, "Two-step verification reset. That user was signed out everywhere and sets it up again at next sign-in."),
         "mfa-disabled" => (true, "Two-step verification turned off."),
         "codes-regenerated" => (true, "New recovery codes issued; the old ones no longer work."),
-        _ => return None,
+        other => return crate::trust::flash_for(other),
     };
     Some(Flash {
         ok,
@@ -438,18 +440,36 @@ pub async fn devices(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct DeviceDetailQs {
+    m: Option<String>,
+    refresh: Option<Uuid>,
+}
+
 pub async fn device(
     State(state): State<Shared>,
     WebUser(p): WebUser,
     Path(id): Path<Uuid>,
-    Query(m): Query<MsgQuery>,
+    Query(q): Query<DeviceDetailQs>,
 ) -> Response {
     page(&p, async {
         p.require(Permission::ViewDevices)?;
         let d = queries::device(&state, &p, id)
             .await?
             .ok_or(AppError::NotFound)?;
-        html(flyw8t_web::device_page(&ctx(&p, flash(m.m.as_deref())), d))
+        let history = queries::inventory_history(&state, &p, id).await?;
+        let refreshing = d.recent_jobs.iter().any(|job| {
+            Some(job.id) == q.refresh
+                && job.action == "system.info"
+                && !job.state.is_terminal()
+                && job.state != flyw8t_domain::job::ExecState::OutcomeUnknown
+        });
+        html(flyw8t_web::device_page(
+            &ctx(&p, flash(q.m.as_deref())),
+            d,
+            &history,
+            refreshing,
+        ))
     })
     .await
 }
@@ -470,7 +490,7 @@ pub async fn device_activity(
         let device = queries::device_summary(&state, &p, id)
             .await?
             .ok_or(AppError::NotFound)?;
-        p.require(Permission::ViewAudit)?;
+        p.require(Permission::ViewDeviceActivity)?;
         let before = qs
             .before
             .as_deref()
@@ -493,7 +513,7 @@ pub async fn device_activity(
 
 // Read the device and its live enrollment again before displaying a reply. A membership change,
 // sign-out or retirement during the short agent round trip must take effect.
-async fn physical_console_target(
+async fn windows_observation_target(
     tx: &mut sqlx::PgConnection,
     p: &Principal,
     device: Uuid,
@@ -532,7 +552,7 @@ pub async fn check_physical_console(
         p.require(Permission::RunSupportSessions)?;
         let request = Uuid::new_v4();
         let mut tx = state.db.begin().await?;
-        let (org, _) = physical_console_target(&mut tx, &p, device).await?;
+        let (org, _) = windows_observation_target(&mut tx, &p, device).await?;
         Audit::user(&p, "device.physical_console.requested")
             .org(org)
             .target("device", device)
@@ -562,7 +582,7 @@ pub async fn check_physical_console(
             Err(ConsoleCheckError::Timeout) => (PhysicalConsoleCheck::TimedOut, "timeout"),
         };
         let mut tx = state.db.begin().await?;
-        let (current_org, name) = physical_console_target(&mut tx, &p, device).await?;
+        let (current_org, name) = windows_observation_target(&mut tx, &p, device).await?;
         if current_org != org {
             return Err(AppError::NotFound);
         }
@@ -588,6 +608,79 @@ pub async fn check_physical_console(
     .await
 }
 
+pub async fn check_background_terminal_policy(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(device): Path<Uuid>,
+    body: Bytes,
+) -> Response {
+    use crate::registry::ConsoleCheckError;
+    use flyw8t_protocol::messages::BackgroundTerminalPolicy;
+    use flyw8t_web::BackgroundTerminalPolicyCheck as Check;
+
+    page(&p, async {
+        check_csrf(&p, &Form::parse(&body))?;
+        p.require(Permission::ViewDevices)?;
+        p.require(Permission::RunControlSessions)?;
+        let request_id = Uuid::new_v4();
+        let mut tx = state.db.begin().await?;
+        let (org, _) = windows_observation_target(&mut tx, &p, device).await?;
+        Audit::user(&p, "device.background_terminal_policy.requested")
+            .org(org)
+            .target("device", device)
+            .detail(json!({"request_id": request_id}))
+            .record(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        let reply = state
+            .registry
+            .check_background_terminal_policy(device, request_id)
+            .await;
+        let mut tx = state.db.begin().await?;
+        let (current_org, name) = windows_observation_target(&mut tx, &p, device).await?;
+        if current_org != org {
+            return Err(AppError::NotFound);
+        }
+        let observation = reply.and_then(|(connection, policy)| {
+            if state.registry.current_conn(device) != Some(connection) {
+                return Err(ConsoleCheckError::NotConnected);
+            }
+            Ok((connection, policy))
+        });
+        let (view, status, connection, verified) = match observation {
+            Ok((connection, BackgroundTerminalPolicy::Enabled)) => {
+                (Check::Enabled, "enabled", Some(connection), true)
+            }
+            Ok((connection, BackgroundTerminalPolicy::Disabled)) => {
+                (Check::Disabled, "disabled", Some(connection), true)
+            }
+            Ok((connection, BackgroundTerminalPolicy::Unavailable)) => {
+                (Check::Unavailable, "unavailable", Some(connection), false)
+            }
+            Err(ConsoleCheckError::NotConnected) => (Check::Offline, "not_connected", None, false),
+            Err(ConsoleCheckError::Unsupported) => (Check::Unsupported, "unsupported", None, false),
+            Err(ConsoleCheckError::Busy) => (Check::Busy, "busy", None, false),
+            Err(ConsoleCheckError::Timeout) => (Check::TimedOut, "timeout", None, false),
+        };
+        let audit = Audit::user(&p, "device.background_terminal_policy.result")
+            .org(org)
+            .target("device", device)
+            .detail(json!({"request_id": request_id, "status": status, "connection": connection}));
+        if verified { audit } else { audit.failed() }
+            .record(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        html(flyw8t_web::background_terminal_policy_result(
+            &ctx(&p, None),
+            device,
+            &name,
+            view,
+        ))
+    })
+    .await
+}
+
 pub async fn run_job(
     State(state): State<Shared>,
     WebUser(p): WebUser,
@@ -600,6 +693,7 @@ pub async fn run_job(
         let name = form.get("action").unwrap_or("");
         let action = Action::from_request(name, |k| form.get(k).map(str::to_string))
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        let refresh = action == Action::SystemInfo && form.get("return_to_device") == Some("yes");
         let job_id = jobs::create(
             &state,
             &p,
@@ -612,7 +706,11 @@ pub async fn run_job(
             },
         )
         .await?;
-        to(format!("/jobs/{job_id}"))
+        if refresh {
+            to(format!("/devices/{id}?m=inventory-queued&refresh={job_id}"))
+        } else {
+            to(format!("/jobs/{job_id}"))
+        }
     })
     .await
 }

@@ -4,12 +4,27 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## Unreleased
 
+- Deploy a site enrollment package silently with `--quiet` or `/quiet` from an elevated process. Quiet setup reports a deployment exit code and keeps an existing enrollment on retries.
+- Verify an enrolled Windows device's local background-terminal policy from connection options. Device Activity records the technician who requested the check and the result.
+
+- The device workspace shows memory and disk history from saved inventory. Refresh data queues an inventory job and brings the technician back to the device.
+- Device connection actions distinguish a consented screen share, the signed-in physical desktop, and an RDP sign-in. Local Technician setup and direct SSH are under connection options.
+- Choose the SSH account independently of the computer in Technician. Approved Windows script results show the PowerShell account class reported by the agent.
+
+- Device detail keeps access, diagnostics and recent results together, with the device identity and last inventory report visible above them. Full identity, inventory, custom fields and management remain on the same page.
+- Run approved PowerShell revisions on Windows agents with pinned script trust. The agent validates script approvals and any required run authorization before it starts the job.
+- Resolve plain company, site and device fields when submitting an approved script and choose how long the job can wait for an offline agent.
+- Schedule an approved C0 or C1 PowerShell revision on a Windows device once, daily, or weekly in UTC, with a configurable delivery window and occurrence history.
+- Check whether the endpoint's local SSH service sends an SSH 2.0 greeting with `flyw8t-agent terminal-check`.
+- Check the state of an attended support session and the current client's screenshot permission with the MCP tool `support_session_status`.
 - From a saved script revision, **Edit a copy of this revision** opens its source, parameters and risk class as a draft. Saving records a new revision if the content differs from the current one.
 - Connect an attended screenshot client from Administration with a dedicated scoped token. Directory administrators can confirm this action through a fresh organization sign-in, including provider TOTP. Tokens issued this way expire within 30 days. First-passkey setup links directly to reauthentication.
 - The MCP adapter accepts `--server`, `--token-file`, and `--ca-cert` alongside the existing environment settings. Run `flyw8t-mcp --help` for the corresponding names.
+- Enable MCP device diagnostics to find an enrolled device, queue its built-in inventory check, and inspect the job and evidence with a scoped technician token.
 - Open an interactive SSH terminal from a Windows device page in Flyw8t Technician. The operator can sign in to an SSH-enabled host without taking over its desktop.
 - Download a PowerShell setup file for manual Windows enrollment from the signed agent download. The file prompts for the enrollment token locally.
-- Administrators can open **View device activity** on a device to see agent connections, console checks, operator actions and job events in one timeline. Open a job from the timeline for its result and evidence.
+- Administrators and technicians can open **Device activity** on devices in their assigned organizations to see agent connections, console checks, operator actions and job events in one timeline. Open a job from the timeline for its result and evidence.
+- Start an attended screen-share invitation from a device. Device activity records the linked share when media connects and ends, with its technician and a link to the support session.
 
 ## 0.1.8 — 2026-11-26 (pre-release)
 

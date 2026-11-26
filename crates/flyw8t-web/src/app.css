@@ -270,6 +270,102 @@ meter:-moz-meter-sub-sub-optimum::-moz-meter-bar { background: var(--bad-fg); }
 .stat .v { display: block; font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
 .stat meter { max-width: none; }
 
+.device-workspace {
+  --device-accent: #23596c;
+  --accent: var(--device-accent);
+}
+@media (prefers-color-scheme: dark) {
+  .device-workspace { --device-accent: #9dd6e7; }
+}
+.device-header h1 { margin: 0.35rem 0 0.25rem; }
+.device-location { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.device-links { display: flex; gap: 0.15rem 1rem; flex-wrap: wrap; margin: 0.65rem 0 0; }
+.device-links a { min-height: 2rem; display: inline-flex; align-items: center; }
+.device-snapshot {
+  background: var(--surface);
+  border-block: 1px solid var(--line);
+  margin-block: 0.75rem 0.5rem;
+  padding: 0.55rem 0.75rem;
+}
+.device-snapshot p { margin: 0; }
+.device-snapshot header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.45rem; }
+.device-snapshot header h2 { font-size: 1rem; margin: 0 0 0.15rem; }
+.device-snapshot .stats {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+  gap: 0.5rem 0.85rem;
+  margin-top: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+.device-snapshot .stat .v { font-size: 0.93rem; }
+.device-snapshot .stat meter { height: 0.38rem; }
+.inventory-trend { display: flex; gap: 2px; list-style: none; margin: 0.25rem 0; padding: 0; height: 2.35rem; }
+.inventory-trend li { flex: 1; min-width: 0; display: grid; place-content: center; overflow: hidden; }
+.device-snapshot .inventory-trend meter { width: 2.35rem; height: 0.35rem; transform: rotate(-90deg); margin: 0; }
+.device-columns { display: grid; gap: 1rem; }
+.device-columns > * { min-width: 0; }
+.device-section { border-bottom: 1px solid var(--line); padding-block: 0.8rem; min-width: 0; }
+.device-section h2 { margin: 0 0 0.4rem; }
+.device-section > p { margin: 0.35rem 0; }
+.device-section dl.facts { grid-template-columns: minmax(6rem, 0.65fr) minmax(0, 1fr); }
+.device-section dl.facts dt { margin: 0; }
+.device-diagnostics .action {
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  padding: 0.5rem 0;
+}
+.device-session-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr)); gap: 0.7rem; }
+.device-session-actions > div { min-width: 0; }
+.device-session-actions p { margin: 0.35rem 0 0; }
+.device-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.5rem;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 650;
+  text-decoration: none;
+  text-align: center;
+}
+.device-button:hover { border-color: var(--device-accent); color: var(--device-accent); }
+.device-session-actions .device-button { width: 100%; }
+.device-action-group { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+.device-section details { margin-top: 0.65rem; }
+.device-diagnostics .action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto;
+  align-items: center;
+  gap: 0.45rem;
+}
+.device-diagnostics label { max-width: 9rem; }
+.device-diagnostics button { grid-column: 3; }
+.device-workspace button:not(.bad, .link) {
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  min-height: 2.1rem;
+  padding: 0.25rem 0.65rem;
+}
+.device-workspace button:not(.bad, .link):hover { border-color: var(--device-accent); }
+.device-console-check form { margin-top: 0.45rem; }
+.device-workspace #device-management { margin-top: 0.75rem; }
+.device-workspace #device-management .dangerzone { margin-top: 1rem; }
+@media (min-width: 1120px) {
+  .device-columns { grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); }
+  .device-columns > aside { border-inline-start: 1px solid var(--line); padding-inline-start: 1rem; }
+}
+@media (max-width: 540px) {
+  .device-diagnostics .action { grid-template-columns: minmax(0, 1fr) auto; }
+  .device-diagnostics .action > div { grid-column: 1 / -1; }
+  .device-diagnostics button { grid-column: 2; }
+  .device-workspace button:not(.bad, .link), .device-links a, .device-button { min-height: 44px; }
+}
+
 ol.setup { margin: 0; padding: 0; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 0.9rem; }
 ol.setup > li { counter-increment: step; position: relative; padding-left: 2.4rem; min-height: 1.6rem; }
 ol.setup > li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 1.6rem; height: 1.6rem; border-radius: 50%; background: var(--busy-bg); color: var(--busy-fg); font-weight: 700; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; }

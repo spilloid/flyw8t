@@ -67,11 +67,13 @@ impl Mcp {
             .send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
             .await;
         let list = client.call("tools/list", json!({})).await;
-        assert!(list["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t["name"] == "support_screenshot"));
+        for name in ["support_screenshot", "support_session_status"] {
+            assert!(list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == name));
+        }
         client
     }
 
@@ -134,6 +136,18 @@ pub(super) async fn exercise(
 ) {
     let mut mcp = Mcp::start(binary, server).await;
     let request = Uuid::new_v4();
+    let status = mcp
+        .call(
+            "tools/call",
+            json!({"name":"support_session_status","arguments":{"session_id":session_id}}),
+        )
+        .await;
+    assert_eq!(
+        status["structuredContent"],
+        json!({
+            "session_id":session_id,"state":"connected","screenshot_access":"consent_required"
+        })
+    );
     assert_no_image(&mcp.shot(session_id, request).await);
 
     cdp.call(

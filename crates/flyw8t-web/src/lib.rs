@@ -11,6 +11,7 @@ pub mod fmt;
 pub mod model;
 mod network;
 mod pages;
+pub mod schedules;
 
 pub use admin::{audit_page, audit_query, user_page};
 pub use network::*;

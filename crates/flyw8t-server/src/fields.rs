@@ -196,6 +196,57 @@ async fn latest(
     .await
 }
 
+/// A snapshot of plain field values used to prepare a script offer for one authorized device.
+pub(crate) struct ScriptFields {
+    defs: Vec<FieldDef>,
+    rows: Vec<Latest>,
+}
+
+impl ScriptFields {
+    pub(crate) async fn load(
+        state: &Shared,
+        org: Uuid,
+        site: Option<Uuid>,
+        device: Uuid,
+    ) -> sqlx::Result<Self> {
+        let defs = definitions(state, false).await?;
+        let rows = latest(state, Some(org), site, Some(device)).await?;
+        Ok(Self { defs, rows })
+    }
+
+    pub(crate) fn value(&self, level: &str, key: &str, secret: bool) -> Result<&str, String> {
+        let field = self
+            .defs
+            .iter()
+            .find(|d| d.key == key)
+            .ok_or_else(|| format!("the custom field {key} is missing or archived"))?;
+        if secret || field.kind == "secret" {
+            return Err(format!(
+                "the field {key} requires secret parameter delivery"
+            ));
+        }
+        let scopes: &[&str] = match level {
+            "device" => &["device", "site", "organization", "global"],
+            "site" => &["site", "organization", "global"],
+            "org" => &["organization", "global"],
+            "global" => &["global"],
+            _ => return Err(format!("the field {key} uses an unknown scope")),
+        };
+        scopes
+            .iter()
+            .filter(|scope| field.allows(scope))
+            .find_map(|scope| {
+                self.rows
+                    .iter()
+                    .find(|r| r.field_id == field.id && r.scope == *scope && !r.has_secret)?
+                    .value
+                    .as_deref()
+            })
+            .or(field.default_value.as_deref())
+            .ok_or_else(|| format!("set a value for {level}.{key} before running this revision"))
+    }
+}
+
 /// May this person set values of this field at this level?
 pub fn can_edit(p: &Principal, def: &FieldDef, scope: &str) -> bool {
     if def.archived_at.is_some() || !def.allows(scope) {

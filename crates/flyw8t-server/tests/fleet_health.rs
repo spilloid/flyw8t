@@ -306,6 +306,10 @@ async fn a_new_enrollment_token_comes_with_the_commands_to_run() {
     let again = admin.get(&server, &format!("/organizations/{org}")).await;
     assert!(!again.body.contains("fw8e_"), "{}", again.body);
     assert!(!again.body.contains("Get-AuthenticodeSignature"));
+    assert!(again
+        .body
+        .contains("Deploy quietly with Intune or Group Policy"));
+    assert!(again.body.contains("Flyw8t-Setup-x64.exe --quiet"));
     assert!(!again.headers["content-security-policy"]
         .to_str()
         .unwrap()

@@ -19,7 +19,7 @@ They are kept separate because "the command ran to completion" and "the command 
 
 | State | Meaning | Terminal? |
 |---|---|---|
-| `created` | Request recorded; authorization not decided. Exists only inside the creating transaction. | no |
+| `created` | Request recorded. A C2 or C3 script can remain here while awaiting its run signature. | no |
 | `authorized` | Role, organization scope and token scope all permit it. Exists only inside the creating transaction. | no |
 | `queued` | Waiting for the device. **Not sent.** | no |
 | `dispatched` | The offer was durably recorded as sent and written to the device's live connection. **Not proof of receipt.** | no |
@@ -41,7 +41,7 @@ They are kept separate because "the command ran to completion" and "the command 
 | `pending` | Waiting for execution to complete, or for its evidence to be evaluated. |
 | `verified` | Evidence satisfies the action's success contract. |
 | `failed` | Execution completed but the evidence does not satisfy the contract. |
-| `not_applicable` | Execution did not complete, so there is nothing to verify. |
+| `not_applicable` | No separate verification applies. A script can report completion and an exit code with this value. |
 
 Success contracts (`flyw8t_protocol::catalog::SuccessContract`, shown on every job page):
 
@@ -71,11 +71,11 @@ created ──► authorized ──► queued ──► dispatched ──► ack
 
 | From | To | Trigger |
 |---|---|---|
-| `created` | `authorized` | Server authorization passed (same transaction as creation). |
+| `created` | `authorized` | Server authorization passed. C2 and C3 scripts require a verified run signature. |
 | `authorized` | `queued` | Same transaction. |
-| `created`/`authorized`/`queued` | `cancelled` | Cancel before dispatch. **Guaranteed not executed.** |
+| `created`/`authorized`/`queued` | `cancelled` | Cancel before dispatch. Flyw8t also cancels a queued script if its approval is withdrawn before dispatch. **Guaranteed not executed.** |
 | `queued` | `dispatched` | The device is connected; the dispatch is committed, *then* the offer is written. |
-| `queued` | `expired` | `deliver_by` passed (default 15 min after creation). |
+| `created`/`queued` | `expired` | The delivery deadline passed before an awaiting script was authorized or a queued job was sent. |
 | `dispatched` | `queued` | The offer could not be written to the connection after the dispatch committed (it never left the server), and no newer offer has been sent since. |
 | `dispatched` | `acknowledged` | Device report `Accepted`. |
 | `dispatched`/`acknowledged` | `running` | Device report `Started`. |
@@ -118,10 +118,10 @@ The agent's journal fails closed if execution history is unreadable, mismatched,
 | `started_at`, `finished_at` | **device** | reported by the device; labelled "(device clock)" in the UI |
 | `deliver_by` | server | creation + delivery window |
 
-Use **Devices → device → View device activity** to see recorded agent connections and job activity in order of server observation. The timeline includes the requester and the reported execution events, with links to each job's complete record. A job completion entry records the agent's report. Check the linked job for its verification outcome.
+Use **Devices → device → Device activity** to see recorded agent connections and job activity in order of server observation. The timeline includes the requester and the reported execution events, with links to each job's complete record. A job completion entry records the agent's report. Check the linked job for its verification outcome.
 
 ## What is not done yet
 
 - Multi-device (fleet) jobs. A job targets exactly one device; the API has no batch endpoint.
-- Scheduled jobs and retries. Nothing is ever retried automatically. A retry must be a new job created by a person, because a job may be non-idempotent.
+- Automatic retries of execution. Each approved [schedule occurrence](running-scripts.md#schedule-an-approved-revision) creates a distinct job. Retrying an execution requires a new job created by a person.
 - State-changing actions and their post-condition verification.

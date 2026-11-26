@@ -29,12 +29,15 @@ pub mod queries;
 pub mod ratelimit;
 pub mod registry;
 pub mod remote_access;
+pub mod schedules;
 pub mod scim;
 pub mod script_check;
+pub mod script_runs;
 pub mod scripts;
 pub mod sessions;
 pub mod support;
 pub mod totp;
+pub mod trust;
 pub mod users;
 pub mod web;
 mod windows_installer;
@@ -204,6 +207,10 @@ pub fn router(state: Shared) -> Router {
             "/devices/{id}/physical-console/check",
             post(web::check_physical_console),
         )
+        .route(
+            "/devices/{id}/background-terminal/check",
+            post(web::check_background_terminal_policy),
+        )
         .route("/devices/{id}/jobs", post(web::run_job))
         .route("/devices/{id}/revoke", post(web::revoke_device))
         .route("/devices/{id}/edit", post(devices::edit))
@@ -236,6 +243,48 @@ pub fn router(state: Shared) -> Router {
         .route(
             "/scripts/{id}/revisions/{number}/download",
             get(scripts::download),
+        )
+        .route(
+            "/scripts/{id}/revisions/{number}/approval-request.json",
+            get(trust::approval_request),
+        )
+        .route(
+            "/scripts/{id}/revisions/{number}/approvals",
+            post(trust::upload_approval),
+        )
+        .route(
+            "/devices/{id}/scripts",
+            get(script_runs::run_page).post(script_runs::start),
+        )
+        .route("/devices/{id}/schedules", get(schedules::list))
+        .route(
+            "/devices/{id}/schedules/new/{script}/{revision}",
+            get(schedules::new_page).post(schedules::create),
+        )
+        .route(
+            "/devices/{id}/schedules/{schedule}/cancel",
+            post(schedules::cancel),
+        )
+        .route("/jobs/{id}/authorize", get(script_runs::authorize_page))
+        .route(
+            "/jobs/{id}/run-request.json",
+            get(script_runs::run_request_json),
+        )
+        .route(
+            "/jobs/{id}/authorization",
+            post(script_runs::upload_authorization),
+        )
+        .route("/admin/trust", get(trust::trust_page))
+        .route("/admin/trust/chain.json", get(trust::chain_json))
+        // A signed list version, form-encoded.
+        .route(
+            "/admin/trust/versions",
+            post(trust::upload_version)
+                .layer(axum::extract::DefaultBodyLimit::max(3 * 1024 * 1024)),
+        )
+        .route(
+            "/account/passkeys/{id}/signer.json",
+            get(trust::passkey_signer),
         )
         .route("/jobs", get(web::jobs_list))
         .route("/jobs/{id}", get(web::job))
@@ -308,6 +357,10 @@ pub fn router(state: Shared) -> Router {
         .route(
             "/api/v1/mcp/capabilities",
             get(support::screenshot::capabilities),
+        )
+        .route(
+            "/api/v1/support/{id}/status",
+            get(support::screenshot::session_status),
         )
         .route(
             "/api/v1/support/{id}/screenshot",
@@ -638,7 +691,11 @@ pub async fn run_sweeper(state: Shared, shutdown: CancellationToken) {
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            _ = tick.tick() => match async { jobs::sweep(&state).await?; support::sweep(&state).await }.await {
+            _ = tick.tick() => match async {
+                jobs::sweep(&state).await?;
+                support::sweep(&state).await?;
+                schedules::sweep(&state).await
+            }.await {
                 Ok(()) => metrics::SWEEPS_OK.inc(),
                 Err(e) => {
                     metrics::SWEEPS_FAILED.inc();

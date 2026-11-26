@@ -16,6 +16,7 @@ pub struct PageCtx {
     pub now: OffsetDateTime,
     pub can_run: bool,
     pub is_admin: bool,
+    pub can_view_device_activity: bool,
     pub can_enroll: bool,
     pub can_support: bool,
     /// May start sessions that include remote control (ADR-0012).
@@ -323,12 +324,19 @@ pub struct DeviceDetail {
     pub fields: Vec<ResolvedField>,
 }
 
+pub struct InventorySample {
+    pub received_at: OffsetDateTime,
+    pub memory_used: Option<u8>,
+    pub disk_used: Vec<(String, u8)>,
+}
+
 pub struct DeviceActivityEvent {
     pub at: OffsetDateTime,
     pub action: String,
     pub actor: String,
     pub job: Option<Uuid>,
     pub job_action: Option<String>,
+    pub support_session: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -692,12 +700,21 @@ pub struct BulkConfirm {
     pub devices: Vec<DeviceRow>,
 }
 
+/// Device chosen by the technician for a linked invitation.
+pub struct SupportDevice {
+    pub id: Uuid,
+    pub name: String,
+    pub organization: OrgRef,
+}
+
 /// One attended support session, for the technician.
 #[derive(Debug, Clone, Serialize)]
 pub struct SupportSessionView {
     pub id: Uuid,
     pub created_by: String,
     pub organization: String,
+    #[serde(skip)]
+    pub linked_device: Option<(Uuid, String)>,
     /// The viewer did not create this session (an administrator): they may see its state and
     /// end it, but never attach to its signaling.
     #[serde(skip)]
@@ -921,4 +938,58 @@ pub struct RevisionChanges {
     pub parameters: Option<Vec<DiffRow>>,
     /// The earlier risk class, when it changed.
     pub risk_from: Option<String>,
+}
+
+/// The trust page (ADR-0015): the chain the server holds. Shown for convenience only: under a compromised server
+/// none of it can be relied on, which the page says.
+#[derive(Debug, Clone)]
+pub struct TrustView {
+    pub fingerprint: String,
+    pub deployment: String,
+    pub version: u64,
+    pub head: String,
+    pub rp_id: String,
+    pub origins: Vec<String>,
+    pub threshold: u64,
+    pub signers: Vec<SignerRow>,
+    pub removed: Vec<String>,
+    pub revoked: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignerRow {
+    pub person: String,
+    pub key_id: String,
+    pub kind: String,
+    pub role: String,
+    pub may_approve: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalRow {
+    pub person: String,
+    pub key_id: String,
+    /// Still verifies under the current trust list.
+    pub valid: bool,
+    pub approved_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ApprovalsView {
+    /// Whether a trust list exists yet.
+    pub trusted: bool,
+    pub rows: Vec<ApprovalRow>,
+}
+
+/// An approved revision that could run on a device.
+#[derive(Debug, Clone)]
+pub struct RunOption {
+    pub script_id: uuid::Uuid,
+    pub number: i32,
+    pub name: String,
+    pub risk: String,
+    /// Parameters asked at run time: name and prompt.
+    pub asks: Vec<(String, Option<String>)>,
+    /// Why it cannot run here, if it cannot.
+    pub blocked: Option<String>,
 }

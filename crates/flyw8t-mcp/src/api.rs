@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
-    redirect, Client, Response, StatusCode, Url,
+    redirect, Client, RequestBuilder, Response, StatusCode, Url,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use crate::frame::{Arguments, Envelope, RequestKey, MAX_PNG};
 use clap::Parser;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(
@@ -28,6 +29,9 @@ pub struct Settings {
     /// Additional trusted certificate authority in PEM format.
     #[arg(long, env = "FLYW8T_MCP_CA_FILE")]
     ca_cert: Option<PathBuf>,
+    /// Enable the device list and the built-in system.info diagnostic tools.
+    #[arg(long, env = "FLYW8T_MCP_DEVICE_DIAGNOSTICS")]
+    device_diagnostics: bool,
 }
 
 #[cfg(test)]
@@ -40,6 +44,21 @@ pub struct Api {
     client: Client,
     origin: Url,
     bearer: HeaderValue,
+    pub(crate) device_diagnostics: bool,
+}
+
+#[derive(Default, Deserialize)]
+pub struct Capabilities {
+    pub support_screenshot: bool,
+    #[serde(default)]
+    pub support_session_status: bool,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct SessionStatus {
+    session_id: Uuid,
+    state: String,
+    screenshot_access: String,
 }
 
 fn local_origin(url: &Url) -> bool {
@@ -128,6 +147,7 @@ impl Api {
                 .map_err(|_| anyhow!("Could not initialize HTTPS."))?,
             origin,
             bearer,
+            device_diagnostics: settings.device_diagnostics,
         })
     }
 
@@ -137,11 +157,7 @@ impl Api {
         url
     }
 
-    pub async fn screenshot_allowed(&self) -> Result<bool> {
-        #[derive(Deserialize)]
-        struct Capabilities {
-            support_screenshot: bool,
-        }
+    pub async fn capabilities(&self) -> Result<Capabilities> {
         let response = self
             .client
             .get(self.url("/api/v1/mcp/capabilities"))
@@ -150,8 +166,65 @@ impl Api {
             .send()
             .await
             .map_err(transport_error)?;
-        let body: Capabilities = read_response(response, 4096).await?;
-        Ok(body.support_screenshot)
+        if self.device_diagnostics && response.status() == StatusCode::NOT_FOUND {
+            return Ok(Capabilities::default());
+        }
+        read_response(response, 4096).await
+    }
+
+    pub(crate) fn diagnostic_request(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
+        self.client
+            .request(method, self.url(path))
+            .timeout(Duration::from_secs(8))
+            .header(AUTHORIZATION, self.bearer.clone())
+    }
+
+    pub async fn session_status(&self, session: Uuid) -> Result<Value> {
+        let path = format!("/api/v1/support/{session}/status");
+        let response = self
+            .client
+            .get(self.url(&path))
+            .timeout(Duration::from_secs(8))
+            .header(AUTHORIZATION, self.bearer.clone())
+            .send()
+            .await
+            .map_err(|err| {
+                if err.is_timeout() {
+                    anyhow!("The server took too long to report session status.")
+                } else {
+                    transport_error(err)
+                }
+            })?;
+        let status: SessionStatus = read_response(response, 4096).await?;
+        ensure!(
+            status.session_id == session
+                && matches!(
+                    status.state.as_str(),
+                    "created"
+                        | "waiting"
+                        | "authorizing"
+                        | "awaiting_helper"
+                        | "connecting"
+                        | "connected"
+                        | "disconnecting"
+                        | "closed"
+                        | "expired"
+                        | "rejected"
+                        | "connection_failed"
+                        | "revoked"
+                )
+                && matches!(
+                    status.screenshot_access.as_str(),
+                    "unavailable" | "consent_required" | "consent_pending" | "allowed" | "revoked"
+                ),
+            "The server returned invalid session status."
+        );
+        let data = serde_json::to_value(status)?;
+        Ok(json!({
+            "content":[{"type":"text","text":data.to_string()}],
+            "structuredContent":data,
+            "isError":false
+        }))
     }
 
     pub async fn screenshot(&self, args: &Arguments) -> Result<Value> {
@@ -189,6 +262,14 @@ fn transport_error(err: reqwest::Error) -> anyhow::Error {
 }
 
 async fn read_response<T: DeserializeOwned>(response: Response, success_limit: usize) -> Result<T> {
+    read_reply(response, success_limit, refusal).await
+}
+
+pub(crate) async fn read_reply<T: DeserializeOwned>(
+    response: Response,
+    success_limit: usize,
+    refusal: fn(StatusCode, &str) -> &'static str,
+) -> Result<T> {
     let status = response.status();
     let limit = if status.is_success() {
         success_limit
@@ -204,7 +285,8 @@ async fn read_response<T: DeserializeOwned>(response: Response, success_limit: u
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(transport_error)?;
+        let chunk =
+            chunk.map_err(|_| anyhow!("The server did not finish delivering its response."))?;
         ensure!(
             chunk.len() <= limit - bytes.len(),
             "Server response exceeds the delivery limit."
@@ -220,7 +302,7 @@ async fn read_response<T: DeserializeOwned>(response: Response, success_limit: u
         bail!("{}", refusal(status, code));
     }
     serde_json::from_slice(&bytes)
-        .map_err(|_| anyhow!("The server returned an invalid screenshot API response."))
+        .map_err(|_| anyhow!("The server returned an invalid API response."))
 }
 
 // Give the client actionable states without forwarding arbitrary response text.

@@ -235,10 +235,11 @@ fn permitted(p: &Principal) -> bool {
 }
 
 pub(crate) async fn capabilities(ApiUser(p): ApiUser) -> Json<Value> {
-    Json(json!({ "support_screenshot": permitted(&p) }))
+    let allowed = permitted(&p);
+    Json(json!({ "support_screenshot": allowed, "support_session_status": allowed }))
 }
 
-async fn owner_org(state: &Shared, p: &Principal, id: Uuid) -> AppResult<Uuid> {
+async fn owner_session(state: &Shared, p: &Principal, id: Uuid) -> AppResult<(Uuid, String, bool)> {
     // Both browser and API callers must own this support session and still see its organization.
     let (all, orgs) = p.scope();
     let row: Option<(Uuid, String, bool)> = sqlx::query_as(
@@ -252,11 +253,58 @@ async fn owner_org(state: &Shared, p: &Principal, id: Uuid) -> AppResult<Uuid> {
     .bind(orgs)
     .fetch_optional(&state.db)
     .await?;
-    match row {
-        None => Err(AppError::NotFound),
-        Some((org, status, true)) if status == "connected" => Ok(org),
-        _ => Err(unavailable("session_unavailable")),
+    row.ok_or(AppError::NotFound)
+}
+
+async fn owner_org(state: &Shared, p: &Principal, id: Uuid) -> AppResult<Uuid> {
+    let (org, status, view_only) = owner_session(state, p, id).await?;
+    if status == "connected" && view_only {
+        Ok(org)
+    } else {
+        Err(unavailable("session_unavailable"))
     }
+}
+
+pub(crate) async fn session_status(
+    State(state): State<Shared>,
+    Path(session): Path<Uuid>,
+    ApiUser(p): ApiUser,
+) -> AppResult<impl IntoResponse> {
+    let (token, _) = authorized(&p)?;
+    if !state.limiter.allow(
+        &format!("support-status:{token}"),
+        120,
+        Duration::from_secs(60),
+    ) {
+        return Err(AppError::RateLimited);
+    }
+    let (_, status, view_only) = owner_session(&state, &p, session).await?;
+    let screenshot_access = {
+        let sessions = state.support.sessions.lock().unwrap();
+        match sessions
+            .get(&session)
+            .filter(|peers| status == "connected" && view_only && peers.usable())
+        {
+            None => "unavailable",
+            Some(peers) => match &peers.screenshots.grant {
+                None => "consent_required",
+                Some(g) if g.token_id != token => "unavailable",
+                Some(g) => match g.decision {
+                    Decision::Waiting => "consent_pending",
+                    Decision::Allowed => "allowed",
+                    Decision::Revoked => "revoked",
+                },
+            },
+        }
+    };
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "session_id": session,
+            "state": status,
+            "screenshot_access": screenshot_access,
+        })),
+    ))
 }
 
 // Dropping the waiting HTTP future (including a revoked/slow request) frees the single slot.

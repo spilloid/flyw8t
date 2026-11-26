@@ -42,6 +42,17 @@ impl Audit {
         }
     }
 
+    pub(crate) fn scheduled(user: Uuid, email: &str, schedule: Uuid, action: &'static str) -> Self {
+        Self {
+            actor_type: "user",
+            actor_id: Some(user),
+            actor_label: email.to_string(),
+            channel: "scheduler",
+            credential: Some(format!("schedule:{schedule}")),
+            ..Self::base(action)
+        }
+    }
+
     pub fn device(device_id: Uuid, hostname: &str, action: &'static str) -> Self {
         Self {
             actor_type: "device",

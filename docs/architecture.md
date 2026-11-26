@@ -94,9 +94,11 @@ The center of the product. Summary here; the contract is [job-lifecycle.md](job-
 
 ## Web console (implemented)
 
-Server-rendered Leptos (SSR only, no WASM yet: [ADR-0003](decisions/ADR-0003-web-ui-ssr-first.md)). Every page is complete HTML that works without JavaScript; in-flight job pages refresh themselves with a meta refresh until the job is final. Live data and cached data are labelled differently: a connection badge comes from the live registry, and inventory says "reported by the device, collected …, cached, not live" with a freshness badge. Navigation shows only what exists: Overview, Devices, Organizations, Jobs, Support (technicians and admins), plus Audit and Administration for admins. Monitoring, Scripts and Automations from the founding brief are on the [roadmap](roadmap.md) rather than shown as empty pages.
+Server-rendered Leptos (SSR only, no WASM yet: [ADR-0003](decisions/ADR-0003-web-ui-ssr-first.md)). Every page is complete HTML that works without JavaScript; in-flight job pages refresh themselves with a meta refresh until the job is final. Live data and cached data are labelled differently: a connection badge comes from the live registry, and inventory says "reported by the device, collected …, cached, not live" with a freshness badge. Navigation shows only what exists: Overview, Devices, Organizations, Jobs, Support (technicians and admins), plus Audit and Administration for admins. Technicians can view individual device activity in their assigned organizations. Device activity links to linked screen shares when the viewer is the owner or an administrator. Monitoring, Scripts and Automations from the founding brief are on the [roadmap](roadmap.md) rather than shown as empty pages.
 
 Validated by `tests/ui_capture.rs` (STD-008): 16 pages × 3 widths × 2 color schemes in headless Chrome, failing on horizontal overflow or any browser error.
+
+Device monitoring shows the latest stored report and charts the most recent 24 snapshots in receipt order. The agent collects inventory on connection and periodically while connected. **Refresh data** queues the existing allowlisted inventory job. Its verified result joins the same history, and the device page tracks the pending job while the agent is connected.
 
 ## Attended support (implemented: browser screen view)
 

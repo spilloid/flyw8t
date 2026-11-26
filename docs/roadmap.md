@@ -17,6 +17,12 @@ Diagnostics stay allowlisted. Scripts follow [ADR-0014](decisions/ADR-0014-scrip
 
 ## Device operations and audit
 
+The 0.2.0 sprint scope was set on 2026-11-26. It includes a device workspace centered on stored telemetry and connection actions, an [audited background PowerShell terminal](background-terminal.md) through the enrolled agent, approved scripts with field inputs and scheduling, actual technician session evidence, and consented MCP screenshot and input operations. The background terminal acceptance test is software installation by an authorized technician while the employee stays in a meeting. The combined Windows workflow needs physical acceptance. The foundation checks below still apply to the capabilities they cover.
+
+Opening a discovered asset's web interface through an opted-in device belongs under Network. See the [proposed node selection flow](network-operations.md#proposed-network-node-selection).
+
+Windows packaging acceptance includes a [silent site package rollout](deployment.md#silent-deployment-from-a-site-enrollment-package) in managed deployment, an agent check-in and a repeat install that preserves identity.
+
 Company, site and device custom fields already ship. An administrator defines them in **Administration → Custom fields**. Technicians can edit values where the definition allows it. A device value overrides site, company and global values, and each change has a history entry.
 
 1. **Device activity.** Show existing agent and operator audit events alongside the device's job history. Record actual technician connection, disconnect and session identity when the remote desktop path reports them. A console launch request establishes operator intent. A session connection requires separate evidence.
@@ -48,6 +54,8 @@ does not renumber the full milestones below or promise a delivery date.
 | **1.0.0: Supported release** | Verified artifacts, supported upgrades, recovery and support documentation. | Close all gates with evidence; pass final release review. |
 
 Work already underway may finish before its milestone. A script library or server helper handshake does not prove the complete remediation or remote-control workflow.
+
+Bring the first Windows [signed agent auto-update](decisions/ADR-0008-agent-updates.md#fleet-policy) pilot forward after 0.2.0. Automatic updates default on once the signed updater ships. Administrators can turn them off for an organization or a device. The 0.6.0 milestone still covers the full fleet lifecycle.
 
 ## 0.2.0 gate and first sprint
 

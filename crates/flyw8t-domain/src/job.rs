@@ -114,7 +114,7 @@ impl ExecState {
         use ExecState::*;
         let finals = |t: ExecState| matches!(t, Completed | Failed | TimedOut | Cancelled);
         match self {
-            Created => matches!(to, Authorized | Cancelled),
+            Created => matches!(to, Authorized | Cancelled | Expired),
             Authorized => matches!(to, Queued | Cancelled),
             Queued => matches!(to, Dispatched | Cancelled | Expired),
             // Back to Queued only when the agent says it did not accept the offer.
@@ -232,7 +232,7 @@ pub enum Verification {
     Verified,
     /// Execution completed but the evidence does not satisfy the contract.
     Failed,
-    /// Execution did not complete, so there is nothing to verify.
+    /// The action has no separate verification step, or execution did not complete.
     NotApplicable,
 }
 
@@ -295,7 +295,12 @@ pub fn outcome(state: ExecState, verification: Verification) -> Outcome {
             Tone::Failed,
             "The device ran the action, but the result does not satisfy the success contract.",
         ),
-        (Completed, _) => o(
+        (Completed, Verification::NotApplicable) => o(
+            "Completed",
+            Tone::Neutral,
+            "The device reported completion. Review the reported result for details.",
+        ),
+        (Completed, Verification::Pending) => o(
             "Completed, verifying",
             Tone::InProgress,
             "The device reported completion; its evidence has not been evaluated yet.",
@@ -372,9 +377,13 @@ mod tests {
     }
 
     #[test]
-    fn expired_only_from_queued() {
+    fn expired_only_before_dispatch() {
         for from in ALL_STATES {
-            assert_eq!(from.can_transition_to(Expired), from == Queued, "{from:?}");
+            assert_eq!(
+                from.can_transition_to(Expired),
+                matches!(from, Created | Queued),
+                "{from:?}"
+            );
         }
     }
 
@@ -515,6 +524,17 @@ mod tests {
             }),
             Failed
         );
+    }
+
+    #[test]
+    fn completion_without_verification_has_a_final_label() {
+        let completed = outcome(Completed, Verification::NotApplicable);
+        assert_eq!(completed.label, "Completed");
+        assert_eq!(completed.tone, Tone::Neutral);
+
+        let verifying = outcome(Completed, Verification::Pending);
+        assert_eq!(verifying.label, "Completed, verifying");
+        assert_eq!(verifying.tone, Tone::InProgress);
     }
 
     #[test]

@@ -110,3 +110,11 @@ revocation, address changes, stale/replayed observations, bounded history and ac
 handoff. Its real-probe test also needs `FLYW8T_NETVIZ_PROBE` pointing to a built
 NetViz probe; it scans loopback only. `ui_capture` includes network workspace, site,
 asset and collector pages at all existing widths and themes.
+
+## Proposed Network node selection
+
+From **Network**, open a discovered asset and choose **Open web interface**. Show eligible enrolled devices for that site as network nodes. A node appears only after its owner opts it in, and the technician sees which node and web interface will be used before connecting.
+
+Keep the session scoped to the selected asset's observed HTTP or HTTPS interface and the technician's organization and site access. Recheck the node's opt-in and connection at launch. Record the operator, node, asset, destination interface and outcome. The existing PortGlass handoff continues to use its site's pinned probe and its own access policy.
+
+**Browser links** in Windows Technician registers the local `flyw8t://` launcher for desktop actions. Node selection belongs on the Network asset page.
