@@ -1563,6 +1563,11 @@ pub(crate) fn revealed_box(r: RevealedSecret) -> impl IntoView {
                 </div>
                 <h3>"On the Windows device"</h3>
                 <p>"Under "<a href="#enroll-device">"Manual setup downloads"</a>", save the signed agent and SHA256SUMS to the same folder. Open PowerShell as administrator in that folder."</p>
+                <p><a href="/downloads/Install-Flyw8t.ps1" download="Install-Flyw8t.ps1">"Download setup file"</a>" and save it beside the agent and SHA256SUMS. Run this command, then paste the token at the prompt."</p>
+                <pre class="output"><code>{r".\Install-Flyw8t.ps1"}</code></pre>
+                <p class="hint">"If Windows blocks unsigned scripts, follow the "
+                    <a href="https://github.com/spilloid/flyw8t/blob/main/docs/beta-trial.md#2-enroll-the-agent-locally">"manual signed-agent instructions"</a>"."</p>
+                <details><summary>"Manual setup commands"</summary>
                 <label for="enrollment-commands">"PowerShell setup commands"</label>
                 <textarea id="enrollment-commands" class="code" rows="9" wrap="off" readonly spellcheck="false">{textarea_text(&commands)}</textarea>
                 <div class="copy-controls">
@@ -1571,6 +1576,7 @@ pub(crate) fn revealed_box(r: RevealedSecret) -> impl IntoView {
                 </div>
                 <p>"Paste the commands into PowerShell. When prompted, copy and paste the enrollment token."</p>
                 <p class="hint">"To copy manually, select a field and use Ctrl+A, then Ctrl+C, or your device’s Select All and Copy commands."</p>
+                </details>
                 <p>"After setup, open "<a href="/devices">"Devices"</a>" and check for Connected · live."</p>
                 <script inner_html=crate::ENROLLMENT_COPY_JS></script>
             </section>

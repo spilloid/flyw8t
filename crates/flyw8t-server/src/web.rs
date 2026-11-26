@@ -983,6 +983,36 @@ pub async fn rename_site(
     .await
 }
 
+fn enrollment_setup(public_url: &str) -> String {
+    include_str!("enroll-windows.ps1")
+        .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+        .replace("__SERVER_URL__", &powershell_literal(public_url))
+}
+
+pub async fn download_enrollment_setup(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+) -> Response {
+    page(&p, async {
+        p.require(Permission::ManageEnrollment)?;
+        // Windows PowerShell 5.1 uses the BOM to recognize UTF-8, including the URL.
+        let body = format!("\u{feff}{}", enrollment_setup(&state.config.public_url));
+        Ok((
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"Install-Flyw8t.ps1\"",
+                ),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response())
+    })
+    .await
+}
+
 pub async fn create_enrollment_token(
     State(state): State<Shared>,
     WebUser(p): WebUser,
@@ -1054,11 +1084,7 @@ pub async fn create_enrollment_token(
                 "Valid for {ttl_minutes} minutes and {max_uses} device(s). Whoever holds it can enroll a device into {} until then; revoke it below if it goes astray.",
                 org.name
             ),
-            commands: Some(
-                include_str!("enroll-windows.ps1")
-                    .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
-                    .replace("__SERVER_URL__", &powershell_literal(&state.config.public_url)),
-            ),
+            commands: Some(enrollment_setup(&state.config.public_url)),
             secret,
         };
         let tokens = queries::enrollment_tokens(&state, id).await?;

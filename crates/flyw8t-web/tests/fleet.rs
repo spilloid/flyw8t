@@ -485,4 +485,6 @@ fn enrollment_downloads_are_pinned_and_setup_commands_are_separate_from_the_toke
         flyw8t_web::ENROLLMENT_COPY_JS
     )));
     assert!(html.contains("Copy token") && html.contains("Copy setup commands"));
+    assert!(html.contains("href=\"/downloads/Install-Flyw8t.ps1\""));
+    assert!(html.contains(r".\Install-Flyw8t.ps1"));
 }

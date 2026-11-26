@@ -91,6 +91,16 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
   const text = await evaluate('document.querySelector("#enrollment-commands").value');
   assert.ok(typeof text === 'string' && lines(text) === expected, 'Displayed commands differ from the reviewed local template');
 
+  await call('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+  await evaluate('document.querySelector(\'a[download="Install-Flyw8t.ps1"]\').click()');
+  const setup = path.join(dir, 'Install-Flyw8t.ps1');
+  await waitFor(async () => {
+    try { await fs.access(setup); return true; }
+    catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  }, 'Browser did not save the setup file');
+  assert.ok(lines(await fs.readFile(setup, 'utf8')) === '\uFEFF' + expected,
+    'Downloaded setup file differs from the reviewed template');
+
   // Copy only the setup commands to the disposable user's clipboard. Read the token from DOM
   // into process memory separately, just as the person supplies it at the secure prompt.
   await call('Browser.grantPermissions', { origin, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
@@ -106,9 +116,8 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
   assert.ok(typeof token === 'string' && /^fw8e_[A-Za-z0-9_-]{43}$/.test(token), 'Single-use token missing');
 
   try {
-    // Preserve the copied block, including its actual signature/hash checks and service install.
-    // Supply only its interactive Read-Host response, once, inside this PowerShell process.
-    powershell('Run signed enrollment commands', [
+    // Exercise the actual browser download and supply only its one interactive token prompt.
+    powershell('Run downloaded enrollment file', [
       "$trialSecret = ConvertTo-SecureString $env:FLYW8T_TRIAL_INPUT -AsPlainText -Force",
       'Remove-Item Env:FLYW8T_TRIAL_INPUT',
       '$script:reads = 0',
@@ -116,7 +125,7 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
       "  if (!$AsSecureString -or $script:reads -ne 0 -or $Prompt -cne 'Paste the enrollment token from the console') { throw 'Unexpected prompt' }",
       '  $script:reads++; return $trialSecret.Copy()',
       '}',
-      copied,
+      '& .\\Install-Flyw8t.ps1',
       "$trialSecret.Dispose(); if ($script:reads -ne 1) { throw 'Expected one secure prompt' }"
     ].join('\n'), { FLYW8T_TRIAL_INPUT: token });
 
@@ -160,7 +169,7 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
     ]);
     const finding = await evaluate('document.querySelector("#console-finding")?.textContent');
     assert.ok(observations.has(finding), 'The signed Windows service must answer the physical console check');
-    console.log('Verified signed enrollment, Running service and matching device console reply (' + observations.get(finding) + ').');
+    console.log('Verified signed agent enrollment from the downloaded setup file, Running service and matching device console reply (' + observations.get(finding) + ').');
   } finally {
     // The preflight required an empty service, program and state location. Check the registered
     // executable and its digest again before uninstalling the service created by this trial.
