@@ -279,7 +279,11 @@ pub async fn device_activity(
         "WITH scoped_device AS (
              SELECT id, organization_id FROM devices WHERE id = $1 AND ($2 OR organization_id = ANY($3))
          ), device_jobs AS (
-             SELECT j.id, j.organization_id, j.action
+             SELECT j.id, j.organization_id,
+                    CASE WHEN j.action = 'script.run' THEN
+                        coalesce((j.request ->> 'script') || ' · revision ' ||
+                                 (j.request ->> 'revision'), j.action)
+                    ELSE j.action END AS action
                FROM jobs j JOIN scoped_device d ON j.device_id = d.id AND j.organization_id = d.organization_id
          ), activity AS (
              SELECT a.at, 0::smallint AS source, a.id, a.actor_label AS actor, a.action, a.outcome,
@@ -333,6 +337,7 @@ pub async fn device_activity(
                 "device.physical_console.requested" => "Physical console check requested",
                 "device.physical_console.result" => "Physical console check recorded",
                 "job.create" => "Job requested",
+                "job.authorize" => "Script run authorization submitted",
                 "job.cancel" => "Job cancellation requested",
                 "dispatched" => "Job dispatched",
                 "acknowledged" => "Agent accepted the job",

@@ -146,6 +146,8 @@ pub async fn upload_version(
                 return back("trust-refused");
             }
         };
+        let mut tx = state.db.begin().await?;
+        crate::auth::recheck_actor(&mut tx, &p, None, true).await?;
         let inserted = sqlx::query(
             "INSERT INTO trust_versions (version, deployment_id, hash, body, uploaded_by) VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT DO NOTHING",
@@ -155,15 +157,16 @@ pub async fn upload_version(
         .bind(v.hash.0.to_vec())
         .bind(&text)
         .bind(p.user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
         if inserted.rows_affected() == 0 {
             return back("trust-refused");
         }
         Audit::user(&p, "trust.version.upload")
             .detail(json!({ "version": v.list.version, "hash": v.hash.to_string() }))
-            .record(&state.db)
+            .record(&mut *tx)
             .await?;
+        tx.commit().await?;
         back("trust-stored")
     })
     .await
@@ -313,7 +316,7 @@ pub async fn upload_approval(
         p.require(Permission::EditScripts)?;
         p.require_sudo(&back_to)?;
         check_csrf(&p, &form)?;
-        crate::scripts::visible(&state, &p, id).await?;
+        let org = crate::scripts::visible(&state, &p, id).await?;
         let back = |code: &str| to(format!("{back_to}?m={code}"));
         let rev = revision_for(&state, id, number).await?;
         let Some((_, head)) = head(&state.db).await? else {
@@ -327,7 +330,9 @@ pub async fn upload_approval(
             Ok(s) if a.approval.matches(&head.list.deployment_id, &rev) && s.may_approve.allows(rev.risk) => s,
             _ => return back("approval-refused"),
         };
-        sqlx::query(
+        let mut tx = state.db.begin().await?;
+        crate::auth::recheck_actor(&mut tx, &p, org, true).await?;
+        let inserted = sqlx::query(
             "INSERT INTO script_approvals (script_id, revision_number, signer_key_id, body, uploaded_by)
              VALUES ($1, $2, $3, $4, $5) ON CONFLICT (script_id, revision_number, signer_key_id) DO NOTHING",
         )
@@ -336,13 +341,18 @@ pub async fn upload_approval(
         .bind(a.approval.signer.0.to_vec())
         .bind(&text)
         .bind(p.user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
-        Audit::user(&p, "script.approve")
-            .target("script", id)
-            .detail(json!({ "revision": number, "signer": signer.key_id().to_string(), "person": signer.person_name }))
-            .record(&state.db)
-            .await?;
+        if inserted.rows_affected() > 0 {
+            let mut audit = Audit::user(&p, "script.approve")
+                .target("script", id)
+                .detail(json!({ "revision": number, "signer": signer.key_id().to_string(), "person": signer.person_name }));
+            if let Some(org) = org {
+                audit = audit.org(org);
+            }
+            audit.record(&mut *tx).await?;
+        }
+        tx.commit().await?;
         back("approval-stored")
     })
     .await

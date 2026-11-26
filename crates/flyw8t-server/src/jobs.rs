@@ -384,6 +384,7 @@ pub async fn create_script(
             "this device is retired or its credential is revoked".into(),
         ));
     }
+    crate::auth::recheck_actor(&mut tx, p, Some(org_id), false).await?;
     let actor = format!("user:{}", p.email);
     let job: JobCore = sqlx::query_as(&format!(
         "INSERT INTO jobs (id, organization_id, device_id, action, request, timeout_secs, requested_by, request_channel,
@@ -474,6 +475,7 @@ pub async fn authorize_script(
     if !p.can_see_org(job.organization_id) {
         return Err(AppError::NotFound);
     }
+    crate::auth::recheck_actor(&mut tx, p, Some(job.organization_id), false).await?;
     if job.state() != ExecState::Created {
         return Ok(Err("this run is not waiting for a signature".into()));
     }
@@ -492,6 +494,7 @@ pub async fn authorize_script(
         crate::script_runs::check_authorization(&head.list, &request, &auth, now_unix())
     {
         Audit::user(p, "job.authorize")
+            .org(job.organization_id)
             .target("job", job_id)
             .denied()
             .detail(json!({ "reason": why }))

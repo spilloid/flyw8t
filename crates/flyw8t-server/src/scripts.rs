@@ -280,10 +280,9 @@ const REVISION_COLUMNS: &str =
     "r.number, r.source, r.risk_class, r.parameters, r.content_hash, r.syntax_check, r.note, \
      u.email AS author, r.created_at";
 
-/// A script the viewer may read (global, or in one of their organizations); otherwise not found.
-/// Whether `p` may see script `id`: `NotFound` otherwise.
-pub async fn visible(state: &Shared, p: &Principal, id: Uuid) -> AppResult<()> {
-    load(state, p, id).await.map(|_| ())
+/// Return the organization of a visible script, or None for a global script.
+pub async fn visible(state: &Shared, p: &Principal, id: Uuid) -> AppResult<Option<Uuid>> {
+    load(state, p, id).await.map(|s| s.organization_id)
 }
 
 async fn load(state: &Shared, p: &Principal, id: Uuid) -> AppResult<ScriptRow> {

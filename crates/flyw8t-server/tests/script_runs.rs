@@ -283,6 +283,15 @@ async fn approved_scripts_run_and_c3_waits_for_a_signature_for_this_device() {
     assert!(loc.ends_with(&format!("/jobs/{job}")), "{loc}");
     wait_state(&server, job, "completed", Duration::from_secs(60)).await;
     assert!(output(&server, job).await.contains("marker demo"));
+    let activity = admin
+        .get(&server, &format!("/devices/{device}/activity"))
+        .await;
+    assert_eq!(activity.status, axum::http::StatusCode::OK);
+    assert!(activity.body.contains("Marker · revision 1"));
+    assert!(activity
+        .body
+        .contains("Script run authorization submitted (denied)"));
+    assert!(!activity.body.contains("marker demo"));
 
     // The agent spent that signature: re-offering the job does not run it again.
     let spent = flyw8t_agent::spent::Spent::open(&state_dir);
