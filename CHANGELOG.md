@@ -2,6 +2,11 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
+## 0.1.8 — 2026-11-26 (pre-release)
+
+- Download a Windows installer for a specific organization and site. Open it on the PC to see the destination, approve Windows elevation, and follow enrollment and service startup. Manual token setup remains available for the signed standalone download.
+- Check whether a connected Windows agent sees a physical console from its device page.
+
 ## 0.1.7 — 2026-11-20 (pre-release)
 
 - Start a Windows beta installation from **Devices → Enroll a Windows device**.

@@ -1003,12 +1003,23 @@ pub async fn create_enrollment_token(
             return Err(AppError::BadRequest("Devices must be between 1 and 100.".into()));
         }
         let site: Option<Uuid> = form.get("site").filter(|s| !s.is_empty()).map(|s| s.parse()).transpose().map_err(|_| AppError::BadRequest("Unknown site.".into()))?;
-        if let Some(s) = site {
-            if !org.sites.iter().any(|x| x.id == s) {
-                return Err(AppError::BadRequest("Unknown site.".into()));
-            }
-        }
+        let site_name = site.map(|id| {
+            org.sites.iter().find(|view| view.id == id).map(|view| view.name.clone())
+                .ok_or_else(|| AppError::BadRequest("Unknown site.".into()))
+        }).transpose()?;
+        let download = form.get("download") == Some("windows");
+        let template = if download { Some(crate::windows_installer::template(&state).await?) } else { None };
         let secret = format!("{}{}", auth::ENROLL_PREFIX, auth::random_secret(32));
+        let installer = template.map(|base| -> AppResult<Vec<u8>> {
+            let mut exe = base.to_vec();
+            flyw8t_protocol::enrollment_package::EnrollmentPackage {
+                server_url: state.config.public_url.clone(),
+                organization: org.name.clone(),
+                site: site_name,
+                token: secret.clone(),
+            }.append(&mut exe).map_err(|error| AppError::Internal(error.into()))?;
+            Ok(exe)
+        }).transpose()?;
         let mut tx = state.db.begin().await?;
         auth::recheck_actor(&mut tx, &p, Some(id), false).await?;
         let (token_id,): (Uuid,) = sqlx::query_as(
@@ -1030,6 +1041,13 @@ pub async fn create_enrollment_token(
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
+        if let Some(exe) = installer {
+            return Ok(([
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CONTENT_DISPOSITION, "attachment; filename=Flyw8t-Setup-x64.exe"),
+                (header::CACHE_CONTROL, "no-store"),
+            ], exe).into_response());
+        }
         let revealed = RevealedSecret {
             label: format!("Enrollment token for {}", org.name),
             hint: format!(

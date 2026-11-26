@@ -320,6 +320,75 @@ async fn a_new_enrollment_token_comes_with_the_commands_to_run() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn a_windows_installer_only_enrolls_into_its_selected_site() {
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Request};
+    use flyw8t_protocol::enrollment_package::EnrollmentPackage;
+    use std::io::Cursor;
+    use tower::ServiceExt;
+
+    let server = start_fresh().await;
+    let admin = server.admin_sudo().await;
+    let org = admin.create_org(&server, "Contoso").await;
+    let site: Uuid = sqlx::query_scalar(
+        "INSERT INTO sites (organization_id, name) VALUES ($1, 'Main Office') RETURNING id",
+    )
+    .bind(org)
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    let base = b"MZ synthetic test agent";
+    server
+        .state
+        .windows_agent_template
+        .set(base.to_vec())
+        .unwrap();
+    let body = format!("csrf={}&site={site}&download=windows", admin.csrf);
+    let reply = flyw8t_server::router(server.state.clone())
+        .oneshot(
+            Request::post(format!("/organizations/{org}/enrollment-tokens"))
+                .header(header::COOKIE, &admin.cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert_eq!(reply.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(reply.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("Flyw8t-Setup-x64.exe"));
+    let bytes = to_bytes(reply.into_body(), 16 * 1024).await.unwrap();
+    let (base_len, package) = EnrollmentPackage::read(&mut Cursor::new(&bytes))
+        .unwrap()
+        .unwrap();
+    assert_eq!(base_len as usize, base.len());
+    assert_eq!(&bytes[..base_len as usize], base);
+    assert_eq!(package.organization, "Contoso");
+    assert_eq!(package.site.as_deref(), Some("Main Office"));
+    let device = TestAgent::enroll(&server.url(), &package.token)
+        .await
+        .unwrap();
+    let saved: (Uuid, Option<Uuid>) =
+        sqlx::query_as("SELECT organization_id, site_id FROM devices WHERE id = $1")
+            .bind(device.device_id)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert_eq!(saved, (org, Some(site)));
+    assert!(
+        TestAgent::enroll(&server.url(), &package.token)
+            .await
+            .is_err(),
+        "default setup allows one PC"
+    );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn a_device_past_the_first_page_is_still_found_by_filters_orders_and_the_overview() {
     let server = start_fresh().await;
     let admin = server.admin_sudo().await;
