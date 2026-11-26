@@ -13,8 +13,8 @@ use flyw8t_protocol::messages::{
     AgentMsg, DeviceFacts, ExecOutcome, Finished, JobPhase, JobReport, NotAccepted, RefusalCode,
     ServerMsg,
 };
-use flyw8t_protocol::{auth, Action, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
-use futures_util::{SinkExt, StreamExt};
+use flyw8t_protocol::{auth, Action, PhysicalConsoleState, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
+use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use ring::rand::SecureRandom;
 use rustls::ClientConfig;
 use std::collections::HashMap;
@@ -158,6 +158,7 @@ impl Agent {
                     .key
                     .sign_b64(&auth::auth_message(&nonce, self.device_id)),
                 agent_version: crate::AGENT_VERSION.to_string(),
+                physical_console_check: cfg!(windows),
             },
         )
         .await?;
@@ -184,6 +185,9 @@ impl Agent {
         let mut inventory_tick = tokio::time::interval(INVENTORY_INTERVAL);
         inventory_tick.tick().await;
         let mut last_heard = Instant::now();
+        // Replies belong only to this socket. A stalled WTS call must not hold
+        // up heartbeats or build a queue, including across a reconnect.
+        let mut console_checks = FuturesUnordered::new();
 
         loop {
             tokio::select! {
@@ -201,9 +205,30 @@ impl Agent {
                         _ => continue,
                     };
                     let msg: ServerMsg = serde_json::from_str(text.as_str()).context("malformed server message")?;
-                    for reply in self.handle(msg)? {
-                        send(&mut ws, &reply).await?;
+                    match msg {
+                        ServerMsg::CheckPhysicalConsole { request_id } => {
+                            if console_checks.is_empty() {
+                                console_checks.push(async move {
+                                    let state = crate::physical_console::check().await;
+                                    AgentMsg::PhysicalConsoleStatus { request_id, state }
+                                });
+                            } else {
+                                let reply = AgentMsg::PhysicalConsoleStatus {
+                                    request_id,
+                                    state: PhysicalConsoleState::Unavailable,
+                                };
+                                send(&mut ws, &reply).await?;
+                            }
+                        }
+                        other => {
+                            for reply in self.handle(other)? {
+                                send(&mut ws, &reply).await?;
+                            }
+                        }
                     }
+                }
+                Some(reply) = console_checks.next(), if !console_checks.is_empty() => {
+                    send(&mut ws, &reply).await?;
                 }
                 Some(event) = events.recv() => send(&mut ws, &event).await?,
                 _ = heartbeat_tick.tick() => {

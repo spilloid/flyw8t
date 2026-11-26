@@ -196,6 +196,10 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/probe/heartbeat", post(network::heartbeat))
         .route("/devices/{id}", get(web::device))
+        .route(
+            "/devices/{id}/physical-console/check",
+            post(web::check_physical_console),
+        )
         .route("/devices/{id}/jobs", post(web::run_job))
         .route("/devices/{id}/revoke", post(web::revoke_device))
         .route("/devices/{id}/edit", post(devices::edit))

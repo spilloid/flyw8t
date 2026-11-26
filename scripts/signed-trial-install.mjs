@@ -136,7 +136,31 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
       await delay(1500);
     }
     assert.ok(live, 'Newly enrolled device did not report Connected · live');
-    console.log('Verified signed enrollment from copied commands, Running service and matching live Devices entry.');
+    const deviceUrl = origin + '/devices/' + id;
+    const checkUrl = deviceUrl + '/physical-console/check';
+    const checkForm = JSON.stringify('form[method="post"][action="/devices/' + id + '/physical-console/check"]');
+    await evaluate('document.querySelector(' + selector + ').click()');
+    await waitFor(() => evaluate('location.href === ' + JSON.stringify(deviceUrl) +
+      ' && document.readyState === "complete"'), 'Enrolled device page missing');
+    await evaluate('(() => { const f = document.querySelector(' + checkForm + ');' +
+      'if (!f || f.action !== ' + JSON.stringify(checkUrl) + ' || !f.elements.csrf?.value) throw Error();' +
+      'f.requestSubmit(); return true; })()');
+    await waitFor(() => evaluate('location.href === ' + JSON.stringify(checkUrl) +
+      ' && document.readyState === "complete"'), 'Physical console check did not return');
+    assert.equal(await evaluate('document.querySelector(".crumbs")?.querySelector(' + selector + ')?.href'),
+      deviceUrl, 'Physical console result must identify the enrolled device');
+
+    // Hosted runners may be locked, lack an attached console, or return inconclusive WTS
+    // evidence. Accept only actual endpoint replies, never an unsupported or failed delivery.
+    const observations = new Map([
+      ['A user is signed in at the Windows physical console.', 'active_console'],
+      ['Windows reported no active login at the physical console.', 'no_interactive_user'],
+      ['Windows reported no attached physical console.', 'no_console'],
+      ['Windows could not determine the physical console state.', 'unavailable'],
+    ]);
+    const finding = await evaluate('document.querySelector("#console-finding")?.textContent');
+    assert.ok(observations.has(finding), 'The signed Windows service must answer the physical console check');
+    console.log('Verified signed enrollment, Running service and matching device console reply (' + observations.get(finding) + ').');
   } finally {
     // The preflight required an empty service, program and state location. Check the registered
     // executable and its digest again before uninstalling the service created by this trial.

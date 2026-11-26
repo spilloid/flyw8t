@@ -1102,6 +1102,71 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhysicalConsoleCheck {
+    Active,
+    NoActiveLogin,
+    NoConsole,
+    Unknown,
+    Unsupported,
+    Offline,
+    Busy,
+    TimedOut,
+}
+
+pub fn physical_console_result(
+    ctx: &PageCtx,
+    device_id: uuid::Uuid,
+    device_name: &str,
+    status: PhysicalConsoleCheck,
+) -> String {
+    let (finding, detail) = match status {
+        PhysicalConsoleCheck::Active => (
+            "A user is signed in at the Windows physical console.",
+            "Windows can keep a user signed in while the screen is locked. Lock state and input access are unknown.",
+        ),
+        PhysicalConsoleCheck::NoActiveLogin => (
+            "Windows reported no active login at the physical console.",
+            "A user signed in through Remote Desktop can be in a separate session.",
+        ),
+        PhysicalConsoleCheck::NoConsole => (
+            "Windows reported no attached physical console.",
+            "This can happen briefly while Windows switches sessions.",
+        ),
+        PhysicalConsoleCheck::Unknown => (
+            "Windows could not determine the physical console state.",
+            "If the device is switching sessions, give it a moment and check again.",
+        ),
+        PhysicalConsoleCheck::Unsupported => (
+            "This check requires an updated Windows agent.",
+            "Upgrade the agent on this device, then run the check again.",
+        ),
+        PhysicalConsoleCheck::Offline => (
+            "This console instance has no live connection to the agent.",
+            "Check the device’s connection before trying again.",
+        ),
+        PhysicalConsoleCheck::Busy => (
+            "The agent or console is busy.",
+            "Wait a moment, then run the check again.",
+        ),
+        PhysicalConsoleCheck::TimedOut => (
+            "The check timed out waiting for the agent.",
+            "Check the device’s connection, then try again.",
+        ),
+    };
+    let device_url = format!("/devices/{device_id}");
+    let body = view! {
+        <p class="crumbs"><a href="/devices">"Devices"</a>" / "<a href=device_url>{device_name.to_owned()}</a></p>
+        <h1>"Physical console check"</h1>
+        <section class="card" aria-labelledby="console-finding">
+            <h2 id="console-finding">{finding}</h2>
+            <p>{detail}</p>
+            <p class="muted small">"Result at "<time datetime=fmt::iso(ctx.now)>{fmt::timestamp(ctx.now)}</time></p>
+        </section>
+    };
+    shell("Physical console check", ctx, Nav::Devices, None, body)
+}
+
 pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     let now = ctx.now;
     let connected = matches!(d.row.connection, Connection::Connected { .. });
@@ -1164,6 +1229,18 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
     let title = d.row.name().to_string();
     let manage = manage_section(ctx, &d);
     let desktop = desktop_launch_section(ctx, &d);
+    let console_check = (ctx.can_support && connected && !d.row.retired && d.os_family.eq_ignore_ascii_case("windows")).then(|| {
+        view! {
+            <section class="card" aria-labelledby="console-check-title">
+                <h2 id="console-check-title">"Physical console"</h2>
+                <p>"Ask the connected agent whether a user is signed in at this PC’s physical desktop."</p>
+                <form method="post" action=format!("/devices/{}/physical-console/check", d.row.id)>
+                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                    <button type="submit">"Check physical console"</button>
+                </form>
+            </section>
+        }
+    });
     let tags = tag_chips(&d.row.tags);
     let notes = (!d.notes.is_empty())
         .then(|| view! { <dt>"Notes"</dt><dd class="notes">{d.notes.clone()}</dd> });
@@ -1182,6 +1259,7 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
         {retired_note}
         <p>{tags}</p>
+        {console_check}
         {desktop}
         {glance}
         <div class="grid">
