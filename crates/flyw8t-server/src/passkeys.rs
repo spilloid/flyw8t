@@ -143,7 +143,10 @@ fn descriptors(ids: &[Vec<u8>]) -> serde_json::Value {
 
 /// Only a verified, recent provider authentication can bootstrap a directory account's first key.
 /// The mutation calls this after locking both user and the exact presented session.
-async fn recent_provider<'e, E: sqlx::PgExecutor<'e>>(exec: E, p: &Principal) -> AppResult<bool> {
+pub(crate) async fn recent_provider<'e, E: sqlx::PgExecutor<'e>>(
+    exec: E,
+    p: &Principal,
+) -> AppResult<bool> {
     Ok(sqlx::query_as::<_,(bool,)>("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=$1 AND user_id=$2 AND auth_method='oidc' AND stage='full' AND revoked_at IS NULL AND expires_at>clock_timestamp() AND token_hash=$3 AND created_at>clock_timestamp()-interval '5 minutes' AND provider_authenticated_at BETWEEN clock_timestamp()-interval '5 minutes' AND clock_timestamp())")
         .bind(p.session_id).bind(p.user_id).bind(p.session_token.as_deref()).fetch_one(exec).await?.0)
 }
@@ -168,7 +171,11 @@ async fn new_page(state: &Shared, p: &Principal, error: Option<String>) -> AppRe
     .await?
     .0;
     if existing.is_empty() && directory && !recent_provider(&state.db, p).await? {
-        return Err(AppError::Conflict("Sign in with your organization again to add your first passkey. The provider must return a recent auth_time.".into()));
+        return Ok((
+            StatusCode::CONFLICT,
+            Html(flyw8t_web::passkey_reauth_page()),
+        )
+            .into_response());
     }
     let (_, rp_id) = rp(state)?;
     let challenge = new_challenge(state, p, "register").await?;

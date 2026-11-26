@@ -1357,6 +1357,13 @@ async fn admin_view(
     let users = queries::users(state).await?;
     let tokens = queries::api_tokens(state).await?;
     let orgs = queries::org_refs(state, p).await?;
+    let reauth_for_mcp = if state.config.oidc.is_some() && !p.sudo {
+        let mut db = state.db.acquire().await?;
+        crate::directory::is_directory(&mut db, p.user_id).await?
+            && !crate::passkeys::recent_provider(&mut *db, p).await?
+    } else {
+        false
+    };
     let mut resp = Html(flyw8t_web::admin_page(
         &ctx(p, flash(flash_code)),
         users,
@@ -1364,6 +1371,7 @@ async fn admin_view(
         orgs,
         revealed.clone(),
         state.config.oidc.is_some(),
+        reauth_for_mcp,
     ))
     .into_response();
     if revealed.is_some() {
@@ -1446,7 +1454,6 @@ pub async fn create_api_token(
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
         p.require(Permission::ManageUsers)?;
-        p.require_sudo("/admin")?;
         let name = clean_name(form.get("name"))?;
         let mut scopes: Vec<String> = form.all("scope").into_iter().filter(|s| matches!(*s, "read" | "jobs:run" | "support:screenshot")).map(String::from).collect();
         scopes.sort();
@@ -1459,7 +1466,14 @@ pub async fn create_api_token(
         let secret = format!("{}{body}", auth::TOKEN_PREFIX);
         let prefix: String = body.chars().take(8).collect();
         let mut tx = state.db.begin().await?;
-        auth::recheck_actor(&mut tx, &p, None, true).await?;
+        let sso_screenshot = scopes == ["support:screenshot"] && !p.sudo
+            && state.config.oidc.is_some() && crate::directory::is_directory(&mut tx, p.user_id).await?;
+        if !sso_screenshot { p.require_sudo("/admin")?; }
+        auth::recheck_actor(&mut tx, &p, None, !sso_screenshot).await?;
+        if sso_screenshot && !crate::passkeys::recent_provider(&mut *tx, &p).await? {
+            return to("/login/oidc?resume=mcp");
+        }
+        let days = if sso_screenshot { days.min(30) } else { days };
         let (tid,): (Uuid,) = sqlx::query_as(
             "INSERT INTO api_tokens (user_id, name, prefix, token_hash, scopes, expires_at)
              VALUES ($1, $2, $3, $4, $5, now() + make_interval(days => $6)) RETURNING id",

@@ -82,6 +82,7 @@ pub fn validate_url(raw: &str) -> anyhow::Result<reqwest::Url> {
 const TTL: Duration = Duration::from_secs(300);
 const MAX_RESPONSE: usize = 1024 * 1024;
 struct Flow {
+    resume: Option<Resume>,
     browser_hash: Vec<u8>,
     nonce: Nonce,
     verifier: PkceCodeVerifier,
@@ -222,8 +223,21 @@ impl<'c> openidconnect::AsyncHttpClient<'c> for Transport {
     }
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Resume {
+    Mcp,
+    Passkey,
+}
+
+#[derive(Deserialize)]
+pub struct StartQuery {
+    resume: Option<Resume>,
+}
+
 pub async fn start(
     State(state): State<Shared>,
+    Query(query): Query<StartQuery>,
     crate::client_ip::ClientIp(ip): crate::client_ip::ClientIp,
 ) -> Response {
     let result: AppResult<Response> = async {
@@ -252,7 +266,11 @@ pub async fn start(
             .add_scope(Scope::new("email".into()))
             .add_scope(Scope::new("profile".into()))
             .add_scope(Scope::new("groups".into()))
-            .set_max_age(TTL)
+            .set_max_age(if query.resume.is_some() {
+                Duration::ZERO
+            } else {
+                TTL
+            })
             .set_pkce_challenge(challenge)
             .url();
         let browser = auth::random_secret(32);
@@ -269,6 +287,7 @@ pub async fn start(
             flows.insert(
                 auth::digest(csrf.secret()),
                 Flow {
+                    resume: query.resume,
                     browser_hash: auth::digest(&browser),
                     nonce,
                     verifier,
@@ -464,7 +483,17 @@ pub async fn callback(
         let cookie = cookie.ok_or(AppError::Unauthorized)?;
         // Commit a same-origin document before navigation: a redirect chain originating
         // at a cross-site IdP suppresses Strict cookies even on the final same-origin hop.
-        let mut response = Html(flyw8t_web::oidc_complete_page()).into_response();
+        let (href, label) = match flow.resume {
+            Some(Resume::Mcp) => ("/admin#mcp-client", "Continue to MCP setup"),
+            Some(Resume::Passkey) => ("/account/passkeys/new", "Continue to add a passkey"),
+            None => ("/", "Continue to flyw8t"),
+        };
+        let mut response = Html(flyw8t_web::oidc_return_page(
+            href,
+            label,
+            flow.resume.is_some() && auth_at.is_none(),
+        ))
+        .into_response();
         response.headers_mut().append(
             header::SET_COOKIE,
             cookie.parse().map_err(|_| provider_failed())?,
@@ -562,6 +591,7 @@ mod flow_expiry_tests {
             auth::digest("state"),
             Flow {
                 browser_hash: auth::digest("browser"),
+                resume: None,
                 nonce: Nonce::new("nonce".into()),
                 verifier: PkceCodeVerifier::new("v".repeat(43)),
                 expires: Instant::now() - Duration::from_secs(1),
