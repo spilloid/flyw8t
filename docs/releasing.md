@@ -34,8 +34,11 @@ It downloads the signing job's executables, verifies them, starts the candidate
 console on loopback and exercises the links in a new Chrome profile. Use the same
 sequence for a hands-on check or to investigate a failed automatic run.
 
-The same signing rehearsal enrolls its disposable Windows runner in a loopback
-console using the signed agent and the setup file downloaded from the enrollment form. It also checks the clipboard fallback against the reviewed setup template.
+The same signing rehearsal checks the downloaded setup file and the clipboard
+against the reviewed template. It enrolls its disposable Windows runner in a
+loopback console using the signed agent and the downloaded file. If runner policy
+refuses the file before the enrollment prompt, it exercises the verified clipboard
+commands under the existing policy.
 It checks the Windows service status and the device's live row, then uninstalls
 that service. No operator or customer endpoint is part of the rehearsal.
 
