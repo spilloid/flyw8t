@@ -189,6 +189,12 @@ New validation mechanisms: Compose CI now has a real packaged-server/MFA/record/
 
 CI follow-up: all five jobs passed on implementation ref **a48f7e6**, [run 43171178365](https://github.com/spilloid/flyw8t/actions/runs/43171178365): Windows, Linux PostgreSQL/protocol/TLS/browser/UI, the actual packaged Compose startup/MFA/record/empty-database-restore round-trip, Mac probe compilation/ad-hoc signature verification, and standards. This is the first recorded Compose sign-in/restore evidence. Physical Mac permission/session testing, Windows enrollment against Compose, off-host/key recovery, power-loss/disk-exhaustion drills and independent adversarial review remain open. The observation probe's compile success does not pass G02-MAC.
 
+## Enrolled console and Windows sign-in proof, 2026-11-26
+
+The [Windows CI rerun](https://github.com/spilloid/flyw8t/actions/runs/44963538122) passed on the exact head of [PR #62](https://github.com/spilloid/flyw8t/pull/62), including an enrolled agent answering the device page over its authenticated socket. The review checked role and tenant scope, old-agent compatibility, and how replacement sockets and timeouts retire in-flight checks. The result establishes console presence on a Windows runner.
+
+The separate [Windows sign-in frame probe](../scripts/windows-secure-desktop-probe/README.md) passed Clippy for the Windows MSVC target. Its Windows test checks refusal outside the active sign-in desktop. Positive frame acquisition needs an agent-supervised run on the physical pilot at sign-in. Media transport and input remain open under the [Windows stable beta gate](roadmap.md#windows-stable-beta-gate).
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
