@@ -323,6 +323,14 @@ pub struct DeviceDetail {
     pub fields: Vec<ResolvedField>,
 }
 
+pub struct DeviceActivityEvent {
+    pub at: OffsetDateTime,
+    pub action: String,
+    pub actor: String,
+    pub job: Option<Uuid>,
+    pub job_action: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct JobRow {
     pub id: Uuid,

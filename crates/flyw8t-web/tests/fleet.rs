@@ -161,7 +161,7 @@ fn physical_console_result_distinguishes_observations_from_agent_delivery_failur
 fn device_page_opens_only_the_explicit_desktop_modes() {
     let context = ctx();
     let mut d = windows_device(seen(Duration::hours(1)));
-    let modes = ["assist", "console", "sign-in"];
+    let modes = ["assist", "console", "sign-in", "terminal"];
     // A friendly name is not the network address; agent presence is independent of RDP reachability.
     d.row.display_name = Some("Operator's workstation".into());
     for host in ["WS-01", "ws-01.lab.example.", "192.0.2.8"] {
@@ -485,4 +485,6 @@ fn enrollment_downloads_are_pinned_and_setup_commands_are_separate_from_the_toke
         flyw8t_web::ENROLLMENT_COPY_JS
     )));
     assert!(html.contains("Copy token") && html.contains("Copy setup commands"));
+    assert!(html.contains("href=\"/downloads/Install-Flyw8t.ps1\""));
+    assert!(html.contains(r".\Install-Flyw8t.ps1"));
 }

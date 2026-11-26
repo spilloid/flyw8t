@@ -16,7 +16,7 @@ Sign in to your organization's flyw8t console as an administrator or an assigned
 
 The download links in your console match its release. Choose **flyw8t-agent** for the endpoint and **flyw8t-technician** for your workstation. Each Windows x64 filename ends in `x86_64-pc-windows-msvc.exe`. Download **SHA256SUMS** from the same release as the executable. [All beta releases and checksums](https://github.com/spilloid/flyw8t/releases)
 
-Use a folder you control. The console's **Copy setup commands** flow verifies the agent for you. For the Technician app or a manual agent install, verify the download before opening it.
+Use a folder you control. The console's setup file and its clipboard fallback both verify the agent. For the Technician app or a manual agent install, verify the download before opening it.
 
 <details>
 <summary>Verify a Windows download manually</summary>
@@ -46,12 +46,14 @@ if ($sig.Status -ne 'Valid' -or !$sig.TimeStamperCertificate -or
 
 1. Open **Devices → Enroll a Windows device** and choose the organization that owns this PC. An administrator can create an organization in **Organizations**.
 2. On the Windows PC, save the signed Windows agent and **SHA256SUMS** in the same folder. Expand **Manual setup downloads** if that section is shown. Keep both filenames. Select a site if needed, leave **Devices** at **1**, and create a manual enrollment token. Keep the page open.
-3. Open PowerShell **as Administrator** in the download folder. Select **Copy setup commands** in the console, then paste and run the block. When PowerShell asks, select **Copy token** and paste it at the prompt. Setup verifies the download, enrolls this PC, and starts the Windows service. Copy the device ID printed during enrollment.
+3. Save **Download setup file** beside the agent and SHA256SUMS. Open PowerShell **as Administrator** in that folder and run `.\Install-Flyw8t.ps1`. Paste the token at the prompt. Setup verifies the signed download, enrolls the PC, and starts the service. Copy the device ID it prints.
+
+   **Copy setup commands** is available under **Manual setup commands**. If Windows policy blocks unsigned scripts, follow the manual enrollment commands below with your current execution policy.
 
 Open **Devices** and look for **Connected · live** next to this PC. If the agent reports an existing identity, preserve its state and follow the [existing enrollment instructions](deployment.md#existing-test-enrollment).
 
 <details>
-<summary>Manual enrollment for v0.1.6 or a private certificate authority</summary>
+<summary>Manual enrollment for restricted PowerShell, v0.1.6, or a private certificate authority</summary>
 
 Open **Organizations**, choose the organization, set **Devices** to **1** and select **Create enrollment token**. Verify the download using the manual check above and rename it to `flyw8t-agent.exe`. Open an elevated PowerShell in that folder. Enter your console URL and paste the token when prompted. For a private CA, add `--ca-cert .\ca.pem` to the enrollment command and put your administrator's CA certificate at that path.
 
@@ -100,6 +102,10 @@ On the Windows device page, choose a mode under **Open in Flyw8t Technician**. A
 | **Windows sign-in** | **Connect** opens a native RDP sign-in using Windows credentials. It can resume an existing session or lock the physical desktop. Clipboard redirection follows your choice and the host policy. |
 
 The agent connects outbound to the server and can check in from behind NAT. Native desktop access separately requires a route from the technician's PC to the Windows host, typically over the LAN or VPN, and the appropriate Windows permissions. For attended viewing across networks, use **Support** to invite the person to choose a tab, window or screen. The browser viewer uses WebRTC. A reachable TURN relay can carry the media when a direct connection fails. [Attended support and relay setup](deployment.md#attended-screen-sharing-across-networks)
+
+### SSH terminal in the next Technician build
+
+On the Windows device page, choose **Open SSH terminal**. Check the destination in Technician and choose **Open terminal**. Enter `user@host` for a different account or `user@host:port` for a different SSH port. Windows OpenSSH prompts for host verification and authentication in a separate terminal window. The endpoint needs an existing SSH service and a network route from your workstation. Closing the terminal ends the SSH session.
 
 ## End the trial
 

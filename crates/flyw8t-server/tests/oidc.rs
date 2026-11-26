@@ -84,9 +84,12 @@ impl Fake {
         start(cfg).await
     }
     async fn flow(&self, server: &TestServer) -> (String, String) {
+        self.start_flow(server, "/login/oidc", "300").await
+    }
+    async fn start_flow(&self, server: &TestServer, path: &str, max_age: &str) -> (String, String) {
         let r = server
             .request(
-                Request::get("/login/oidc")
+                Request::get(path)
                     .header(
                         "x-test-client-ip",
                         format!(
@@ -112,7 +115,7 @@ impl Fake {
         let q: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(q["response_type"], "code");
         assert_eq!(q["code_challenge_method"], "S256");
-        assert_eq!(q["max_age"], "300");
+        assert_eq!(q["max_age"], max_age);
         assert!(q["scope"].split(' ').any(|s| s == "openid"));
         *self.state.expected.lock().unwrap() = (q["nonce"].clone(), q["code_challenge"].clone());
         (cookie, q["state"].clone())
@@ -191,6 +194,7 @@ async fn token(
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let mut claims = json!({"iss":p.issuer,"sub":"immutable-subject","aud":"flyw8t","exp":now+300,"iat":now,"auth_time":now,"nonce":expected.0,"email":"directory@example.test","email_verified":true,"name":"Directory Person","groups":["operators"]});
     match mode {
+        "totp" => claims["amr"] = json!(["pwd", "otp"]),
         "nonce" => claims["nonce"] = json!("different"),
         "issuer" => claims["iss"] = json!("https://wrong.example/"),
         "audience" => claims["aud"] = json!("wrong"),
@@ -416,6 +420,48 @@ async fn invalid_tokens_and_browser_state_never_create_a_session() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL"]
+async fn directory_admin_can_return_from_provider_otp_and_issue_a_scoped_mcp_token() {
+    let fake = Fake::start().await;
+    let server = fake.server().await;
+    mapping(&server, &fake.state.issuer, "admin").await;
+
+    let stale = fake.finish(&server, "stale_auth").await;
+    let browser = server.browser(stale.cookie().unwrap()).await;
+    let admin = browser.get(&server, "/admin").await;
+    assert!(admin.body.contains("href=\"/login/oidc?resume=mcp\""));
+    let (cookie, state) = fake
+        .start_flow(&server, "/login/oidc?resume=mcp", "0")
+        .await;
+    let result = callback(&server, &cookie, &state, "totp").await;
+    assert_eq!(result.status, StatusCode::OK);
+    assert!(result.body.contains("href=\"/admin#mcp-client\""));
+
+    let browser = server.browser(result.cookie().unwrap()).await;
+    let admin = browser.get(&server, "/admin").await;
+    assert!(admin.body.contains("Create 30-day screenshot token"));
+    let issued = browser
+        .post(
+            &server,
+            "/admin/tokens",
+            &[
+                ("scope", "support:screenshot"),
+                ("name", "TOTP client"),
+                ("ttl_days", "365"),
+            ],
+        )
+        .await;
+    assert_eq!(issued.status, StatusCode::OK);
+    assert!(issued.body.contains("fw8_"));
+    let (scopes, capped): (Vec<String>, bool) = sqlx::query_as(
+        "SELECT scopes, expires_at = created_at + interval '30 days' FROM api_tokens WHERE name = 'TOTP client'",
+    ).fetch_one(&server.state.db).await.unwrap();
+    assert_eq!(scopes, ["support:screenshot"]);
+    assert!(capped);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL"]
 async fn only_recent_provider_authentication_bootstraps_a_directory_sudo_key() {
     let fake = Fake::start().await;
     let server = fake.server().await;
@@ -424,6 +470,14 @@ async fn only_recent_provider_authentication_bootstraps_a_directory_sudo_key() {
         let r = fake.finish(&server, mode).await;
         assert_eq!(r.status, StatusCode::OK, "{}", r.body);
         let browser = server.browser(r.cookie().unwrap()).await;
+        let token = browser
+            .post(
+                &server,
+                "/admin/tokens",
+                &[("scope", "support:screenshot"), ("name", "Fixture")],
+            )
+            .await;
+        assert_eq!(token.location(), "/login/oidc?resume=mcp", "{mode}");
         assert_eq!(
             browser.get(&server, "/account/passkeys/new").await.status,
             StatusCode::CONFLICT,
@@ -451,6 +505,27 @@ async fn only_recent_provider_authentication_bootstraps_a_directory_sudo_key() {
     let r = fake.finish(&server, "valid").await;
     let browser = server.browser(r.cookie().unwrap()).await;
     let mut key = SoftKey::new(&server);
+    let token = browser
+        .post(
+            &server,
+            "/admin/tokens",
+            &[("scope", "support:screenshot"), ("name", "Fixture")],
+        )
+        .await;
+    assert_eq!(token.status, StatusCode::OK);
+    assert!(token.body.contains("fw8_"));
+    let mixed = browser
+        .post(
+            &server,
+            "/admin/tokens",
+            &[
+                ("scope", "support:screenshot"),
+                ("scope", "read"),
+                ("name", "Mixed"),
+            ],
+        )
+        .await;
+    assert!(mixed.location().starts_with("/sudo?"));
     let r = browser.add_passkey(&server, &key, &[]).await;
     assert_eq!(r.location(), "/account?m=passkey-added", "{}", r.body);
     assert!(browser.get(&server, "/sudo").await.body.contains("Confirm"));

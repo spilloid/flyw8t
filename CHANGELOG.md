@@ -5,6 +5,12 @@ All notable changes to flyw8t. Dates are UTC.
 ## Unreleased
 
 - Run approved PowerShell revisions on Windows agents with pinned script trust. The agent validates script approvals and any required run authorization before it starts the job.
+- From a saved script revision, **Edit a copy of this revision** opens its source, parameters and risk class as a draft. Saving records a new revision if the content differs from the current one.
+- Connect an attended screenshot client from Administration with a dedicated scoped token. Directory administrators can confirm this action through a fresh organization sign-in, including provider TOTP. Tokens issued this way expire within 30 days. First-passkey setup links directly to reauthentication.
+- The MCP adapter accepts `--server`, `--token-file`, and `--ca-cert` alongside the existing environment settings. Run `flyw8t-mcp --help` for the corresponding names.
+- Open an interactive SSH terminal from a Windows device page in Flyw8t Technician. The operator can sign in to an SSH-enabled host without taking over its desktop.
+- Download a PowerShell setup file for manual Windows enrollment from the signed agent download. The file prompts for the enrollment token locally.
+- Administrators can open **View device activity** on a device to see agent connections, console checks, operator actions and job events in one timeline. Open a job from the timeline for its result and evidence.
 
 ## 0.1.8 — 2026-11-26 (pre-release)
 

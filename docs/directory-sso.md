@@ -47,6 +47,12 @@ may need a separate promotion before demotion, because each reconciliation prese
 administrator. Directory accounts have immutable `(issuer, sub)` identity; an email change
 keeps that identity. A collision with another account returns a conflict, never links them.
 
+The MCP setup form accepts fresh organization authentication for a token whose sole scope is
+`support:screenshot`. The session and signed authentication time must both be less than five
+minutes old. Token creation rechecks the actor and presented session under lock. The same
+participant consent and technician-session checks apply to every screenshot. Read and job
+scopes continue to require passkey confirmation.
+
 SSO creates a full session; provider MFA replaces flyw8t TOTP for that sign-in. It does not
 grant sudo. A directory user's first flyw8t passkey requires an OIDC session whose signed
 `auth_time` and local session creation are both no more than five minutes old. A stale,

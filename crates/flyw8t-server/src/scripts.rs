@@ -729,6 +729,40 @@ pub async fn save(
     )
 }
 
+pub async fn edit_revision(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path((id, number)): Path<(Uuid, i32)>,
+) -> Response {
+    with_csp(
+        page(&p, async {
+            p.require(Permission::EditScripts)?;
+            let script = load(&state, &p, id).await?;
+            let source = revision(&state, id, Some(number))
+                .await?
+                .ok_or(AppError::NotFound)?;
+            let (base, _, _) = latest_revision(&state.db, id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            let draft = ScriptDraft {
+                base,
+                source: source.source,
+                parameters: source.parameters,
+                risk_class: source.risk_class,
+                note: format!("Based on revision {number}"),
+            };
+            let notice = Flash {
+                ok: true,
+                message: format!(
+                    "Editing a copy of revision {number}. Save to add it to the history."
+                ),
+            };
+            html(editor(&state, &p, &script, Some(notice), Some(draft)).await?)
+        })
+        .await,
+    )
+}
+
 pub async fn revision_page(
     State(state): State<Shared>,
     WebUser(p): WebUser,
@@ -765,6 +799,7 @@ pub async fn revision_page(
                 trusted,
                 rows: approvals,
             },
+            can_edit(&p),
         ))
     })
     .await

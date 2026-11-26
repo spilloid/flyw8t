@@ -454,6 +454,43 @@ pub async fn device(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct ActivityQs {
+    before: Option<String>,
+}
+
+pub async fn device_activity(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(id): Path<Uuid>,
+    Query(qs): Query<ActivityQs>,
+) -> Response {
+    page(&p, async {
+        p.require(Permission::ViewDevices)?;
+        let device = queries::device_summary(&state, &p, id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        p.require(Permission::ViewAudit)?;
+        let before = qs
+            .before
+            .as_deref()
+            .map(|value| {
+                queries::ActivityCursor::parse(value).ok_or_else(|| {
+                    AppError::BadRequest("That activity page link is invalid.".into())
+                })
+            })
+            .transpose()?;
+        let (events, older) = queries::device_activity(&state, &p, id, before).await?;
+        html(flyw8t_web::device_activity_page(
+            &ctx(&p, None),
+            &device,
+            events,
+            older.map(|cursor| cursor.as_query_value()),
+        ))
+    })
+    .await
+}
+
 // Read the device and its live enrollment again before displaying a reply. A membership change,
 // sign-out or retirement during the short agent round trip must take effect.
 async fn physical_console_target(
@@ -983,6 +1020,36 @@ pub async fn rename_site(
     .await
 }
 
+fn enrollment_setup(public_url: &str) -> String {
+    include_str!("enroll-windows.ps1")
+        .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+        .replace("__SERVER_URL__", &powershell_literal(public_url))
+}
+
+pub async fn download_enrollment_setup(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+) -> Response {
+    page(&p, async {
+        p.require(Permission::ManageEnrollment)?;
+        // Windows PowerShell 5.1 uses the BOM to recognize UTF-8, including the URL.
+        let body = format!("\u{feff}{}", enrollment_setup(&state.config.public_url));
+        Ok((
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"Install-Flyw8t.ps1\"",
+                ),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            body,
+        )
+            .into_response())
+    })
+    .await
+}
+
 pub async fn create_enrollment_token(
     State(state): State<Shared>,
     WebUser(p): WebUser,
@@ -1054,11 +1121,7 @@ pub async fn create_enrollment_token(
                 "Valid for {ttl_minutes} minutes and {max_uses} device(s). Whoever holds it can enroll a device into {} until then; revoke it below if it goes astray.",
                 org.name
             ),
-            commands: Some(
-                include_str!("enroll-windows.ps1")
-                    .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
-                    .replace("__SERVER_URL__", &powershell_literal(&state.config.public_url)),
-            ),
+            commands: Some(enrollment_setup(&state.config.public_url)),
             secret,
         };
         let tokens = queries::enrollment_tokens(&state, id).await?;
@@ -1331,6 +1394,13 @@ async fn admin_view(
     let users = queries::users(state).await?;
     let tokens = queries::api_tokens(state).await?;
     let orgs = queries::org_refs(state, p).await?;
+    let reauth_for_mcp = if state.config.oidc.is_some() && !p.sudo {
+        let mut db = state.db.acquire().await?;
+        crate::directory::is_directory(&mut db, p.user_id).await?
+            && !crate::passkeys::recent_provider(&mut *db, p).await?
+    } else {
+        false
+    };
     let mut resp = Html(flyw8t_web::admin_page(
         &ctx(p, flash(flash_code)),
         users,
@@ -1338,6 +1408,7 @@ async fn admin_view(
         orgs,
         revealed.clone(),
         state.config.oidc.is_some(),
+        reauth_for_mcp,
     ))
     .into_response();
     if revealed.is_some() {
@@ -1420,7 +1491,6 @@ pub async fn create_api_token(
         let form = Form::parse(&body);
         check_csrf(&p, &form)?;
         p.require(Permission::ManageUsers)?;
-        p.require_sudo("/admin")?;
         let name = clean_name(form.get("name"))?;
         let mut scopes: Vec<String> = form.all("scope").into_iter().filter(|s| matches!(*s, "read" | "jobs:run" | "support:screenshot")).map(String::from).collect();
         scopes.sort();
@@ -1433,7 +1503,14 @@ pub async fn create_api_token(
         let secret = format!("{}{body}", auth::TOKEN_PREFIX);
         let prefix: String = body.chars().take(8).collect();
         let mut tx = state.db.begin().await?;
-        auth::recheck_actor(&mut tx, &p, None, true).await?;
+        let sso_screenshot = scopes == ["support:screenshot"] && !p.sudo
+            && state.config.oidc.is_some() && crate::directory::is_directory(&mut tx, p.user_id).await?;
+        if !sso_screenshot { p.require_sudo("/admin")?; }
+        auth::recheck_actor(&mut tx, &p, None, !sso_screenshot).await?;
+        if sso_screenshot && !crate::passkeys::recent_provider(&mut *tx, &p).await? {
+            return to("/login/oidc?resume=mcp");
+        }
+        let days = if sso_screenshot { days.min(30) } else { days };
         let (tid,): (Uuid,) = sqlx::query_as(
             "INSERT INTO api_tokens (user_id, name, prefix, token_hash, scopes, expires_at)
              VALUES ($1, $2, $3, $4, $5, now() + make_interval(days => $6)) RETURNING id",
