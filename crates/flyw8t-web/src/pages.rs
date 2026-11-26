@@ -3312,6 +3312,7 @@ pub fn script_revision_page(
     problems: Vec<ScriptProblem>,
     missing: Vec<MissingRequired>,
     changes: Option<RevisionChanges>,
+    can_edit: bool,
 ) -> String {
     let id = s.id;
     let n = r.number;
@@ -3336,6 +3337,9 @@ pub fn script_revision_page(
     let checks = script_checks(&r, &problems, &missing);
     let download = format!("/scripts/{id}/revisions/{n}/download");
     let script_href = format!("/scripts/{id}");
+    let edit_copy = can_edit.then(|| view! {
+        <a href=format!("/scripts/{id}/revisions/{n}/edit#source")>"Edit a copy of this revision"</a>
+    });
     let note =
         (!r.note.is_empty()).then(|| view! { <dt>"What changed"</dt><dd>{r.note.clone()}</dd> });
     let params = (!r.parameters.is_empty())
@@ -3345,6 +3349,7 @@ pub fn script_revision_page(
         <p class="crumbs"><a href="/scripts">"Scripts"</a>" / "<a href=script_href>{s.name.clone()}</a>" / "</p>
         <h1>{title.clone()}</h1>
         <p>{s.language_label}" · "{script_scope(&s)}" · draft"</p>
+        {edit_copy}
         <dl class="facts card">
             <dt>"Risk class"</dt><dd>{r.risk_class.clone()}</dd>
             <dt>"Saved"</dt><dd>{r.author.clone()}" · "<time datetime=fmt::iso(r.created_at)>{fmt::timestamp(r.created_at)}</time></dd>
