@@ -21,6 +21,7 @@ fn ctx() -> PageCtx {
         now: now(),
         can_run: true,
         is_admin: true,
+        can_view_device_activity: true,
         can_enroll: true,
         can_support: true,
         can_control: true,
@@ -92,6 +93,136 @@ fn windows_device(connection: Connection) -> DeviceDetail {
         site_id: None,
         sites: Vec::new(),
         fields: Vec::new(),
+        agent_update_policy: AgentUpdatePolicy {
+            organization_enabled: true,
+            device_opted_out: false,
+        },
+    }
+}
+
+#[test]
+fn device_workspace_puts_actions_and_results_before_reference_on_small_screens() {
+    use flyw8t_domain::job::{ExecState, Verification};
+    use flyw8t_protocol::inventory::{Disk, Hardware, InventoryReport, NetworkInterface, OsInfo};
+
+    let mut d = windows_device(seen(Duration::hours(1)));
+    d.row.display_name = Some("Front desk".into());
+    d.row.site = Some("East site".into());
+    d.notes = "Bring the spare power supply.".into();
+    d.fields.push(ResolvedField {
+        id: Uuid::from_u128(20),
+        key: "service_window".into(),
+        label: "Service window".into(),
+        kind: "text".into(),
+        choices: Vec::new(),
+        value: Some(FieldValueView {
+            display: "Weekdays after 18:00".into(),
+            secret: false,
+            set_by: "ada@example.test".into(),
+            set_at: now(),
+        }),
+        source: "site",
+        own: None,
+        settable_here: true,
+        can_edit: true,
+        missing: false,
+    });
+    assert!(device_page(&ctx(), d.clone(), &[], false).contains("Awaiting first report"));
+    d.inventory = Some(InventoryView {
+        received_at: now() - Duration::hours(1),
+        source: "job".into(),
+        report: InventoryReport {
+            collected_at: now() - Duration::hours(1),
+            hostname: d.row.hostname.clone(),
+            os: OsInfo {
+                family: "windows".into(),
+                name: Some("Windows 11 Pro".into()),
+                version: None,
+                long_version: None,
+                kernel_version: Some("10.0.26100".into()),
+                arch: "x86_64".into(),
+            },
+            hardware: Hardware {
+                cpu_model: Some("Example CPU 7700".into()),
+                cpu_logical_cores: 16,
+                cpu_physical_cores: None,
+                memory_total_bytes: 32 << 30,
+                memory_available_bytes: 12 << 30,
+            },
+            disks: vec![Disk {
+                mount_point: "C:\\".into(),
+                file_system: "NTFS".into(),
+                total_bytes: 512 << 30,
+                available_bytes: 16 << 30,
+                removable: false,
+            }],
+            network: vec![NetworkInterface {
+                name: "Ethernet".into(),
+                mac: Some("02:00:00:00:00:07".into()),
+                addresses: vec!["192.0.2.43/24".into()],
+            }],
+            uptime_secs: 3700,
+            agent_version: "0.1.2".into(),
+        },
+    });
+    d.recent_jobs.push(JobRow {
+        id: Uuid::from_u128(19),
+        device_id: d.row.id,
+        hostname: d.row.hostname.clone(),
+        organization: d.row.organization.clone(),
+        action: "system.info".into(),
+        params: String::new(),
+        state: ExecState::Completed,
+        verification: Verification::Verified,
+        requested_by: "ada@example.test".into(),
+        created_at: now() - Duration::hours(1),
+        terminal_at: Some(now() - Duration::hours(1)),
+    });
+    let page = device_page(
+        &ctx(),
+        d,
+        &[
+            InventorySample {
+                received_at: now() - Duration::hours(7),
+                memory_used: Some(51),
+                disk_used: vec![("C:\\".into(), 93)],
+            },
+            InventorySample {
+                received_at: now() - Duration::hours(1),
+                memory_used: Some(62),
+                disk_used: vec![("C:\\".into(), 96)],
+            },
+        ],
+        false,
+    );
+    assert!(page.contains("Front desk"));
+    assert!(page.contains("Org / East site"));
+    assert!(page.contains("Bring the spare power supply."));
+    let position = |marker| page.find(marker).expect(marker);
+    assert!(position("Front desk") < position("Help someone"));
+    assert!(
+        position("Refresh data") < position("Help someone")
+            && position("Run approved script") < position(r#"id="device-jobs""#)
+            && position("Troubleshooting tools") > position(r#"id="device-jobs""#)
+    );
+    assert!(position(r#"id="device-jobs""#) < position(r#"id="device-reference""#));
+    assert!(position(r#"id="device-reference""#) < position(r#"id="device-management""#));
+    assert!(position(r#"id="device-management""#) < position("Service window"));
+    assert!(page.contains("Weekdays after 18:00"));
+    assert!(page.contains(r#"aria-label="Run Ping a host""#));
+    assert_eq!(page.matches(r#"class="inventory-trend""#).count(), 2);
+    assert!(page.contains("51% used"));
+    assert!(page.contains("93% used"));
+    assert!(page.contains(r#"name="return_to_device" value="yes""#));
+    assert!(page.contains(r#"class="device-button""#));
+    for detail in [
+        "Cached, not live.",
+        "Example CPU 7700",
+        "192.0.2.43/24",
+        "Succeed",
+        "NTFS",
+    ] {
+        assert!(page.contains(detail), "{detail}");
     }
 }
 
@@ -102,7 +233,7 @@ fn physical_console_check_requires_a_connected_windows_device_and_support_permis
     let path = format!("/devices/{}/physical-console/check", d.row.id);
     context.can_control = false;
     context.can_run = false;
-    let html = device_page(&context, d.clone());
+    let html = device_page(&context, d.clone(), &[], false);
     let form = html
         .split_once(&format!(r#"<form method="post" action="{path}">"#))
         .unwrap()
@@ -113,18 +244,18 @@ fn physical_console_check_requires_a_connected_windows_device_and_support_permis
     assert!(form.contains(r#"name="csrf" value="csrf""#));
     assert!(form.contains("Check physical console"));
     context.can_support = false;
-    assert!(!device_page(&context, d.clone()).contains(&path));
+    assert!(!device_page(&context, d.clone(), &[], false).contains(&path));
     context.can_support = true;
     for connection in [seen(Duration::hours(1)), Connection::NeverConnected] {
         d.row.connection = connection;
-        assert!(!device_page(&context, d.clone()).contains(&path));
+        assert!(!device_page(&context, d.clone(), &[], false).contains(&path));
     }
     d.row.connection = connected();
     d.row.retired = true;
-    assert!(!device_page(&context, d.clone()).contains(&path));
+    assert!(!device_page(&context, d.clone(), &[], false).contains(&path));
     d.row.retired = false;
     d.os_family = "linux".into();
-    assert!(!device_page(&context, d).contains(&path));
+    assert!(!device_page(&context, d, &[], false).contains(&path));
 }
 
 #[test]
@@ -166,7 +297,7 @@ fn device_page_opens_only_the_explicit_desktop_modes() {
     d.row.display_name = Some("Operator's workstation".into());
     for host in ["WS-01", "ws-01.lab.example.", "192.0.2.8"] {
         d.row.hostname = host.into();
-        let html = device_page(&context, d.clone());
+        let html = device_page(&context, d.clone(), &[], false);
         for mode in modes {
             assert!(html.contains(&format!(r#"href="flyw8t://open/{mode}?host={host}""#)));
         }
@@ -185,7 +316,7 @@ fn device_page_opens_only_the_explicit_desktop_modes() {
         "host..example",
     ] {
         d.row.hostname = host.into();
-        let html = device_page(&context, d.clone());
+        let html = device_page(&context, d.clone(), &[], false);
         for mode in modes {
             assert!(
                 html.contains(&format!(r#"href="flyw8t://open/{mode}""#)),
@@ -196,13 +327,13 @@ fn device_page_opens_only_the_explicit_desktop_modes() {
     }
     let mut readonly = ctx();
     readonly.can_support = false;
-    assert!(!device_page(&readonly, d.clone()).contains("flyw8t://"));
+    assert!(!device_page(&readonly, d.clone(), &[], false).contains("flyw8t://"));
     d.row.retired = true;
-    assert!(!device_page(&context, d.clone()).contains("flyw8t://"));
+    assert!(!device_page(&context, d.clone(), &[], false).contains("flyw8t://"));
     d.row.retired = false;
     for family in ["linux", "darwin", ""] {
         d.os_family = family.into();
-        assert!(!device_page(&context, d.clone()).contains("flyw8t://"));
+        assert!(!device_page(&context, d.clone(), &[], false).contains("flyw8t://"));
     }
 }
 
@@ -459,6 +590,7 @@ fn enrollment_downloads_are_pinned_and_setup_commands_are_separate_from_the_toke
         name: "Org".into(),
         device_count: 0,
         sites: vec![],
+        automatic_agent_updates: true,
         created_at: now(),
     };
     let revealed = RevealedSecret {

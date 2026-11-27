@@ -19,3 +19,4 @@ base64.workspace = true
 hex.workspace = true
 ed25519-dalek.workspace = true
 p256.workspace = true
+semver = "1"

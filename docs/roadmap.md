@@ -4,6 +4,19 @@
 
 On 2026-11-26 the operator scoped the **0.2.0 pre-release** to Windows agent setup and enrollment, including silent deployment of a site package. Broader foundation checks remain listed below with their own evidence requirements.
 
+## 0.3.0 sprint acceptance
+
+- [x] Device workspace with stored inventory trends and a refresh action.
+- [x] Approved scripts with one-time and recurring schedules, delivery windows, and run-on-reconnect.
+- [x] Device Activity with operator and job evidence, including linked browser screen-share activity.
+- [ ] Background PowerShell on an enrolled Windows PC, including interactive prompts and Ctrl+C while the employee continues working.
+- [ ] Quiet enrollment and a site-specific Intune Win32 assignment that detects the signed installation and preserves device identity on retry.
+- [ ] Browser remote control, consented MCP screenshot and input tools, and Network access through a selected opted-in device.
+- [ ] Default-on signed agent updates, including device and organization opt-outs, reconnect evidence, and rollback.
+- [ ] Live Windows acceptance, a verified GitHub release, and the HomeLab rollout.
+
+The first three items have local candidate evidence. Repeat their checks against the release commit. The Device Activity scope above covers browser screen sharing. Native desktop session evidence is part of the browser and Windows acceptance work still underway.
+
 ## Product contract
 
 | Release | Required scope |
@@ -18,6 +31,16 @@ Use the shared in-house flyw8t-desktop engine for the temporary attended helper 
 Diagnostics stay allowlisted. Scripts follow [ADR-0014](decisions/ADR-0014-scripts-and-custom-fields.md) and [ADR-0015](decisions/ADR-0015-script-trust-and-running.md): agent-side verification, keys outside the server and explicit approval rules. Remote input and updates need their own reviewed authorization and compromise models; script signatures do not protect them automatically.
 
 ## Device operations and audit
+
+The fleet follow-up includes a device workspace centered on stored telemetry and connection actions, an [audited background PowerShell terminal](background-terminal.md) through the enrolled agent, approved scripts with field inputs and scheduling, actual technician session evidence, and consented MCP screenshot and input operations. The background terminal acceptance test is software installation by an authorized technician while the employee stays in a meeting. The combined Windows workflow needs physical acceptance.
+
+The next desktop pilot targets a browser viewer on a Mac and one enrolled Windows PC. Verify consented keyboard and mouse control and actual connection events in Device Activity. Windows pre-login console access has its own physical acceptance check.
+
+Generate a site-scoped Intune Win32 kit from the same installer and deployment settings. Use the [SpoolSmith package workflow](https://github.com/spilloid/spoolsmith/blob/56801b87d0a4b334f3c459980549cb5682595ecd/docs/intune-deployment.md) as the reference for review, packaging and detection. Verify a real Intune rollout to the selected site, delayed enrollment and a repeat install that preserves device identity.
+
+Opening a discovered asset's web interface through an opted-in device belongs under Network. See the [proposed node selection flow](network-operations.md#proposed-network-node-selection).
+
+Windows packaging acceptance includes a [silent site package rollout](deployment.md#silent-deployment-from-a-site-enrollment-package) in managed deployment, an agent check-in and a repeat install that preserves identity.
 
 Company, site and device custom fields already ship. An administrator defines them in **Administration → Custom fields**. Technicians can edit values where the definition allows it. A device value overrides site, company and global values, and each change has a history entry.
 
@@ -50,6 +73,8 @@ does not renumber the full milestones below or promise a delivery date.
 | **1.0.0: Supported release** | Verified artifacts, supported upgrades, recovery and support documentation. | Close all gates with evidence; pass final release review. |
 
 Work already underway may finish before its milestone. A script library or server helper handshake does not prove the complete remediation or remote-control workflow.
+
+Bring the first Windows [signed agent auto-update](decisions/ADR-0008-agent-updates.md#fleet-policy) pilot forward after 0.2.0. Automatic updates default on once the signed updater ships. Administrators can turn them off for an organization or a device. The 0.6.0 milestone still covers the full fleet lifecycle.
 
 ## 0.2.0 gate and first sprint
 

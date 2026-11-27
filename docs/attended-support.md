@@ -14,6 +14,8 @@
 
 An optional screenshot request asks the participant to allow the named AI client to receive still images. Turning screenshots off leaves ordinary screen sharing available. Each screenshot goes from the owning technician's video element to the MCP adapter in an encrypted one-shot response through the control plane. [MCP setup and data handling](mcp.md)
 
+From an active enrolled device, **Start attended screen share** preselects the device and its organization for a view-only invitation. The participant chooses the source in their browser. The linked device identifies the technician's selected record. Once both current peers report media after consent, **Device activity** records **Linked screen share connected**. It records **Linked screen share ended** when that connected session ends. Each entry identifies the technician and links to the support session. Windows Technician's direct RDP and SSH paths use separate client connections and need their own authenticated session reporting.
+
 ## Two kinds of attended help, never confused
 
 | | **Browser screen view** (Phase B) | **Temporary native helper** (Phase C, proposed) |

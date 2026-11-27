@@ -9,6 +9,7 @@
 // tuple type would move the column list away from the SELECT it must match.
 #![allow(clippy::type_complexity)]
 
+mod agent_update_policy;
 pub mod api;
 pub mod audit;
 pub mod auth;
@@ -29,12 +30,16 @@ pub mod queries;
 pub mod ratelimit;
 pub mod registry;
 pub mod remote_access;
+pub mod schedules;
 pub mod scim;
 pub mod script_check;
+pub mod script_runs;
 pub mod scripts;
 pub mod sessions;
 pub mod support;
+mod terminal_admission;
 pub mod totp;
+pub mod trust;
 pub mod users;
 pub mod web;
 mod windows_installer;
@@ -62,6 +67,7 @@ pub struct AppState {
     pub limiter: ratelimit::RateLimiter,
     pub remote_access: Box<dyn remote_access::RemoteAccessProvider>,
     pub support: support::SupportHub,
+    terminal_admissions: terminal_admission::Admissions,
     pub started_unix: u64,
     pub bodies: BodyGate,
     pub oidc_flows: oidc::Flows,
@@ -95,6 +101,7 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         limiter: Default::default(),
         remote_access: Box::new(remote_access::NotConfigured),
         support: Default::default(),
+        terminal_admissions: Default::default(),
         started_unix: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
         bodies: BodyGate::default(),
         oidc_flows: Default::default(),
@@ -204,9 +211,21 @@ pub fn router(state: Shared) -> Router {
             "/devices/{id}/physical-console/check",
             post(web::check_physical_console),
         )
+        .route(
+            "/devices/{id}/background-terminal/check",
+            post(terminal_admission::check),
+        )
+        .route(
+            "/devices/{id}/background-terminal/admission",
+            post(terminal_admission::confirm),
+        )
         .route("/devices/{id}/jobs", post(web::run_job))
         .route("/devices/{id}/revoke", post(web::revoke_device))
         .route("/devices/{id}/edit", post(devices::edit))
+        .route(
+            "/devices/{id}/agent-update-policy",
+            post(agent_update_policy::device),
+        )
         .route("/devices/{id}/retire", post(devices::retire))
         .route("/devices/bulk", post(devices::bulk))
         .route("/devices/bulk/run", post(devices::bulk_run))
@@ -237,6 +256,48 @@ pub fn router(state: Shared) -> Router {
             "/scripts/{id}/revisions/{number}/download",
             get(scripts::download),
         )
+        .route(
+            "/scripts/{id}/revisions/{number}/approval-request.json",
+            get(trust::approval_request),
+        )
+        .route(
+            "/scripts/{id}/revisions/{number}/approvals",
+            post(trust::upload_approval),
+        )
+        .route(
+            "/devices/{id}/scripts",
+            get(script_runs::run_page).post(script_runs::start),
+        )
+        .route("/devices/{id}/schedules", get(schedules::list))
+        .route(
+            "/devices/{id}/schedules/new/{script}/{revision}",
+            get(schedules::new_page).post(schedules::create),
+        )
+        .route(
+            "/devices/{id}/schedules/{schedule}/cancel",
+            post(schedules::cancel),
+        )
+        .route("/jobs/{id}/authorize", get(script_runs::authorize_page))
+        .route(
+            "/jobs/{id}/run-request.json",
+            get(script_runs::run_request_json),
+        )
+        .route(
+            "/jobs/{id}/authorization",
+            post(script_runs::upload_authorization),
+        )
+        .route("/admin/trust", get(trust::trust_page))
+        .route("/admin/trust/chain.json", get(trust::chain_json))
+        // A signed list version, form-encoded.
+        .route(
+            "/admin/trust/versions",
+            post(trust::upload_version)
+                .layer(axum::extract::DefaultBodyLimit::max(3 * 1024 * 1024)),
+        )
+        .route(
+            "/account/passkeys/{id}/signer.json",
+            get(trust::passkey_signer),
+        )
         .route("/jobs", get(web::jobs_list))
         .route("/jobs/{id}", get(web::job))
         .route("/jobs/{id}/cancel", post(web::cancel_job))
@@ -251,6 +312,10 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/organizations/{id}/sites", post(web::add_site))
         .route("/organizations/{id}/rename", post(web::rename_org))
+        .route(
+            "/organizations/{id}/agent-update-policy",
+            post(agent_update_policy::organization),
+        )
         .route("/sites/{id}/rename", post(web::rename_site))
         .route("/sites/{id}", get(web::site))
         .route(
@@ -308,6 +373,10 @@ pub fn router(state: Shared) -> Router {
         .route(
             "/api/v1/mcp/capabilities",
             get(support::screenshot::capabilities),
+        )
+        .route(
+            "/api/v1/support/{id}/status",
+            get(support::screenshot::session_status),
         )
         .route(
             "/api/v1/support/{id}/screenshot",
@@ -638,7 +707,11 @@ pub async fn run_sweeper(state: Shared, shutdown: CancellationToken) {
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            _ = tick.tick() => match async { jobs::sweep(&state).await?; support::sweep(&state).await }.await {
+            _ = tick.tick() => match async {
+                jobs::sweep(&state).await?;
+                support::sweep(&state).await?;
+                schedules::sweep(&state).await
+            }.await {
                 Ok(()) => metrics::SWEEPS_OK.inc(),
                 Err(e) => {
                     metrics::SWEEPS_FAILED.inc();

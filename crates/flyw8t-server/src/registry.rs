@@ -4,6 +4,7 @@
 //! a restart forgets every connection (agents reconnect), and the database's `last_seen_at`
 //! is shown as history, never as liveness.
 
+use flyw8t_protocol::messages::{BackgroundTerminalPolicy, CAP_BACKGROUND_TERMINAL_POLICY};
 use flyw8t_protocol::{PhysicalConsoleState, ServerMsg};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +26,8 @@ pub struct Conn {
     pub tx: mpsc::Sender<ServerMsg>,
     pub close: CancellationToken,
     pub physical_console_check: bool,
+    /// What the agent said it supports when it authenticated (ADR-0015 section 7).
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Default)]
@@ -39,14 +42,35 @@ struct Live {
     checks: HashMap<Uuid, PendingCheck>,
 }
 
-const MAX_CONSOLE_CHECKS: usize = 32;
-const CONSOLE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_DEVICE_CHECKS: usize = 32;
+const DEVICE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckKind {
+    PhysicalConsole,
+    BackgroundTerminalPolicy,
+}
+
+enum CheckReply {
+    PhysicalConsole(PhysicalConsoleState),
+    BackgroundTerminalPolicy(BackgroundTerminalPolicy),
+}
+
+impl CheckReply {
+    fn kind(&self) -> CheckKind {
+        match self {
+            Self::PhysicalConsole(_) => CheckKind::PhysicalConsole,
+            Self::BackgroundTerminalPolicy(_) => CheckKind::BackgroundTerminalPolicy,
+        }
+    }
+}
 
 struct PendingCheck {
+    kind: CheckKind,
     conn_id: Uuid,
     request_id: Uuid,
     deadline: Instant,
-    reply: Option<oneshot::Sender<PhysicalConsoleState>>,
+    reply: Option<oneshot::Sender<CheckReply>>,
 }
 
 /// Removing the waiter also covers cancellation of the requesting HTTP handler.
@@ -72,7 +96,7 @@ impl Drop for CheckGuard<'_> {
 pub enum ConsoleCheckError {
     #[error("the agent is disconnected")]
     NotConnected,
-    #[error("the connected agent does not support a physical console check")]
+    #[error("the connected agent does not support this check")]
     Unsupported,
     #[error("the agent or server is busy")]
     Busy,
@@ -169,6 +193,16 @@ impl Registry {
         tx.is_some_and(|tx| tx.try_send(msg).is_ok())
     }
 
+    /// Whether the device's connection `conn_id` said it supports `cap`.
+    pub fn has_capability(&self, device_id: Uuid, conn_id: Uuid, cap: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .conns
+            .get(&device_id)
+            .is_some_and(|c| c.conn_id == conn_id && c.capabilities.iter().any(|x| x == cap))
+    }
+
     /// Force-close a device's connection (credential revoked).
     pub fn kick(&self, device_id: Uuid) {
         let mut live = self.live.lock().unwrap();
@@ -185,12 +219,8 @@ impl Registry {
         device_id: Uuid,
         request_id: Uuid,
     ) -> Result<PhysicalConsoleState, ConsoleCheckError> {
-        self.check_until(
-            device_id,
-            request_id,
-            Instant::now() + CONSOLE_CHECK_TIMEOUT,
-        )
-        .await
+        self.check_until(device_id, request_id, Instant::now() + DEVICE_CHECK_TIMEOUT)
+            .await
     }
 
     async fn check_until(
@@ -199,29 +229,87 @@ impl Registry {
         request_id: Uuid,
         deadline: Instant,
     ) -> Result<PhysicalConsoleState, ConsoleCheckError> {
+        match self
+            .observe(
+                device_id,
+                request_id,
+                CheckKind::PhysicalConsole,
+                deadline,
+                None,
+            )
+            .await?
+        {
+            (_, CheckReply::PhysicalConsole(state)) => Ok(state),
+            _ => Err(ConsoleCheckError::Unsupported),
+        }
+    }
+
+    /// Check local policy once on the authenticated connection. The result is only an observation.
+    pub(crate) async fn check_background_terminal_policy(
+        &self,
+        device_id: Uuid,
+        request_id: Uuid,
+        expected_connection: Option<Uuid>,
+    ) -> Result<(Uuid, BackgroundTerminalPolicy), ConsoleCheckError> {
+        match self
+            .observe(
+                device_id,
+                request_id,
+                CheckKind::BackgroundTerminalPolicy,
+                Instant::now() + DEVICE_CHECK_TIMEOUT,
+                expected_connection,
+            )
+            .await?
+        {
+            (connection, CheckReply::BackgroundTerminalPolicy(policy)) => Ok((connection, policy)),
+            _ => Err(ConsoleCheckError::Unsupported),
+        }
+    }
+
+    async fn observe(
+        &self,
+        device_id: Uuid,
+        request_id: Uuid,
+        kind: CheckKind,
+        deadline: Instant,
+        expected_connection: Option<Uuid>,
+    ) -> Result<(Uuid, CheckReply), ConsoleCheckError> {
         let (guard, reply) = {
             let mut live = self.live.lock().unwrap();
             let conn = live
                 .conns
                 .get(&device_id)
                 .ok_or(ConsoleCheckError::NotConnected)?;
-            if !conn.physical_console_check {
-                return Err(ConsoleCheckError::Unsupported);
+            if expected_connection.is_some_and(|id| id != conn.conn_id) {
+                return Err(ConsoleCheckError::NotConnected);
             }
-            if live.checks.len() >= MAX_CONSOLE_CHECKS || live.checks.contains_key(&device_id) {
+            let message = match kind {
+                CheckKind::PhysicalConsole if conn.physical_console_check => {
+                    ServerMsg::CheckPhysicalConsole { request_id }
+                }
+                CheckKind::BackgroundTerminalPolicy
+                    if conn
+                        .capabilities
+                        .iter()
+                        .any(|cap| cap == CAP_BACKGROUND_TERMINAL_POLICY) =>
+                {
+                    ServerMsg::CheckBackgroundTerminalPolicy { request_id }
+                }
+                _ => return Err(ConsoleCheckError::Unsupported),
+            };
+            if live.checks.len() >= MAX_DEVICE_CHECKS || live.checks.contains_key(&device_id) {
                 return Err(ConsoleCheckError::Busy);
             }
             let conn_id = conn.conn_id;
-            conn.tx
-                .try_send(ServerMsg::CheckPhysicalConsole { request_id })
-                .map_err(|err| match err {
-                    mpsc::error::TrySendError::Full(_) => ConsoleCheckError::Busy,
-                    mpsc::error::TrySendError::Closed(_) => ConsoleCheckError::NotConnected,
-                })?;
+            conn.tx.try_send(message).map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => ConsoleCheckError::Busy,
+                mpsc::error::TrySendError::Closed(_) => ConsoleCheckError::NotConnected,
+            })?;
             let (tx, rx) = oneshot::channel();
             live.checks.insert(
                 device_id,
                 PendingCheck {
+                    kind,
                     conn_id,
                     request_id,
                     deadline,
@@ -245,7 +333,7 @@ impl Registry {
         if self.current_conn(device_id) != Some(guard.conn_id) {
             return Err(ConsoleCheckError::NotConnected);
         }
-        Ok(state)
+        Ok((guard.conn_id, state))
     }
 
     /// A reply has meaning only for its currently registered socket, expected request and deadline.
@@ -256,12 +344,43 @@ impl Registry {
         request_id: Uuid,
         state: PhysicalConsoleState,
     ) -> bool {
+        self.receive_observation(
+            device_id,
+            conn_id,
+            request_id,
+            CheckReply::PhysicalConsole(state),
+        )
+    }
+
+    pub(crate) fn background_terminal_policy_status(
+        &self,
+        device_id: Uuid,
+        conn_id: Uuid,
+        request_id: Uuid,
+        policy: BackgroundTerminalPolicy,
+    ) -> bool {
+        self.receive_observation(
+            device_id,
+            conn_id,
+            request_id,
+            CheckReply::BackgroundTerminalPolicy(policy),
+        )
+    }
+
+    fn receive_observation(
+        &self,
+        device_id: Uuid,
+        conn_id: Uuid,
+        request_id: Uuid,
+        state: CheckReply,
+    ) -> bool {
         let mut live = self.live.lock().unwrap();
         let Some(check) = live.checks.get_mut(&device_id) else {
             return false;
         };
         if check.conn_id != conn_id
             || check.request_id != request_id
+            || check.kind != state.kind()
             || Instant::now() >= check.deadline
         {
             return false;
@@ -286,6 +405,7 @@ mod tests {
             tx,
             close: CancellationToken::new(),
             physical_console_check: false,
+            capabilities: vec![],
         }
     }
 
@@ -426,7 +546,7 @@ mod tests {
     async fn console_waiters_are_bounded_for_the_whole_instance() {
         let r = Registry::default();
         let mut checks = Vec::new();
-        for _ in 0..MAX_CONSOLE_CHECKS {
+        for _ in 0..MAX_DEVICE_CHECKS {
             let device = Uuid::new_v4();
             let (_, rx) = connect(&r, device, true);
             let mut check = Box::pin(r.check_physical_console(device, Uuid::new_v4()));

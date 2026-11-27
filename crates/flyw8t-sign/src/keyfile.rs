@@ -12,7 +12,20 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zeroize::Zeroizing;
 
-pub const FORMAT: &str = "flyw8t-sign key v1";
+#[derive(Clone, Copy)]
+pub enum Purpose {
+    ScriptTrust,
+    AgentRelease,
+}
+
+impl Purpose {
+    fn format(self) -> &'static str {
+        match self {
+            Self::ScriptTrust => "flyw8t-sign key v1",
+            Self::AgentRelease => "flyw8t-sign agent release key v1",
+        }
+    }
+}
 /// Argon2id: 64 MiB, 3 passes, one lane. Opening takes a fraction of a second; guessing takes that per guess.
 const M_KIB: u32 = 64 * 1024;
 const T: u32 = 3;
@@ -39,7 +52,7 @@ struct File {
 }
 
 fn associated(f: &File) -> Vec<u8> {
-    let mut e = Enc::statement(FORMAT);
+    let mut e = Enc::statement(&f.format);
     e.bytes(&f.public_key.0)
         .text(&f.kdf.alg)
         .uint(f.kdf.m_kib.into())
@@ -81,7 +94,7 @@ impl OfflineKey {
 }
 
 /// Make a new key and the bytes of its file.
-pub fn generate(pass: &str) -> Result<(OfflineKey, Vec<u8>)> {
+pub fn generate(pass: &str, purpose: Purpose) -> Result<(OfflineKey, Vec<u8>)> {
     let rng = SystemRandom::new();
     let mut seed = Zeroizing::new([0u8; 32]);
     let mut salt = [0u8; 16];
@@ -92,7 +105,7 @@ pub fn generate(pass: &str) -> Result<(OfflineKey, Vec<u8>)> {
     }
     let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
     let mut f = File {
-        format: FORMAT.into(),
+        format: purpose.format().into(),
         public_key: Bytes(signing.verifying_key().to_bytes().to_vec()),
         kdf: Kdf {
             alg: "argon2id".into(),
@@ -121,15 +134,16 @@ pub fn generate(pass: &str) -> Result<(OfflineKey, Vec<u8>)> {
 }
 
 /// Open a key file with its passphrase.
-pub fn open(path: &Path, pass: &str) -> Result<OfflineKey> {
+pub fn open(path: &Path, pass: &str, purpose: Purpose) -> Result<OfflineKey> {
     if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 64 * 1024 {
         bail!("{} is not a key file", path.display());
     }
     let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let f: File = serde_json::from_slice(&raw).context("not a flyw8t-sign key file")?;
-    if f.format != FORMAT {
+    let expected = purpose.format();
+    if f.format != expected {
         bail!(
-            "this key file is {:?}; this tool reads {FORMAT:?}",
+            "this key file is {:?}; this command needs {expected:?}",
             f.format
         );
     }
@@ -238,28 +252,32 @@ mod tests {
 
     #[test]
     fn a_key_opens_with_its_passphrase_only_and_refuses_tampering() {
+        let purpose = Purpose::ScriptTrust;
         let dir = std::env::temp_dir().join(format!("flyw8t-sign-key-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("root.key");
-        let (k, bytes) = generate("correct horse").unwrap();
+        let (k, bytes) = generate("correct horse", purpose).unwrap();
         write_private(&path, &bytes).unwrap();
         assert!(
             write_private(&path, &bytes).is_err(),
             "never replaces a file"
         );
-        assert_eq!(open(&path, "correct horse").unwrap().public(), k.public());
-        assert!(open(&path, "wrong").is_err());
+        assert_eq!(
+            open(&path, "correct horse", purpose).unwrap().public(),
+            k.public()
+        );
+        assert!(open(&path, "wrong", purpose).is_err());
         // Weakening the KDF or swapping the public key breaks the seal.
         let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         v["kdf"]["t"] = 4.into();
         let p2 = dir.join("t.key");
         std::fs::write(&p2, serde_json::to_vec(&v).unwrap()).unwrap();
-        assert!(open(&p2, "correct horse").is_err());
+        assert!(open(&p2, "correct horse", purpose).is_err());
         let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         v["kdf"]["m_kib"] = 8.into();
         let p3 = dir.join("m.key");
         std::fs::write(&p3, serde_json::to_vec(&v).unwrap()).unwrap();
-        assert!(open(&p3, "correct horse").is_err());
+        assert!(open(&p3, "correct horse", purpose).is_err());
         // Extreme settings are refused before any work: this would ask for 4 TiB.
         for (field, value) in [
             ("m_kib", 4_294_967_295u64),
@@ -271,7 +289,10 @@ mod tests {
             let p4 = dir.join(format!("{field}.key"));
             std::fs::write(&p4, serde_json::to_vec(&v).unwrap()).unwrap();
             let started = std::time::Instant::now();
-            let err = open(&p4, "correct horse").err().unwrap().to_string();
+            let err = open(&p4, "correct horse", purpose)
+                .err()
+                .unwrap()
+                .to_string();
             assert!(err.contains("will not use"), "{field}: {err}");
             assert!(started.elapsed() < std::time::Duration::from_secs(2));
         }

@@ -109,10 +109,12 @@ Flyw8t-Setup-x64.exe --quiet
 | `87` | The executable is missing a usable enrollment package. |
 | `740` | Setup needs a process that already has administrator rights. |
 
-- For **Intune**, package the EXE as a Win32 app, use the quiet install command, and set install behavior to **System**. For detection, check that the `flyw8t-agent` service is registered and the installed EXE exists in `%ProgramFiles%\flyw8t`. The installed `flyw8t-agent.exe service uninstall` command removes the service and retains the endpoint identity for recovery. [Microsoft Intune Win32 apps](https://learn.microsoft.com/en-us/intune/app-management/deployment/add-win32)
+- For **Intune**, select the site, validity, and device count, then choose **Download Intune bundle**. Extract the ZIP, upload **Flyw8t-Setup-x64.intunewin** as a Windows app (Win32), and use the commands and settings in **README.txt**. Use the included **Detect-Flyw8t.ps1** as the custom detection rule and run it in the 64-bit context. The script verifies the standard LocalSystem service registration, timestamped agent signature, minimum version, and the enrollment scope selected for the package. It can detect a stopped service with a valid local installation. Uninstall removes the service and retains the endpoint identity for recovery. Treat the bundle as an enrollment credential. Download a fresh bundle when enrolling new devices after the token expires or runs out of uses. [Microsoft Intune Win32 apps](https://learn.microsoft.com/en-us/intune/app-management/deployment/add-win32)
 - For **Group Policy**, run the EXE and its quiet argument from a computer startup script with access to the package. Capture its exit code in the deployment log.
 
 The site-specific download is an unsigned package containing the original signed agent and the enrollment credential. Use the copy issued by your console. If endpoint policy requires a signed installer, use the signed agent with the separate enrollment commands below.
+
+`flyw8t-agent status --json` reports the binary version, device ID, console URL, and the organization and site IDs recorded at enrollment. It reads local state and can run while the service is active. A null `enrollment_scope` means the agent has no enrollment scope on record. A recorded scope with a null `site_id` means the console enrolled the PC without a site. For site assignments that change after enrollment, check the current assignment in the console.
 
 For a development build:
 

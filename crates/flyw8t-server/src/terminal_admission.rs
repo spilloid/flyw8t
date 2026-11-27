@@ -1,0 +1,329 @@
+//! Browser-bound admission for background PowerShell. Each confirmation rechecks the endpoint.
+
+use crate::audit::Audit;
+use crate::auth::{self, Channel, Principal, WebUser};
+use crate::error::{AppError, AppResult};
+use crate::registry::{ConsoleCheckError, Registry};
+use crate::web::{check_csrf, constant_time_eq, ctx, html, page, windows_observation_target, Form};
+use crate::Shared;
+use axum::body::Bytes;
+use axum::extract::{Path, State};
+use axum::http::header;
+use axum::response::Response;
+use flyw8t_domain::Permission;
+use flyw8t_protocol::messages::BackgroundTerminalPolicy;
+use flyw8t_web::{BackgroundTerminalPolicyCheck as Check, BackgroundTerminalStep};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+const TTL: Duration = Duration::from_secs(30);
+const MAX_PENDING: usize = 128;
+
+#[derive(Default)]
+pub(crate) struct Admissions(Mutex<HashMap<Vec<u8>, Admission>>);
+
+struct Admission {
+    user: Uuid,
+    session: Uuid,
+    cookie_digest: Vec<u8>,
+    device: Uuid,
+    organization: Uuid,
+    connection: Uuid,
+    policy_check: Uuid,
+    expires: Instant,
+}
+
+impl Admissions {
+    fn issue(&self, operator: &Principal, admission: Admission) -> AppResult<String> {
+        if operator.channel != Channel::Web {
+            return Err(AppError::Forbidden);
+        }
+        let now = Instant::now();
+        let mut pending = self.0.lock().unwrap();
+        pending.retain(|_, grant| grant.expires > now);
+        // A fresh confirmation replaces the previous one for this browser and device.
+        pending.retain(|_, grant| {
+            grant.session != admission.session || grant.device != admission.device
+        });
+        if pending.len() >= MAX_PENDING {
+            return Err(AppError::RateLimited);
+        }
+        let secret = auth::random_secret(32);
+        pending.insert(auth::digest(&secret), admission);
+        Ok(secret)
+    }
+
+    fn claim(&self, operator: &Principal, device: Uuid, secret: &str) -> Option<Admission> {
+        if operator.channel != Channel::Web || secret.len() != 43 {
+            return None;
+        }
+        let digest = auth::digest(secret);
+        let mut pending = self.0.lock().unwrap();
+        let grant = pending.get(&digest)?;
+        if grant.expires <= Instant::now() {
+            pending.remove(&digest);
+            return None;
+        }
+        let cookie = operator.session_token.as_deref()?;
+        if operator.user_id != grant.user
+            || operator.session_id != Some(grant.session)
+            || !constant_time_eq(cookie, &grant.cookie_digest)
+            || device != grant.device
+            || !operator.can_see_org(grant.organization)
+        {
+            return None;
+        }
+        pending.remove(&digest)
+    }
+}
+
+pub(crate) async fn check(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(device): Path<Uuid>,
+    body: Bytes,
+) -> Response {
+    page(&p, async {
+        authorize(&p, &Form::parse(&body))?;
+        observe(&state, &p, device, None).await
+    })
+    .await
+}
+
+pub(crate) async fn confirm(
+    State(state): State<Shared>,
+    WebUser(p): WebUser,
+    Path(device): Path<Uuid>,
+    body: Bytes,
+) -> Response {
+    page(&p, async {
+        let form = Form::parse(&body);
+        authorize(&p, &form)?;
+        let admission = form
+            .get("admission")
+            .and_then(|secret| state.terminal_admissions.claim(&p, device, secret))
+            .ok_or(AppError::NotFound)?;
+        observe(&state, &p, device, Some(admission)).await
+    })
+    .await
+}
+
+fn authorize(p: &Principal, form: &Form) -> AppResult<()> {
+    check_csrf(p, form)?;
+    p.require(Permission::ViewDevices)?;
+    p.require(Permission::RunControlSessions)
+}
+
+async fn observe_agent(
+    registry: &Registry,
+    device: Uuid,
+    request_id: Uuid,
+    admission: Option<&Admission>,
+) -> Option<Result<(Uuid, BackgroundTerminalPolicy), ConsoleCheckError>> {
+    let expected = admission.map(|grant| grant.connection);
+    let request = registry.check_background_terminal_policy(device, request_id, expected);
+    let Some(grant) = admission else {
+        return Some(request.await);
+    };
+    // Authorization and audit writes can outlast the remaining confirmation window.
+    if grant.expires <= Instant::now() {
+        return None;
+    }
+    tokio::time::timeout_at(grant.expires.into(), request)
+        .await
+        .ok()
+}
+
+async fn observe(
+    state: &Shared,
+    p: &Principal,
+    device: Uuid,
+    admission: Option<Admission>,
+) -> AppResult<Response> {
+    let request_id = Uuid::new_v4();
+    let (requested, result) = if admission.is_some() {
+        (
+            "device.background_terminal_admission.requested",
+            "device.background_terminal_admission.result",
+        )
+    } else {
+        (
+            "device.background_terminal_policy.requested",
+            "device.background_terminal_policy.result",
+        )
+    };
+    let detail = |mut fields: Value| {
+        fields["request_id"] = json!(request_id);
+        if let Some(grant) = &admission {
+            fields["policy_check_id"] = json!(grant.policy_check);
+        }
+        fields
+    };
+    let mut tx = state.db.begin().await?;
+    let (org, _) = windows_observation_target(&mut tx, p, device).await?;
+    if admission
+        .as_ref()
+        .is_some_and(|grant| grant.organization != org)
+    {
+        return Err(AppError::NotFound);
+    }
+    Audit::user(p, requested)
+        .org(org)
+        .target("device", device)
+        .detail(detail(json!({})))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    let reply = observe_agent(&state.registry, device, request_id, admission.as_ref()).await;
+    let mut tx = state.db.begin().await?;
+    let audit = Audit::user(p, result).org(org).target("device", device);
+    let target = windows_observation_target(&mut tx, p, device)
+        .await
+        .and_then(|(current_org, name)| {
+            if current_org == org {
+                Ok(name)
+            } else {
+                Err(AppError::NotFound)
+            }
+        });
+    let name = match target {
+        Ok(name) => name,
+        Err(error @ (AppError::Forbidden | AppError::Unauthorized | AppError::NotFound)) => {
+            audit
+                .denied()
+                .detail(detail(json!({"status": "access_changed"})))
+                .record(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    let reply = reply
+        .filter(|_| {
+            admission
+                .as_ref()
+                .is_none_or(|grant| grant.expires > Instant::now())
+        })
+        .map(|reply| {
+            reply.and_then(|(connection, policy)| {
+                if state.registry.current_conn(device) == Some(connection) {
+                    Ok((connection, policy))
+                } else {
+                    Err(ConsoleCheckError::NotConnected)
+                }
+            })
+        });
+    let (finding, status, connection) = match reply {
+        None => (Check::Expired, "expired", None),
+        Some(Ok((conn, BackgroundTerminalPolicy::Enabled))) => {
+            (Check::Enabled, "enabled", Some(conn))
+        }
+        Some(Ok((conn, BackgroundTerminalPolicy::Disabled))) => {
+            (Check::Disabled, "disabled", Some(conn))
+        }
+        Some(Ok((conn, BackgroundTerminalPolicy::Unavailable))) => {
+            (Check::Unavailable, "unavailable", Some(conn))
+        }
+        Some(Err(ConsoleCheckError::NotConnected)) => (Check::Offline, "not_connected", None),
+        Some(Err(ConsoleCheckError::Unsupported)) => (Check::Unsupported, "unsupported", None),
+        Some(Err(ConsoleCheckError::Busy)) => (Check::Busy, "busy", None),
+        Some(Err(ConsoleCheckError::Timeout)) => (Check::TimedOut, "timeout", None),
+    };
+    let audit = match (finding, admission.is_some()) {
+        (Check::Enabled, _) | (Check::Disabled, false) => audit,
+        (Check::Disabled | Check::Expired, true) => audit.denied(),
+        _ => audit.failed(),
+    };
+    audit
+        .detail(detail(json!({"status": status, "connection": connection})))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    let step = if admission.is_some() {
+        BackgroundTerminalStep::Confirmation
+    } else {
+        let secret = match (finding, connection) {
+            (Check::Enabled, Some(connection)) => {
+                let grant = Admission {
+                    user: p.user_id,
+                    session: p.session_id.ok_or(AppError::Unauthorized)?,
+                    cookie_digest: p.session_token.clone().ok_or(AppError::Unauthorized)?,
+                    device,
+                    organization: org,
+                    connection,
+                    policy_check: request_id,
+                    expires: Instant::now() + TTL,
+                };
+                Some(state.terminal_admissions.issue(p, grant)?)
+            }
+            _ => None,
+        };
+        BackgroundTerminalStep::Policy(secret)
+    };
+    let mut response = html(flyw8t_web::background_terminal_policy_result(
+        &ctx(p, None),
+        device,
+        &name,
+        finding,
+        step,
+    ))?;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::Conn;
+    use flyw8t_protocol::messages::CAP_BACKGROUND_TERMINAL_POLICY;
+    use time::OffsetDateTime;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn expired_confirmation_does_not_probe_agent() {
+        let registry = Registry::default();
+        let device = Uuid::new_v4();
+        let connection = Uuid::new_v4();
+        let (tx, mut outbound) = mpsc::channel(1);
+        assert!(registry.register(
+            device,
+            Conn {
+                conn_id: connection,
+                seq: Registry::next_seq(),
+                since: OffsetDateTime::now_utc(),
+                tx,
+                close: CancellationToken::new(),
+                physical_console_check: false,
+                capabilities: vec![CAP_BACKGROUND_TERMINAL_POLICY.into()],
+            },
+        ));
+
+        // Model a claimed confirmation whose window elapsed while awaiting the database.
+        let grant = Admission {
+            user: Uuid::new_v4(),
+            session: Uuid::new_v4(),
+            cookie_digest: Vec::new(),
+            device,
+            organization: Uuid::new_v4(),
+            connection,
+            policy_check: Uuid::new_v4(),
+            expires: Instant::now() - Duration::from_secs(1),
+        };
+        assert!(
+            observe_agent(&registry, device, Uuid::new_v4(), Some(&grant))
+                .await
+                .is_none()
+        );
+        assert_eq!(outbound.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+}

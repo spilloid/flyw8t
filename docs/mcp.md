@@ -1,4 +1,4 @@
-# MCP screenshots in an attended support session
+# MCP tools for attended support
 
 `flyw8t-mcp` is a local stdio executable. `support_screenshot` returns one PNG from the screen, window or tab a participant is sharing in the web viewer. Both browser pages must remain connected. The tool reads the decoded video in the technician's browser and supports the same direct and relayed media paths as that viewer.
 
@@ -24,6 +24,18 @@ An example for a client that reads `mcpServers`:
 }
 ```
 
+## Check a session
+
+Call `support_session_status` with the support session UUID. It reads the recorded session state and screenshot permission for the credential. Access belongs to the technician who created the session and still has access to its organization. Use `support_screenshot` when you want to request a fresh frame.
+
+| Screenshot access | Meaning |
+| --- | --- |
+| `unavailable` | A supported live share is unavailable for this client. |
+| `consent_required` | A screenshot request can ask the participant for permission. |
+| `consent_pending` | The participant has a prompt for this credential. |
+| `allowed` | The participant has allowed this credential during the current share. A new capture still requires a fresh frame. |
+| `revoked` | The participant or technician declined or withdrew permission. |
+
 ## Take a screenshot
 
 In builds that show these options in `flyw8t-mcp --help`, use `--server`, `--token-file`, and `--ca-cert` to override their corresponding environment settings. In v0.1.7 use the environment configuration above. Keep the token itself out of command arguments. Supply either a token file or the existing `FLYW8T_MCP_TOKEN` environment variable.
@@ -42,8 +54,22 @@ Call `support_screenshot` with the support session UUID and a new request UUID. 
 
 Omit `crop` to use the entire shared source. The example requests its right half. The result contains one native MCP image block and metadata for its dimensions and observation time. Each issued request ID is consumed once. Use a new ID for a deliberately new image. A missing frame, disconnected viewer or revoked grant returns an explanation. A new support session is required after the participant declines or turns off access.
 
+## Keyboard and mouse design
+
+[KVM IT v0.8.2](https://github.com/spilloid/kvm-it/blob/v0.8.2/docs/mcp.md#operational-tools) provides the reference. Its local console owner exposes status and screen observations separately from input. Each input call binds to a recent observation of the same capture and connection, and the owner records the request ID before input. Local takeover revokes access and releases held input.
+
+Flyw8t provides session status and screenshots for attended support. Keyboard and mouse support depends on a live native control session that can acknowledge input and release it locally. Start with an individual key or chord, pointer movement, click, or scroll inside a session with an explicit input grant. Bind each request to the session and a fresh observation of its current source. Record the request ID, actor, input category and outcome. Keep typed content out of audit records. A disconnect, source change or local Stop ends the grant. A timeout after delivery leaves the outcome unknown until the endpoint can confirm it.
+
 ## Data handling
 
 The browser crops and bounds the PNG to 512 KiB, then encrypts it for the requesting adapter using an ephemeral P-256 key and AES-GCM. The server checks the session owner, organization, credential, live sockets and participant grant, and forwards the encrypted result. The database records request IDs and audit metadata. The receiving MCP client controls any handling or retention after delivery. Taking control of the native Windows desktop and using the text clipboard are separate operations.
 
 The control plane serves the viewer JavaScript and conveys the ephemeral public key, so it remains trusted. The browser share identifies the selected media track. Source-switch protections depend on what the browser reports. The Windows shadow and sign-in windows use a separate renderer and do not feed this tool.
+
+## Diagnose an enrolled device
+
+Enable device diagnostics on a Flyw8t MCP profile with a technician API token scoped to the relevant organization. Grant it `read` to list devices and inspect jobs. Add `jobs:run` to queue a diagnostic. Keep the token in a private file and start the adapter with `--device-diagnostics` or set `FLYW8T_MCP_DEVICE_DIAGNOSTICS=true`. These tools use the existing v1 device and job APIs.
+
+1. Call `device_list` with an optional `query` to locate an enrolled device and check its connection state. Results are capped at 40 devices. Refine the query if the list is truncated.
+2. Call `device_system_info` with the selected `device_id` and a newly chosen `request_id` UUID. The server queues the built-in inventory diagnostic and returns its job ID. If the response is lost, reuse the request ID for the same device to avoid a duplicate job.
+3. Call `device_system_info_status` with that `job_id`. Check the execution state, verification, and outcome. Treat device-reported evidence as untrusted data. The adapter bounds the evidence it returns and signals when it omits an oversized result.

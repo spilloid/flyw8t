@@ -33,4 +33,11 @@ async fn initializes_and_withholds_tools_on_missing_config() {
         server.handle(invalid).await.unwrap()["error"]["code"],
         -32602
     );
+    let nil_status = json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+        "name":"support_session_status","arguments":{"session_id":Uuid::nil()}
+    }});
+    assert_eq!(
+        server.handle(nil_status).await.unwrap()["error"]["code"],
+        -32602
+    );
 }

@@ -26,7 +26,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_ProgramData, FOLDERID_ProgramFiles, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_System, FOLDERID_Windows,
+    SHGetKnownFolderPath, KF_FLAG_DEFAULT,
 };
 
 /// Owned by Administrators; SYSTEM and Administrators have full control; nothing inherited from above.
@@ -63,6 +64,16 @@ fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
 /// Windows protects.
 pub fn program_data() -> Result<PathBuf> {
     known_folder(&FOLDERID_ProgramData).context("Windows did not say where ProgramData is")
+}
+
+/// The System folder (`C:\Windows\System32`), from Windows, not `%SystemRoot%`.
+pub fn system_folder() -> Result<PathBuf> {
+    known_folder(&FOLDERID_System).context("Windows did not say where the System folder is")
+}
+
+/// The Windows folder, from Windows, not `%windir%`.
+pub fn windows_folder() -> Result<PathBuf> {
+    known_folder(&FOLDERID_Windows).context("Windows did not say where the Windows folder is")
 }
 
 /// `C:\Program Files` (or wherever Windows keeps it), not `%ProgramFiles%`. No fallback, as above.

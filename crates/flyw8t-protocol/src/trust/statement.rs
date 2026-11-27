@@ -16,6 +16,8 @@ pub const DOMAIN_VALUES: &str = "flyw8t run values v1";
 pub const C3_WINDOW_SECS: u64 = 15 * 60;
 /// The same for C2.
 pub const C2_WINDOW_SECS: u64 = 24 * 60 * 60;
+/// Allow small clock differences between an offline signer and the verifier.
+pub const CLOCK_TOLERANCE_SECS: u64 = 5 * 60;
 
 pub fn window_cap(class: RiskClass) -> Option<u64> {
     match class {
@@ -114,6 +116,14 @@ pub struct RunAuthorization {
 }
 
 impl RunAuthorization {
+    pub fn valid_at(&self, now: u64, window_cap: u64) -> bool {
+        self.expires_at
+            .checked_sub(self.issued_at)
+            .is_some_and(|window| window <= window_cap)
+            && self.issued_at <= now.saturating_add(CLOCK_TOLERANCE_SECS)
+            && now < self.expires_at
+    }
+
     pub fn hash(&self) -> Result<Hash, EncodeError> {
         Ok(Hash(self.encoded()?.hash32()))
     }

@@ -11,6 +11,9 @@ assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
 assert.equal(process.env.RUNNER_OS, 'Windows');
 const host = 'handoff-' + randomBytes(16).toString('hex') + '.invalid';
 const id = randomUUID();
+const organization = randomUUID();
+const site = randomUUID();
+const otherSite = randomUUID();
 const db = 'flyw8t_handoff_' + randomBytes(8).toString('hex');
 const pg = file => path.join(process.env.PGBIN, file + '.exe');
 const pgEnv = { ...process.env, PGHOST: '127.0.0.1', PGUSER: 'postgres', PGPASSWORD: 'root', PGPORT: '5432' };
@@ -68,7 +71,8 @@ async function clickMode(mode) {
   await call('Page.bringToFront');
   const selector = 'a[href="flyw8t://open/' + mode + '?host=' + host + '"]';
   const coords = await evaluate('(() => { const a=document.querySelector('+JSON.stringify(selector)+');' +
-    'if (!a) return null; a.scrollIntoView({block:"center",behavior:"instant"}); const r=a.getBoundingClientRect();' +
+    'if (!a) return null; const details=a.closest("details"); if (details) details.open=true;' +
+    'a.scrollIntoView({block:"center",behavior:"instant"}); const r=a.getBoundingClientRect();' +
     'const x=r.x+r.width/2,y=r.y+r.height/2; return a.contains(document.elementFromPoint(x,y))?{x,y}:null; })()');
   assert.ok(coords, mode + ' link missing or obscured on the candidate device page');
   for (const type of ['mouseMoved','mousePressed','mouseReleased']) {
@@ -91,7 +95,9 @@ try {
     try {return (await fetch(origin+'/readyz',{signal:AbortSignal.timeout(1000)})).ok;} catch {return false;}
   },'Signed server did not become ready',60000);
   // Every interpolated SQL value here is generated above; the device has no network endpoint.
-  const seed = "WITH org AS (INSERT INTO organizations(name) VALUES ('Release fixture') RETURNING id) " +
+  const seed = "WITH org AS (INSERT INTO organizations(id, name) VALUES ('" + organization + "', 'Release fixture') RETURNING id), " +
+    "fixture_sites AS (INSERT INTO sites(id, organization_id, name) SELECT v.id::uuid, org.id, v.name FROM org CROSS JOIN " +
+    "(VALUES ('" + site + "', 'Installation site'), ('" + otherSite + "', 'Other site')) AS v(id, name)) " +
     "INSERT INTO devices(id, organization_id, hostname, os_family) SELECT '" + id + "', id, '" + host + "', 'windows' FROM org;";
   execFileSync(pg('psql'),['-X','-v','ON_ERROR_STOP=1','-d',db],{env:pgEnv,input:seed,windowsHide:true});
   inspect('Enable');
@@ -125,12 +131,15 @@ try {
   await waitFor(()=>evaluate('location.origin === '+JSON.stringify(origin)+' && location.pathname === "/"'),'Fixture sign-in did not reach the console');
   if (process.env.FLYW8T_TEST_SIGNED_TRIAL_INSTALL === '1') {
     const { exerciseSignedTrial } = await import('./signed-trial-install.mjs');
-    await exerciseSignedTrial({ origin, binaries, shell, call, evaluate, waitFor });
+    await exerciseSignedTrial({ origin, binaries, shell, call, evaluate, waitFor, organization, site, otherSite });
   }
   await call('Page.navigate',{url:origin+'/devices/'+id});
-  await waitFor(()=>evaluate('document.querySelectorAll("a.desktop-choice").length === 3'),'Candidate device page did not offer the three session modes');
+  const modes = ['assist','console','sign-in','terminal'];
+  const links = modes.map(mode => 'a[href="flyw8t://open/' + mode + '?host=' + host + '"]');
+  await waitFor(() => evaluate(JSON.stringify(links) + '.every(selector => document.querySelector(selector))'),
+    'Candidate device page did not offer the Windows session links');
   console.log('Candidate '+process.env.GITHUB_SHA+', Chrome '+(await call('Browser.getVersion')).product+', Windows '+process.env.ImageVersion);
-  for (const mode of ['assist','console','sign-in','terminal']) {
+  for (const mode of modes) {
     await clickMode(mode);
     inspect('Confirm',mode);
   }

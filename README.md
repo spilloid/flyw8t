@@ -2,7 +2,7 @@
 
 flyw8t (pronounced *flyweight*) is a self-hosted remote monitoring and management platform for MSPs. From one device page, a technician can see when a Windows PC last checked in, run a read-only diagnostic, or open a Windows desktop. Completed jobs show the evidence behind the result. If a device stops reporting mid-job, its outcome can stay unknown.
 
-**Version 0.2.0, pre-release.** Start in **Devices → Enroll a Windows device** or download an installer from a site. Open it on the PC you manage to enroll the signed **agent** and start its service. The signed **Technician** app opens from your device page on your Windows workstation. An end user can also share a screen with you in their browser. [Install and verify the Windows beta](docs/beta-trial.md) · [Product tour and screenshots](https://spilloid.github.io/flyw8t/)
+**Published pre-release 0.2.0.** Start in **Devices → Enroll a Windows device** or download an installer from a site. Open it on the PC you manage to enroll the signed **agent** and start its service. The signed **Technician** app opens from your device page on your Windows workstation. An end user can also share a screen with you in their browser. [Install and verify the Windows beta](docs/beta-trial.md) · [Product tour and screenshots](https://spilloid.github.io/flyw8t/)
 
 [![The Devices page shows the connection status of Windows PCs in a synthetic trial organization.](site/screenshots/devices.png)](https://spilloid.github.io/flyw8t/)
 

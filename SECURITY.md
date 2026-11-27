@@ -14,7 +14,7 @@ flyw8t is pre-1.0 and **not production-ready** (see `docs/threat-model.md` § Op
 
 ## Design commitments
 
-- No arbitrary command execution: endpoints run only a compiled-in, validated, read-only action catalog, and the agent enforces it independently of the server.
+- Built-in jobs use a compiled-in action catalog that the agent validates independently of the server. Script jobs require signed approvals under the endpoint's configured trust policy. An interactive PowerShell terminal for technicians is in development and has a dedicated authorization model.
 - Device private keys never leave devices. Passwords are Argon2id. Every other secret (sessions, API tokens, enrollment tokens, support invitations) is stored only as a SHA-256 digest and shown once.
 - Tenancy comes from enrollment tokens, never from what a device says.
 - History (`job_events`, `audit_events`, `support_events`) is append-only, enforced by the database.

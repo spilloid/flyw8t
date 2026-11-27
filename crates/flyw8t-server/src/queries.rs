@@ -272,18 +272,30 @@ pub async fn device_activity(
         String,
         Option<Uuid>,
         Option<String>,
+        Option<String>,
     );
     let (all, orgs) = p.scope();
     let (at, source, id) = before.map_or((None, None, None), |c| (Some(c.0), Some(c.1), Some(c.2)));
     let rows: Vec<Row> = sqlx::query_as(
         "WITH scoped_device AS (
-             SELECT id, organization_id FROM devices WHERE id = $1 AND ($2 OR organization_id = ANY($3))
+             SELECT id, organization_id, enrolled_at FROM devices WHERE id = $1 AND ($2 OR organization_id = ANY($3))
          ), device_jobs AS (
-             SELECT j.id, j.organization_id, j.action
+             SELECT j.id, j.organization_id,
+                    CASE WHEN j.action = 'script.run' THEN
+                        coalesce((j.request ->> 'script') || ' · revision ' ||
+                                 (j.request ->> 'revision'), j.action)
+                    ELSE j.action END AS action
                FROM jobs j JOIN scoped_device d ON j.device_id = d.id AND j.organization_id = d.organization_id
          ), activity AS (
-             SELECT a.at, 0::smallint AS source, a.id, a.actor_label AS actor, a.action, a.outcome,
-                    NULL::uuid AS job, NULL::text AS job_action
+             SELECT a.at, 0::smallint AS source, a.id,
+                    CASE WHEN a.action IN ('device.support.connected', 'device.support.ended')
+                         THEN coalesce(a.detail->>'technician', a.actor_label) ELSE a.actor_label END AS actor,
+                    CASE WHEN a.action = 'device.agent_update_policy'
+                         THEN a.action || '.' || (a.detail->>'to_opted_out') ELSE a.action END AS action,
+                    a.outcome, NULL::uuid AS job, NULL::text AS job_action,
+                    CASE WHEN a.action IN ('device.support.connected', 'device.support.ended')
+                              AND ($2 OR a.detail->>'technician_id' = $8)
+                         THEN a.detail->>'session_id' END AS support_session
                FROM audit_events a JOIN scoped_device d ON a.target_id = d.id
               WHERE a.target_type = 'device' AND (
                     a.organization_id = d.organization_id OR (
@@ -292,17 +304,23 @@ pub async fn device_activity(
                     )
               )
              UNION ALL
-             SELECT a.at, 0::smallint, a.id, a.actor_label, a.action, a.outcome, j.id, j.action
+             SELECT a.at, 0::smallint, a.id, a.actor_label, a.action || '.' || (a.detail->>'to_enabled'),
+                    a.outcome, NULL::uuid, NULL::text, NULL::text
+               FROM audit_events a JOIN scoped_device d ON a.organization_id = d.organization_id
+              WHERE a.target_type = 'organization' AND a.action = 'organization.agent_update_policy'
+                AND a.target_id = d.organization_id AND a.at >= d.enrolled_at
+             UNION ALL
+             SELECT a.at, 0::smallint, a.id, a.actor_label, a.action, a.outcome, j.id, j.action, NULL::text
                FROM audit_events a JOIN device_jobs j ON a.target_id = j.id AND a.organization_id = j.organization_id
               WHERE a.target_type = 'job'
              UNION ALL
-             SELECT e.at, 1::smallint, e.id, e.actor, e.to_state, 'recorded', j.id, j.action
+             SELECT e.at, 1::smallint, e.id, e.actor, e.to_state, 'recorded', j.id, j.action, NULL::text
                FROM job_events e JOIN device_jobs j ON e.job_id = j.id
               WHERE e.to_state IN ('dispatched', 'acknowledged', 'running', 'completed', 'failed',
                                    'timed_out', 'cancelled', 'expired', 'outcome_unknown')
                  OR (e.from_state = 'dispatched' AND e.to_state = 'queued')
          )
-         SELECT at, source, id, actor, action, outcome, job, job_action FROM activity
+         SELECT at, source, id, actor, action, outcome, job, job_action, support_session FROM activity
           WHERE $4::timestamptz IS NULL OR (at, source, id) < ($4, $5, $6)
           ORDER BY at DESC, source DESC, id DESC LIMIT $7",
     )
@@ -313,6 +331,7 @@ pub async fn device_activity(
     .bind(source)
     .bind(id)
     .bind((PAGE + 1) as i64)
+    .bind(p.user_id.to_string())
     .fetch_all(&state.db)
     .await?;
     let older = (rows.len() > PAGE).then(|| {
@@ -322,43 +341,123 @@ pub async fn device_activity(
     let events = rows
         .into_iter()
         .take(PAGE)
-        .map(|(at, _, _, actor, action, outcome, job, job_action)| {
-            let label = match action.as_str() {
-                "device.enroll" => "Device enrolled",
-                "device.connect" => "Agent authenticated",
-                "device.disconnect" => "Agent connection closed",
-                "device.update" => "Device details changed",
-                "device.revoke" => "Device credential revoked",
-                "device.retire" => "Device retired",
-                "device.physical_console.requested" => "Physical console check requested",
-                "device.physical_console.result" => "Physical console check recorded",
-                "job.create" => "Job requested",
-                "job.cancel" => "Job cancellation requested",
-                "dispatched" => "Job dispatched",
-                "acknowledged" => "Agent accepted the job",
-                "running" => "Agent started the job",
-                "completed" => "Agent reported job completion",
-                "failed" => "Job failed",
-                "timed_out" => "Job timed out",
-                "cancelled" => "Job canceled",
-                "expired" => "Job expired before dispatch",
-                "outcome_unknown" => "Job outcome unknown",
-                "queued" => "Job returned to queue",
-                other => other,
-            };
-            DeviceActivityEvent {
-                at,
-                action: match outcome.as_str() {
-                    "failed" | "denied" => format!("{label} ({outcome})"),
-                    _ => label.to_string(),
-                },
-                actor: actor.strip_prefix("user:").unwrap_or(&actor).to_string(),
-                job,
-                job_action,
-            }
-        })
+        .map(
+            |(at, _, _, actor, action, outcome, job, job_action, support_session)| {
+                let label = match action.as_str() {
+                    "device.enroll" => "Device enrolled",
+                    "device.connect" => "Agent authenticated",
+                    "device.disconnect" => "Agent connection closed",
+                    "device.update" => "Device details changed",
+                    "device.agent_update_policy.true" => {
+                        "Device opted out of automatic agent updates"
+                    }
+                    "device.agent_update_policy.false" => {
+                        "Device follows the organization update policy"
+                    }
+                    "organization.agent_update_policy.true" => {
+                        "Organization enabled automatic agent updates"
+                    }
+                    "organization.agent_update_policy.false" => {
+                        "Organization paused automatic agent updates"
+                    }
+                    "device.revoke" => "Device credential revoked",
+                    "device.retire" => "Device retired",
+                    "device.physical_console.requested" => "Physical console check requested",
+                    "device.physical_console.result" => "Physical console check recorded",
+                    "device.background_terminal_policy.requested" => {
+                        "Background terminal policy check requested"
+                    }
+                    "device.background_terminal_policy.result" => {
+                        "Background terminal policy check recorded"
+                    }
+                    "device.background_terminal_admission.requested" => {
+                        "Background terminal access confirmation requested"
+                    }
+                    "device.background_terminal_admission.result" => {
+                        "Background terminal access confirmation recorded"
+                    }
+                    "device.support.connected" => "Linked screen share connected",
+                    "device.support.ended" => "Linked screen share ended",
+                    "job.create" => "Job requested",
+                    "job.authorize" => "Script run authorization submitted",
+                    "script.schedule.create" => "Script schedule created",
+                    "script.schedule.cancel" => "Script schedule canceled",
+                    "job.cancel" => "Job cancellation requested",
+                    "dispatched" => "Job dispatched",
+                    "acknowledged" => "Agent accepted the job",
+                    "running" => "Agent started the job",
+                    "completed" => "Agent reported job completion",
+                    "failed" => "Job failed",
+                    "timed_out" => "Job timed out",
+                    "cancelled" => "Job canceled",
+                    "script_approval_withdrawn" => "Script approval withdrawn before dispatch",
+                    "expired" => "Job expired before dispatch",
+                    "outcome_unknown" => "Job outcome unknown",
+                    "queued" => "Job returned to queue",
+                    other => other,
+                };
+                DeviceActivityEvent {
+                    at,
+                    action: match outcome.as_str() {
+                        "failed" | "denied" => format!("{label} ({outcome})"),
+                        _ => label.to_string(),
+                    },
+                    actor: actor.strip_prefix("user:").unwrap_or(&actor).to_string(),
+                    job,
+                    job_action,
+                    support_session: support_session.and_then(|id| id.parse().ok()),
+                }
+            },
+        )
         .collect();
     Ok((events, older))
+}
+
+pub async fn inventory_history(
+    state: &Shared,
+    p: &Principal,
+    id: Uuid,
+) -> sqlx::Result<Vec<InventorySample>> {
+    use flyw8t_protocol::inventory::{Disk, Hardware};
+    let (all, orgs) = p.scope();
+    let samples: Vec<(OffsetDateTime, Option<Value>, Option<Value>)> = sqlx::query_as(
+        "SELECT i.received_at, i.data->'hardware', i.data->'disks'
+         FROM inventory_snapshots i JOIN devices d ON d.id = i.device_id
+         WHERE d.id = $1 AND ($2 OR d.organization_id = ANY($3))
+         ORDER BY i.received_at DESC, i.id DESC LIMIT 24",
+    )
+    .bind(id)
+    .bind(all)
+    .bind(orgs)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(samples
+        .into_iter()
+        .rev()
+        .map(|(received_at, hardware, disks)| {
+            let memory_used = hardware
+                .and_then(|data| serde_json::from_value::<Hardware>(data).ok())
+                .filter(|h| h.memory_total_bytes > 0)
+                .map(|h| used_percent(h.memory_total_bytes, h.memory_available_bytes));
+            let disk_used = disks
+                .and_then(|data| serde_json::from_value::<Vec<Disk>>(data).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|d| !d.removable && d.total_bytes > 0)
+                .map(|d| {
+                    (
+                        d.mount_point,
+                        used_percent(d.total_bytes, d.available_bytes),
+                    )
+                })
+                .collect();
+            InventorySample {
+                received_at,
+                memory_used,
+                disk_used,
+            }
+        })
+        .collect())
 }
 
 pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Option<DeviceDetail>> {
@@ -374,8 +473,10 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
     let Some(row) = row else { return Ok(None) };
     let row = device_row(state, row);
     let org_id = row.organization.id;
-    let (enrolled_at, notes, site_id, os_family): (OffsetDateTime, String, Option<Uuid>, String) = sqlx::query_as(
-        "SELECT enrolled_at, notes, site_id, os_family FROM devices WHERE id = $1 AND organization_id = $2",
+    let (enrolled_at, notes, site_id, os_family, device_opted_out, organization_enabled):
+        (OffsetDateTime, String, Option<Uuid>, String, bool, bool) = sqlx::query_as(
+        "SELECT d.enrolled_at, d.notes, d.site_id, d.os_family, d.agent_updates_opt_out, o.automatic_agent_updates
+         FROM devices d JOIN organizations o ON o.id = d.organization_id WHERE d.id = $1 AND d.organization_id = $2",
     )
     .bind(id)
     .bind(org_id)
@@ -432,6 +533,10 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
         site_id,
         sites,
         fields,
+        agent_update_policy: AgentUpdatePolicy {
+            organization_enabled,
+            device_opted_out,
+        },
     }))
 }
 
@@ -800,8 +905,9 @@ pub async fn organizations(
     only: Option<Uuid>,
 ) -> sqlx::Result<Vec<OrgSummary>> {
     let (all, orgs) = p.scope();
-    let rows: Vec<(Uuid, String, OffsetDateTime, i64)> = sqlx::query_as(
-        "SELECT o.id, o.name, o.created_at, (SELECT count(*) FROM devices d WHERE d.organization_id = o.id AND d.retired_at IS NULL)
+    let rows: Vec<(Uuid, String, OffsetDateTime, i64, bool)> = sqlx::query_as(
+        "SELECT o.id, o.name, o.created_at, (SELECT count(*) FROM devices d WHERE d.organization_id = o.id AND d.retired_at IS NULL),
+                o.automatic_agent_updates
            FROM organizations o WHERE ($1 OR o.id = ANY($2)) AND ($3::uuid IS NULL OR o.id = $3) ORDER BY lower(o.name)",
     )
     .bind(all)
@@ -810,7 +916,7 @@ pub async fn organizations(
     .fetch_all(&state.db)
     .await?;
     let mut out = Vec::with_capacity(rows.len());
-    for (id, name, created_at, device_count) in rows {
+    for (id, name, created_at, device_count, automatic_agent_updates) in rows {
         let sites: Vec<(Uuid, String)> = sqlx::query_as(
             "SELECT id, name FROM sites WHERE organization_id = $1 ORDER BY lower(name)",
         )
@@ -822,6 +928,7 @@ pub async fn organizations(
             name,
             device_count,
             created_at,
+            automatic_agent_updates,
             sites: sites
                 .into_iter()
                 .map(|(id, name)| SiteView { id, name })

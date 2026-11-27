@@ -38,38 +38,276 @@ async fn seed(server: &TestServer, sql: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn fleet_update_preferences_respect_the_organization_pause_and_audit_changes() {
+    let server = start_fresh().await;
+    let admin = server.admin_sudo().await;
+    let org = admin.create_org(&server, "Update pilot").await;
+    let foreign = admin.create_org(&server, "Other fleet").await;
+    let tech = technician(&server, &admin, "pilot-tech@example.test", org).await;
+    let mut ids = Vec::new();
+    for (name, organization) in [("opted-out", org), ("inherited", org), ("outside", foreign)] {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO devices (organization_id, hostname, os_family) VALUES ($1, $2, 'windows')
+             RETURNING id",
+        )
+        .bind(organization)
+        .bind(name)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let organization = format!("/organizations/{org}");
+    let device = format!("/devices/{}", ids[0]);
+    let inherited = format!("/devices/{}", ids[1]);
+    let outside = format!("/devices/{}", ids[2]);
+    let org_policy = format!("{organization}/agent-update-policy");
+    let device_policy = format!("{device}/agent-update-policy");
+    let initial = admin.get(&server, &device).await;
+    assert_eq!(initial.status, StatusCode::OK);
+    assert!(initial.body.contains("Enabled by policy"));
+    assert!(initial.body.contains(&device_policy));
+    assert!(admin
+        .get(&server, &organization)
+        .await
+        .body
+        .contains(&org_policy));
+    let tech_page = tech.get(&server, &device).await;
+    assert!(tech_page.body.contains("Enabled by policy"));
+    assert!(!tech_page.body.contains(&device_policy));
+    assert_eq!(
+        tech.get(&server, &outside).await.status,
+        StatusCode::NOT_FOUND
+    );
+    for path in [&org_policy, &device_policy] {
+        assert_eq!(
+            tech.post(&server, path, &[("policy", "paused")])
+                .await
+                .status,
+            StatusCode::FORBIDDEN,
+        );
+    }
+    let missing_csrf = axum::http::Request::post(&org_policy)
+        .header(axum::http::header::COOKIE, &admin.cookie)
+        .body(axum::body::Body::from("policy=paused"))
+        .unwrap();
+    assert_eq!(
+        server.request(missing_csrf).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        admin
+            .post(
+                &server,
+                &org_policy,
+                &[("policy", "paused"), ("policy", "enabled")]
+            )
+            .await
+            .status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+
+    for (path, policy) in [
+        (&device_policy, "opt-out"),
+        (&device_policy, "opt-out"),
+        (&org_policy, "paused"),
+    ] {
+        assert_eq!(
+            admin
+                .post(&server, path, &[("policy", policy)])
+                .await
+                .status,
+            StatusCode::SEE_OTHER,
+        );
+    }
+    assert!(admin
+        .get(&server, &device)
+        .await
+        .body
+        .contains("Organization paused · Device opted out"));
+    assert!(admin
+        .get(&server, &inherited)
+        .await
+        .body
+        .contains("Paused by organization"));
+    assert!(admin
+        .get(&server, &outside)
+        .await
+        .body
+        .contains("Enabled by policy"));
+    assert_eq!(
+        admin
+            .post(&server, &device_policy, &[("policy", "enabled")])
+            .await
+            .status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the device can only opt out or inherit"
+    );
+    assert_eq!(
+        admin
+            .post(&server, &org_policy, &[("policy", "enabled")])
+            .await
+            .status,
+        StatusCode::SEE_OTHER,
+    );
+    assert!(admin
+        .get(&server, &device)
+        .await
+        .body
+        .contains("Device opted out"));
+    assert!(admin
+        .get(&server, &inherited)
+        .await
+        .body
+        .contains("Enabled by policy"));
+    assert_eq!(
+        admin
+            .post(&server, &device_policy, &[("policy", "inherit")])
+            .await
+            .status,
+        StatusCode::SEE_OTHER,
+    );
+    assert!(admin
+        .get(&server, &device)
+        .await
+        .body
+        .contains("Enabled by policy"));
+
+    let activity = tech.get(&server, &format!("{device}/activity")).await;
+    for label in [
+        "Device opted out of automatic agent updates",
+        "Organization paused automatic agent updates",
+        "Organization enabled automatic agent updates",
+        "Device follows the organization update policy",
+    ] {
+        assert_eq!(activity.body.matches(label).count(), 1, "{label}");
+    }
+    let other_activity = admin.get(&server, &format!("{outside}/activity")).await;
+    assert!(!other_activity
+        .body
+        .contains("Organization paused automatic agent updates"));
+    let events: Vec<(String, Uuid, Value)> = sqlx::query_as(
+        "SELECT action, target_id, detail FROM audit_events WHERE organization_id = $1
+           AND action IN ('organization.agent_update_policy', 'device.agent_update_policy') ORDER BY id",
+    )
+    .bind(org)
+    .fetch_all(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        events,
+        [
+            (
+                "device.agent_update_policy".into(),
+                ids[0],
+                serde_json::json!({"from_opted_out": false, "to_opted_out": true})
+            ),
+            (
+                "organization.agent_update_policy".into(),
+                org,
+                serde_json::json!({"from_enabled": true, "to_enabled": false})
+            ),
+            (
+                "organization.agent_update_policy".into(),
+                org,
+                serde_json::json!({"from_enabled": false, "to_enabled": true})
+            ),
+            (
+                "device.agent_update_policy".into(),
+                ids[0],
+                serde_json::json!({"from_opted_out": true, "to_opted_out": false})
+            ),
+        ],
+    );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn device_activity_combines_scoped_audit_and_recorded_job_events() {
     let server = start_fresh().await;
     let admin = server.admin_sudo().await;
     let acme = admin.create_org(&server, "Acme").await;
     let foreign = admin.create_org(&server, "Other organization").await;
     let tech = technician(&server, &admin, "tech@example.test", acme).await;
+    let readonly = admin
+        .post(
+            &server,
+            "/admin/users",
+            &[
+                ("email", "readonly@example.test"),
+                ("display_name", "Read-only"),
+                ("password", "readonly-password-123"),
+                ("role", "readonly"),
+                ("org", &acme.to_string()),
+            ],
+        )
+        .await;
+    assert_eq!(readonly.location(), "/admin?m=user-created");
+    let readonly = server
+        .login("readonly@example.test", "readonly-password-123")
+        .await;
     let token = admin.enrollment_token(&server, acme, "60", "1").await;
     let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
     let id = agent.device_id;
     let (stop, session) = agent.connect(&server.url());
     wait_connected(&server, id).await;
-    let job = admin.run(&server, id, &[("action", "system.info")]).await;
+    let device_path = format!("/devices/{id}");
+    let refresh = tech
+        .post(
+            &server,
+            &format!("{device_path}/jobs"),
+            &[("action", "system.info"), ("return_to_device", "yes")],
+        )
+        .await;
+    let location = refresh.location();
+    assert!(location.starts_with(&format!("{device_path}?m=inventory-queued&refresh=")));
+    let job: Uuid = location.split_once("&refresh=").unwrap().1.parse().unwrap();
     wait_state(&server, job, "completed", Duration::from_secs(15)).await;
+    let updated = tech.get(&server, &location).await;
+    assert!(updated.body.contains("Refresh data"));
+    assert!(updated
+        .body
+        .contains("Memory used, readings from oldest to newest"));
     stop.cancel();
     let _ = session.await.unwrap();
 
     sqlx::query("INSERT INTO audit_events (actor_type, actor_label, channel, organization_id, action, target_type, target_id, outcome)
                  VALUES ('user', 'foreign-event@example.test', 'web', $1, 'device.update', 'device', $2, 'success')")
         .bind(foreign).bind(id).execute(&server.state.db).await.unwrap();
-    let device_path = format!("/devices/{id}");
     let path = format!("{device_path}/activity");
     assert!(admin.get(&server, &device_path).await.body.contains(&path));
-    assert!(!tech.get(&server, &device_path).await.body.contains(&path));
+    assert!(tech.get(&server, &device_path).await.body.contains(&path));
+    assert!(!readonly
+        .get(&server, &device_path)
+        .await
+        .body
+        .contains(&path));
     let page = admin.get(&server, &path).await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     assert!(page.body.contains("Agent authenticated"));
     assert!(page.body.contains("Agent reported job completion"));
     assert!(page.body.contains("Job requested"));
-    assert!(page.body.contains(ADMIN_EMAIL));
+    assert!(page.body.contains("tech@example.test"));
     assert!(page.body.contains(&format!("/jobs/{job}")));
     assert!(!page.body.contains("foreign-event@example.test"));
-    assert_eq!(tech.get(&server, &path).await.status, StatusCode::FORBIDDEN);
+    let tech_activity = tech.get(&server, &path).await;
+    assert_eq!(
+        tech_activity.status,
+        StatusCode::OK,
+        "{}",
+        tech_activity.body
+    );
+    assert!(tech_activity.body.contains("Agent reported job completion"));
+    assert!(!tech_activity.body.contains("foreign-event@example.test"));
+    assert_eq!(
+        tech.get(&server, "/audit").await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        readonly.get(&server, &path).await.status,
+        StatusCode::FORBIDDEN
+    );
     let foreign_token = admin.enrollment_token(&server, foreign, "60", "1").await;
     let foreign_agent = TestAgent::enroll(&server.url(), &foreign_token)
         .await
