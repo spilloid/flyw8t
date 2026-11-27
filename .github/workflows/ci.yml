@@ -112,6 +112,8 @@ jobs:
           node-version: 22
       - name: Compose startup, MFA sign-in and restore into an empty database
         run: node scripts/compose-smoke.mjs
+      - name: Compose upgrade from published 0.2.0 and recover the baseline
+        run: node scripts/compose-smoke.mjs --upgrade-from-0.2.0
 
   mac-probe:
     name: Mac feasibility probe compiles (no runtime gate)

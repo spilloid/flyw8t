@@ -355,6 +355,10 @@ The offline signer can verify a staged update against the exact intended release
 
 The signer and protocol suites passed 56 tests, with one fixture generator ignored. The staged check also accepted the optimized Windows agent under a disposable fixture key. It rejected a different expected release version, a wrong filename, and modified bytes. Removing the exact-version comparison made the mismatch regression fail. Production Authenticode and verification of the final publication bytes remain open.
 
+## Compose upgrade and recovery rehearsal, 2026-11-27
+
+The container CI job now rehearses the transition from the published 0.2.0 image to the candidate and recovers the 0.2.0 image from its original database snapshot. The fixture checks the exact container image IDs, migration history, MFA and organization records. The fresh-install recovery fixture runs separately. The baseline digest was verified against the release and public registry. The CI runner still needs to execute the full rehearsal.
+
 ## Fleet update preflight, 2026-11-27
 
 The Windows agent can check current fleet preferences after verifying a local candidate with the pinned release key and Authenticode. The short-lived socket authenticates independently of the service connection. The server records the effective policy and the device-reported release metadata before responding.
