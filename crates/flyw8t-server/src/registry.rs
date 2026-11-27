@@ -244,19 +244,22 @@ impl Registry {
         }
     }
 
-    /// Check local policy once on the authenticated connection. The result is only an observation.
+    /// Check local policy once on the authenticated connection, within the confirmation window.
+    /// The result is only an observation.
     pub(crate) async fn check_background_terminal_policy(
         &self,
         device_id: Uuid,
         request_id: Uuid,
         expected_connection: Option<Uuid>,
+        valid_until: Option<Instant>,
     ) -> Result<(Uuid, BackgroundTerminalPolicy), ConsoleCheckError> {
+        let deadline = Instant::now() + DEVICE_CHECK_TIMEOUT;
         match self
             .observe(
                 device_id,
                 request_id,
                 CheckKind::BackgroundTerminalPolicy,
-                Instant::now() + DEVICE_CHECK_TIMEOUT,
+                valid_until.map_or(deadline, |expires| expires.min(deadline)),
                 expected_connection,
             )
             .await?
@@ -299,6 +302,10 @@ impl Registry {
             };
             if live.checks.len() >= MAX_DEVICE_CHECKS || live.checks.contains_key(&device_id) {
                 return Err(ConsoleCheckError::Busy);
+            }
+            // A caller can wait for the registry lock after checking its own deadline.
+            if Instant::now() >= deadline {
+                return Err(ConsoleCheckError::Timeout);
             }
             let conn_id = conn.conn_id;
             conn.tx.try_send(message).map_err(|err| match err {
@@ -507,12 +514,7 @@ mod tests {
             r.check_until(device, request, Instant::now()).await,
             Err(ConsoleCheckError::Timeout)
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            ServerMsg::CheckPhysicalConsole {
-                request_id: request
-            }
-        );
+        assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
         assert!(!r.physical_console_status(device, id, request, state));
         let cancelled = Uuid::new_v4();
         let mut check = Box::pin(r.check_physical_console(device, cancelled));

@@ -343,6 +343,12 @@ MCP screenshot permission stays pending while Audit records the participant's de
 
 Four screenshot unit tests and the PostgreSQL integration test passed in isolated Linux containers. The integration test holds the audit table lock, checks that access stays pending and the participant socket responds, then releases the lock and verifies the approved flow. Reporting the recording state as allowed made the regression fail.
 
+## Background terminal confirmation deadline, 2026-11-27
+
+The browser confirmation's remaining lifetime now limits the registry's policy observation as well as the console response. The registry checks its deadline under the connection lock before queuing a probe. The same deadline governs reply matching. Tokio's timeout polls the wrapped future before checking its timer, so wrapping the preflight alone could allow the registry to enqueue after waiting for its lock. The live terminal remains open.
+
+The five registry tests and the terminal confirmation regression passed in an isolated Linux container on 10t7. Removing the under-lock expiry check made the regression detect a queued policy probe. Restoring the check made the regression pass again.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
