@@ -7,7 +7,8 @@ use base64::Engine;
 use common::*;
 use flyw8t_agent::identity::DeviceKey;
 use flyw8t_protocol::messages::{
-    AgentMsg, CapturedStream, ExecOutcome, Finished, JobPhase, JobReport, RefusalCode,
+    AgentMsg, AgentUpdatePolicy, CapturedStream, ExecOutcome, Finished, JobPhase, JobReport,
+    RefusalCode,
 };
 use flyw8t_protocol::{auth, ServerMsg, PROTOCOL_VERSION};
 use futures_util::{SinkExt, StreamExt};
@@ -99,6 +100,154 @@ async fn next(ws: &mut Ws) -> ServerMsg {
             return serde_json::from_str(t.as_str()).unwrap();
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn update_preflight_observes_current_fleet_policy_without_replacing_the_live_agent() {
+    use flyw8t_agent::{connection::observe_update_policy, AgentConfig};
+    use flyw8t_protocol::agent_update::Release;
+
+    let server = start_fresh().await;
+    let (admin, org, agent) = enrolled(&server).await;
+    let _live = RawAgent::authenticate(&server, &agent).await;
+    wait_connected(&server, agent.device_id).await;
+    let live_session = server.state.registry.current_conn(agent.device_id).unwrap();
+    let cfg = AgentConfig::load(agent.dir.path()).unwrap();
+    let candidate = Release::from_artifact("0.3.1".into(), b"synthetic device claim").unwrap();
+
+    assert_eq!(
+        observe_update_policy(&cfg, candidate.clone())
+            .await
+            .unwrap(),
+        AgentUpdatePolicy::Enabled,
+    );
+    sqlx::query("UPDATE devices SET agent_updates_opt_out = true WHERE id = $1")
+        .bind(agent.device_id)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        observe_update_policy(&cfg, candidate.clone())
+            .await
+            .unwrap(),
+        AgentUpdatePolicy::DeviceOptedOut,
+    );
+    sqlx::query("UPDATE organizations SET automatic_agent_updates = false WHERE id = $1")
+        .bind(org)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        observe_update_policy(&cfg, candidate.clone())
+            .await
+            .unwrap(),
+        AgentUpdatePolicy::OrganizationPaused,
+    );
+
+    let key = DeviceKey::load(&cfg.key_path()).unwrap();
+    let mut probe = RawAgent::connect(&server).await;
+    let signature = key.sign_b64(&auth::agent_update_policy_message(
+        &probe.nonce,
+        agent.device_id,
+        &candidate,
+    ));
+    let request = AgentMsg::AgentUpdatePolicyRequest {
+        protocol_version: PROTOCOL_VERSION,
+        device_id: agent.device_id,
+        signature: signature.clone(),
+        candidate: candidate.clone(),
+    };
+    let mut tampered = candidate.clone();
+    tampered.version = "0.3.2".into();
+    probe
+        .send(&AgentMsg::AgentUpdatePolicyRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: agent.device_id,
+            signature,
+            candidate: tampered,
+        })
+        .await;
+    assert!(matches!(
+        next(&mut probe.ws).await,
+        ServerMsg::Refused {
+            code: RefusalCode::AuthFailed,
+            ..
+        }
+    ));
+    let mut replay = RawAgent::connect(&server).await;
+    replay.send(&request).await;
+    assert!(matches!(
+        next(&mut replay.ws).await,
+        ServerMsg::Refused {
+            code: RefusalCode::AuthFailed,
+            ..
+        }
+    ));
+
+    assert_eq!(
+        server.state.registry.current_conn(agent.device_id),
+        Some(live_session)
+    );
+    sqlx::query("UPDATE device_credentials SET revoked_at = now() WHERE device_id = $1")
+        .bind(agent.device_id)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let error = observe_update_policy(&cfg, candidate.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref(),
+        Some(flyw8t_agent::Fatal::Revoked(_))
+    ));
+
+    let evidence: Vec<(String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
+        "SELECT outcome, detail->'policy', detail->'device_reported_candidate'
+           FROM audit_events
+          WHERE action = 'device.agent_update_preflight' AND organization_id = $1
+            AND target_type = 'device' AND actor_id = $2 AND target_id = $2
+          ORDER BY id",
+    )
+    .bind(org)
+    .bind(agent.device_id)
+    .fetch_all(&server.state.db)
+    .await
+    .unwrap();
+    let claimed = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(
+        evidence,
+        [
+            (
+                "success".into(),
+                serde_json::json!("enabled"),
+                claimed.clone()
+            ),
+            (
+                "denied".into(),
+                serde_json::json!("device_opted_out"),
+                claimed.clone()
+            ),
+            (
+                "denied".into(),
+                serde_json::json!("organization_paused"),
+                claimed
+            ),
+        ]
+    );
+    let activity = admin
+        .get(&server, &format!("/devices/{}/activity", agent.device_id))
+        .await;
+    assert_eq!(activity.status, axum::http::StatusCode::OK);
+    assert!(activity
+        .body
+        .contains("Fleet policy allowed the update preflight"));
+    assert!(activity
+        .body
+        .contains("Update preflight blocked by device opt-out"));
+    assert!(activity
+        .body
+        .contains("Update preflight blocked by organization policy"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -67,6 +67,15 @@ impl Release {
         })
     }
 
+    /// Check the release fields before consuming them as metadata.
+    pub fn validate_metadata(&self) -> Result<Version, Error> {
+        let version = release_version(&self.version)?;
+        if !(1..=MAX_WINDOWS_AGENT_BYTES as u64).contains(&self.size_bytes) {
+            return Err(Error::Size);
+        }
+        Ok(version)
+    }
+
     pub fn artifact_name(&self) -> Result<String, Error> {
         let version = release_version(&self.version)?;
         Ok(format!(
@@ -134,10 +143,7 @@ impl SignedRelease {
     }
 
     fn verify_metadata(&self, trusted_key: &[u8]) -> Result<Version, Error> {
-        let version = release_version(&self.release.version)?;
-        if !(1..=MAX_WINDOWS_AGENT_BYTES as u64).contains(&self.release.size_bytes) {
-            return Err(Error::Size);
-        }
+        let version = self.release.validate_metadata()?;
         if !verify_ed25519(
             trusted_key,
             &self.release.signing_bytes(),

@@ -290,8 +290,10 @@ pub async fn device_activity(
              SELECT a.at, 0::smallint AS source, a.id,
                     CASE WHEN a.action IN ('device.support.connected', 'device.support.ended')
                          THEN coalesce(a.detail->>'technician', a.actor_label) ELSE a.actor_label END AS actor,
-                    CASE WHEN a.action = 'device.agent_update_policy'
-                         THEN a.action || '.' || (a.detail->>'to_opted_out') ELSE a.action END AS action,
+                    CASE a.action
+                         WHEN 'device.agent_update_policy' THEN a.action || '.' || (a.detail->>'to_opted_out')
+                         WHEN 'device.agent_update_preflight' THEN a.action || '.' || (a.detail->>'policy')
+                         ELSE a.action END AS action,
                     a.outcome, NULL::uuid AS job, NULL::text AS job_action,
                     CASE WHEN a.action IN ('device.support.connected', 'device.support.ended')
                               AND ($2 OR a.detail->>'technician_id' = $8)
@@ -359,6 +361,15 @@ pub async fn device_activity(
                     }
                     "organization.agent_update_policy.false" => {
                         "Organization paused automatic agent updates"
+                    }
+                    "device.agent_update_preflight.enabled" => {
+                        "Fleet policy allowed the update preflight"
+                    }
+                    "device.agent_update_preflight.organization_paused" => {
+                        "Update preflight blocked by organization policy"
+                    }
+                    "device.agent_update_preflight.device_opted_out" => {
+                        "Update preflight blocked by device opt-out"
                     }
                     "device.revoke" => "Device credential revoked",
                     "device.retire" => "Device retired",

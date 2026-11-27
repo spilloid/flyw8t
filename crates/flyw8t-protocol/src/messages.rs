@@ -1,5 +1,6 @@
 //! Message envelopes. Every message is one JSON text frame tagged by `type`.
 
+use crate::agent_update::Release;
 use crate::catalog::Action;
 use crate::inventory::InventoryReport;
 use crate::PhysicalConsoleState;
@@ -39,6 +40,8 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enrollment_scope: Option<EnrollmentScope>,
     },
+    /// Fresh organization/device policy observation for a one-shot update preflight.
+    AgentUpdatePolicyResult { policy: AgentUpdatePolicy },
     /// Trust-list versions (ADR-0015 section 7): the whole chain for a request made before authenticating, or the
     /// versions after the one the agent holds. The agent verifies every one; the server is only the courier.
     TrustUpdate {
@@ -139,6 +142,15 @@ pub enum RefusalCode {
     Superseded,
 }
 
+/// Effective fleet policy at the time of an authenticated update preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentUpdatePolicy {
+    Enabled,
+    OrganizationPaused,
+    DeviceOptedOut,
+}
+
 /// Agent -> server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -165,6 +177,13 @@ pub enum AgentMsg {
         /// server offers nothing an agent did not list.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
+    },
+    /// Read fleet policy in a separate handshake without registering a live agent connection.
+    AgentUpdatePolicyRequest {
+        protocol_version: u32,
+        device_id: Uuid,
+        signature: String,
+        candidate: Release,
     },
     /// Ask for trust-list versions: before authenticating, the whole chain (enrollment, `trust pin`); after, the
     /// versions after `after`.

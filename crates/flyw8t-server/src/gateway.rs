@@ -223,7 +223,8 @@ async fn handle(
                 )
                 .await;
             }
-            match authenticate(state, &nonce, device_id, &signature).await? {
+            let message = auth::auth_message(&nonce, device_id);
+            match authenticate(state, device_id, &message, &signature).await? {
                 AuthResult::Ok {
                     hostname,
                     key,
@@ -278,11 +279,75 @@ async fn handle(
                 }
             }
         }
+        AgentMsg::AgentUpdatePolicyRequest {
+            protocol_version,
+            device_id,
+            signature,
+            candidate,
+        } => {
+            if protocol_version != PROTOCOL_VERSION {
+                return refuse(
+                    sink,
+                    RefusalCode::ProtocolVersion,
+                    "unsupported protocol version",
+                )
+                .await;
+            }
+            if candidate.validate_metadata().is_err() {
+                return refuse(
+                    sink,
+                    RefusalCode::BadMessage,
+                    "invalid update candidate metadata",
+                )
+                .await;
+            }
+            let message = auth::agent_update_policy_message(&nonce, device_id, &candidate);
+            let (key, organization_id) = match authenticate(state, device_id, &message, &signature)
+                .await?
+            {
+                AuthResult::Ok {
+                    key,
+                    organization_id,
+                    ..
+                } => (key, organization_id),
+                AuthResult::Revoked => {
+                    return refuse(
+                        sink,
+                        RefusalCode::Revoked,
+                        "this device's credential has been revoked",
+                    )
+                    .await;
+                }
+                AuthResult::Failed => {
+                    return refuse(sink, RefusalCode::AuthFailed, "authentication failed").await;
+                }
+            };
+            let policy = crate::agent_update_policy::observe(
+                &state.db,
+                device_id,
+                organization_id,
+                &key,
+                &candidate,
+                &ip,
+            )
+            .await?;
+            match policy {
+                Some(policy) => send(sink, &ServerMsg::AgentUpdatePolicyResult { policy }).await,
+                None => {
+                    refuse(
+                        sink,
+                        RefusalCode::Revoked,
+                        "device enrollment is no longer active",
+                    )
+                    .await
+                }
+            }
+        }
         _ => {
             refuse(
                 sink,
                 RefusalCode::BadMessage,
-                "expected enroll or authenticate",
+                "expected a handshake message",
             )
             .await
         }
@@ -419,8 +484,8 @@ struct DeviceCredential {
 
 async fn authenticate(
     state: &Shared,
-    nonce: &[u8],
     device_id: Uuid,
+    message: &[u8],
     signature_b64: &str,
 ) -> anyhow::Result<AuthResult> {
     let Ok(signature) = base64::engine::general_purpose::STANDARD.decode(signature_b64) else {
@@ -437,12 +502,11 @@ async fn authenticate(
     .bind(device_id)
     .fetch_all(&state.db)
     .await?;
-    let message = auth::auth_message(nonce, device_id);
     // Only a key that actually signed this nonce decides the answer, so "revoked" is never
     // disclosed to someone who cannot prove possession of that key.
     for cred in creds {
         if UnparsedPublicKey::new(&ED25519, &cred.public_key)
-            .verify(&message, &signature)
+            .verify(message, &signature)
             .is_ok()
         {
             return Ok(if cred.active {
@@ -685,7 +749,9 @@ async fn on_message(
                 send(sink, &ServerMsg::TrustUpdate { versions }).await?;
             }
         }
-        AgentMsg::Enroll { .. } | AgentMsg::Authenticate { .. } => {
+        AgentMsg::Enroll { .. }
+        | AgentMsg::Authenticate { .. }
+        | AgentMsg::AgentUpdatePolicyRequest { .. } => {
             let _ = refuse(sink, RefusalCode::BadMessage, "already authenticated").await;
             anyhow::bail!("handshake message on an authenticated connection");
         }

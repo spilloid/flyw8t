@@ -69,7 +69,8 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 ### T9: Compromised software updates
 - **Control:** there is no automatic update mechanism. Agents are installed and upgraded by an administrator.
 - **Update preflight:** the offline signer can produce a manifest signed by a separate Ed25519 release key. A Windows administrator can pin its public key in the protected default agent state directory. The Windows x64 agent's local `update-check` validates against that pin by default and checks the expected Authenticode publisher and timestamp. An explicitly supplied key applies to one diagnostic invocation. The signed-artifact runtime test is part of the Windows signing rehearsal.
-- **Residual:** automatic updates still need release-key pinning on the endpoint, delivery policy, and verified replacement and rollback.
+- **Fleet preflight:** the enrolled agent can check current fleet preferences for a verified local candidate with its pinned key. The server authenticates the device's nonce-bound request and records the outcome.
+- **Residual:** automatic updates still need trusted release-key distribution, approved release delivery, and verified replacement and rollback.
 
 ### T10: Compromised server or database
 - **Current controls:** a compromised server can request catalog actions and read inventory. The endpoint holds its private key, and Argon2id protects passwords at rest. [ADR-0015](decisions/ADR-0015-script-trust-and-running.md) defines agent-verified script approvals and fresh authorization for C2 and C3 runs. Section 9 describes which signed jobs a compromised server can still request.

@@ -1,6 +1,6 @@
 # Agent protocol (version 1)
 
-The agent makes one outbound WebSocket connection to `wss://<server>/api/agent/ws` (plain `ws://` only to loopback). Every message is one JSON text frame tagged by `"type"`. The types live in `crates/flyw8t-protocol`; unknown message types and unknown actions fail to deserialize and end the connection.
+The running agent maintains an outbound WebSocket connection to `wss://<server>/api/agent/ws` (plain `ws://` only to loopback). Every message is one JSON text frame tagged by `"type"`. The types live in `crates/flyw8t-protocol`; unknown message types and unknown actions fail to deserialize and end the connection.
 
 ## Windows physical console
 
@@ -27,7 +27,7 @@ Windows reports the session attached to the physical console and identifies its 
 | Idle connection | 3 × heartbeat with no message → closed | both |
 | Handshakes per source IP | 60 / min; enrollments 10 / min | server |
 | Inbound messages per authenticated connection | 100 / s (then `Refused{RateLimited}` and close) | server |
-| Agent processes per state directory | 1 (exclusive OS lock; a starting agent waits up to 15 s for a previous one to exit) | agent |
+| Long-lived agent processes per state directory | 1 (exclusive OS lock; a starting agent waits up to 15 s for a previous one to exit) | agent |
 
 ## Handshake
 
@@ -58,6 +58,8 @@ agent                                   server
 4. increments `uses`, creates the device **in the token's organization and site** (the device's `facts` are display hints only), stores the public key, and audits it, all in one transaction.
 
 Every failure returns the same message, so there is no oracle for which tokens exist. The reason is in the audit log.
+
+**Agent update preflight.** An enrolled device can send `AgentUpdatePolicyRequest{protocol_version, device_id, signature, candidate}` as a handshake message. The signature uses the device key over `"flyw8t/agent-update-policy/v1\0" ‖ nonce ‖ device_id (16 bytes) ‖ candidate signing bytes`. The server rechecks the credential and reads effective organization and device preferences in a single database statement. It commits an audit event before replying with `AgentUpdatePolicyResult{policy}` and closing. Possible policy values are `enabled`, `organization_paused` and `device_opted_out`. The candidate is a device-reported release version, size and digest. The standard long-lived connection can stay open. Older servers reject the new request, and existing agent handshakes continue using the same messages as before.
 
 ## Messages after `Welcome`
 

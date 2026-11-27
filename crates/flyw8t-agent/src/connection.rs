@@ -12,11 +12,14 @@ use crate::spent::Spent;
 use crate::trust::{Pin, Pinned, Trust};
 use anyhow::{bail, Context, Result};
 use base64::Engine;
+use flyw8t_protocol::agent_update::Release;
 use flyw8t_protocol::messages::{
     AgentMsg, DeviceFacts, ExecOutcome, Finished, JobPhase, JobReport, NotAccepted, RefusalCode,
     ServerMsg,
 };
-use flyw8t_protocol::messages::{BackgroundTerminalPolicy, EnrollmentScope, ScriptOffer};
+use flyw8t_protocol::messages::{
+    AgentUpdatePolicy, BackgroundTerminalPolicy, EnrollmentScope, ScriptOffer,
+};
 use flyw8t_protocol::trust::{key_id, Hash, KeyKind};
 use flyw8t_protocol::{auth, Action, PhysicalConsoleState, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
 use futures_util::{stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
@@ -831,6 +834,37 @@ fn session_err(e: SessionError) -> anyhow::Error {
     match e {
         SessionError::Fatal(f) => f.into(),
         SessionError::Retry(e) => e,
+    }
+}
+
+/// Read effective fleet policy for a locally verified candidate over a one-shot connection.
+pub async fn observe_update_policy(
+    cfg: &AgentConfig,
+    candidate: Release,
+) -> Result<AgentUpdatePolicy> {
+    let device_id = cfg.device_id.context("agent is not enrolled")?;
+    let key = DeviceKey::load(&cfg.key_path())?;
+    let tls = crate::tls::client_config(cfg.ca_cert_pem.as_deref())?;
+    let mut ws = connect(&cfg.ws_url()?, tls).await?;
+    let nonce = expect_challenge(&mut ws).await.map_err(session_err)?;
+    let message = auth::agent_update_policy_message(&nonce, device_id, &candidate);
+    send(
+        &mut ws,
+        &AgentMsg::AgentUpdatePolicyRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id,
+            signature: key.sign_b64(&message),
+            candidate,
+        },
+    )
+    .await?;
+    match recv(&mut ws, HANDSHAKE_TIMEOUT)
+        .await
+        .map_err(session_err)?
+    {
+        ServerMsg::AgentUpdatePolicyResult { policy } => Ok(policy),
+        ServerMsg::Refused { code, message } => Err(session_err(refusal(code, message))),
+        _ => bail!("the enrolled server did not return an agent update policy"),
     }
 }
 
