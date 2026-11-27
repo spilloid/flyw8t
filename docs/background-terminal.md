@@ -16,7 +16,7 @@ Check the technician's authenticated console session, device scope, account poli
 
 An audit event records the initiator, device, execution account class, session lifecycle and end reason. A transport attachment and an authenticated terminal session are recorded as separate events. Audit records omit terminal contents.
 
-The console now verifies the admission conditions. From **Check background terminal policy**, an enabled device shows **Verify session access**. The confirmation has a 30-second lifetime and works once in the same browser sign-in. It rechecks the original device connection, current local opt-in, and technician access. The agent registry checks the confirmation deadline before queuing its policy request and uses that deadline to decide whether a reply is timely. The result appears in Device Activity, linked to the policy check in Audit. The interactive session and its lifecycle remain open.
+The console now verifies the admission conditions. From **Check background terminal policy**, an enabled device shows **Verify session access**. The confirmation has a 30-second lifetime and works once in the same browser sign-in. It rechecks the original device connection, current local opt-in, and technician access. The agent registry checks the confirmation deadline before queuing its policy request and uses that deadline to decide whether a reply is timely. Device Activity shows whether the agent reported its local policy enabled or disabled at the time of each successful policy check. Audit links each access confirmation to its policy check. The interactive session and its lifecycle remain open.
 
 ## Live terminal delivery checklist
 

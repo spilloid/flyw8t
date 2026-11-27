@@ -428,3 +428,7 @@ Independent review found that the release verification script accepted a publish
 - Verify before trusting, in both directions. A green suite is evidence about the tests: prove a new check can fail.
 - A dispatcher's report is a claim, not proof: check exit codes and output files.
 - Look at the screenshots. (Row 8 is why.)
+
+## Background terminal policy observations in Activity, 2026-11-27
+
+Astra reviewed the browser policy check, confirmation and scoped Device Activity query. Both enabled and disabled observations have successful audit outcomes, and the previous Activity label discarded their recorded policy status. Activity now shows the observed state for these two successful results and preserves the generic label for older records without a recognized status. The protocol integration test checks both labels and the absence of a confirmation button for a disabled observation. Source and formatting were checked locally. The PostgreSQL integration run and live Windows terminal acceptance are separate.

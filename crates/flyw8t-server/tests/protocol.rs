@@ -728,6 +728,12 @@ async fn terminal_confirmation_is_single_use_and_rechecks_the_same_browser_and_a
     let confirm = format!("/devices/{device}/background-terminal/admission");
     let token_from = |html: &str| extract(html, r#"name="admission" value="([^"]+)""#).unwrap();
 
+    let (_, disabled) = tokio::join!(
+        reply(&mut live, Policy::Disabled),
+        admin.post(&server, &check, &[]),
+    );
+    assert_eq!(disabled.status, StatusCode::OK);
+    assert!(!disabled.body.contains("Verify session access"));
     let (policy_check, initial) = tokio::join!(
         reply(&mut live, Policy::Enabled),
         admin.post(&server, &check, &[]),
@@ -835,6 +841,12 @@ async fn terminal_confirmation_is_single_use_and_rechecks_the_same_browser_and_a
     assert!(activity
         .body
         .contains("Background terminal access confirmation recorded"));
+    assert!(activity
+        .body
+        .contains("Agent reported background terminal policy enabled"));
+    assert!(activity
+        .body
+        .contains("Agent reported background terminal policy disabled"));
     assert!(!activity.body.contains(&secret));
     drop(live);
     drop(replacement);
