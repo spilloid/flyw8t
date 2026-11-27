@@ -359,6 +359,8 @@ The signer and protocol suites passed 56 tests, with one fixture generator ignor
 
 The container CI job now rehearses the transition from the published 0.2.0 image to the candidate and recovers the 0.2.0 image from its original database snapshot. The fixture checks the exact container image IDs, migration history, MFA and organization records. The fresh-install recovery fixture runs separately. The baseline digest was verified against the release and public registry. The CI runner still needs to execute the full rehearsal.
 
+The upgrade and recovery rehearsal passed on 10t7 with the published 0.2.0 image and an isolated image containing the candidate debug server. The upgrade applied the candidate migration ledger and preserved sign-in and organization records. The original image signed in and recovered those records after restoring the pre-upgrade snapshot.
+
 ## Fleet update preflight, 2026-11-27
 
 The Windows agent can check current fleet preferences after verifying a local candidate with the pinned release key and Authenticode. The short-lived socket authenticates independently of the service connection. The server records the effective policy and the device-reported release metadata before responding.
@@ -370,6 +372,8 @@ Native Windows preflight with a production-signed candidate, managed distributio
 ## Windows and technician workflow checks, 2026-11-27
 
 An optimized Windows candidate built at `86ea760` passed the fixed-input PowerShell diagnostic on a Windows 11 VM under LocalSystem. The diagnostic checked Session 0 for both processes, persistent PowerShell state, prompt input, Ctrl+C, and a clean exit. The installed service stayed in place during the scratch test. The live browser terminal and employee meeting scenario remain open.
+
+A debug build at `324928c` also passed the forced-cleanup probe under LocalSystem on Windows 11. Closing the job stopped PowerShell while the input pipe and pseudoconsole stayed open. Removing the kill-on-close flag from a disposable build caused the probe to fail with the process still alive. The integration work used a same-family review.
 
 Legacy scope recovery passed the Linux fleet-health tests against PostgreSQL 18. Substituting the device's current assignment for the original enrollment token's site made the recovery test fail. The disposable signed Windows rehearsal exercises old local state, identity continuity, and correct-site detection. The production signing rehearsal and a real Intune assignment remain open.
 
@@ -383,7 +387,7 @@ The attended browser peers finish the transport and security-code checks before 
 
 The native Windows installer test takes its installer, detector, and uninstall command from the same Intune download. It confirms the embedded binary matches the fixture before installation and compares the installed service binary with the original bytes. The packaged uninstall and quiet retry exercise service removal, detection, reconnect, and preservation of the original site, device ID, and key. Normal CI expects the detector to reject its unsigned fixture. A separate clean Windows job in the signing check verifies the signed agent's publisher and expects detection to succeed.
 
-Windows rehearsal and managed Intune assignment results remain open. The production signing environment stays on the existing signing job. The validation job uses the signed artifact from that job and runs with repository read access.
+All six PostgreSQL fleet-health tests passed. Changing the declared setup filename made the bundle verification test fail. The restored test passed. Windows rehearsal and managed Intune assignment results remain open. The production signing environment stays on the existing signing job. The validation job uses the signed artifact from that job and runs with repository read access.
 
 ## Update manifest publication, 2026-11-27
 
