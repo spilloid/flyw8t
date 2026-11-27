@@ -31,13 +31,19 @@ Both signing and verification use `flyw8t-agent-windows-x64-update.json` by defa
 
 Published 0.2.0 Windows binaries remain usable as manual installers. Update candidates need the embedded build version, which those binaries predate. The offline verifier accepts `--current-version 0.2.0` when evaluating a newer compatible candidate. Endpoints on 0.2.0 need a managed bootstrap before they can receive automatic updates.
 
-On the Windows x64 agent, `update-check` verifies an update against the running agent's version, the supplied release key, the signed byte count and SHA-256, and Windows Authenticode. The candidate must be a plain Windows x64 release executable with the Flyw8t publisher and a trusted timestamp. The command holds the candidate open for read sharing through both checks. It reports the verified version.
+Run `update-trust pin` as Administrator after enrollment. Supply the verification key from the offline signer through your trusted channel. The pin lives in the protected default Windows agent state directory. The first successfully stored key is the pin. Repeating it succeeds, and a request to pin a different key returns an error. Use `update-trust status` to inspect the local pin.
+
+On the Windows x64 agent, `update-check` verifies an update against the running agent's version, the pinned release key, the signed byte count and SHA-256, and Windows Authenticode. The candidate must be a plain Windows x64 release executable with the Flyw8t publisher and a trusted timestamp. The command holds the candidate open for read sharing through both checks. It reports the verified version and which release key source it used.
 
 ```powershell
-flyw8t-agent update-check --public-key $env:FLYW8T_RELEASE_PUBLIC_KEY --manifest flyw8t-agent-windows-x64-update.json --artifact flyw8t-agent-v0.3.0-x86_64-pc-windows-msvc.exe
+flyw8t-agent update-trust pin --public-key $env:FLYW8T_RELEASE_PUBLIC_KEY
+flyw8t-agent update-trust status
+flyw8t-agent update-check --manifest flyw8t-agent-windows-x64-update.json --artifact flyw8t-agent-v0.3.1-x86_64-pc-windows-msvc.exe
 ```
 
-The updater still needs a pinned release key, manifest delivery, and Windows service replacement and recovery.
+For an offline diagnostic, `update-check --public-key KEY` uses the explicitly supplied key for that invocation. The saved pin applies when the argument is omitted.
+
+The updater still needs manifest delivery and Windows service replacement and recovery.
 
 ## Fleet policy
 

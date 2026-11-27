@@ -7,6 +7,8 @@ use flyw8t_protocol::{agent_update::SignedRelease, enrollment_package::is_templa
 mod windows;
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub use windows::check;
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub mod key_pin;
 
 #[cfg(test)]
 #[path = "../../flyw8t-protocol/tests/support/agent_update.rs"]
