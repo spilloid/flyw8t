@@ -44,6 +44,8 @@ The new **Connect an MCP client** form creates a 30-day, screenshot-only credent
 
 Call `support_screenshot` with the support session UUID and a new request UUID. The first call asks the participant for screenshot permission and reports that the decision is pending. After the participant chooses **Allow screenshots**, repeat the call with the same request UUID. The permission lasts for this client's current session and source. Keep the technician viewer visible so the browser can produce a fresh frame. The participant can turn screenshots off and keep sharing with the technician.
 
+Screenshot permission stays pending until the server records the participant's decision in Audit. The permission entry records that decision even if a revocation or peer disconnect prevents the grant from opening. The screenshot request and release authorization have separate entries. Turning off screenshots stops capture immediately even if recording the change takes time.
+
 ```json
 {
   "session_id": "d73571b7-505a-472e-a2c2-ad30e7a56186",

@@ -337,6 +337,12 @@ Draft PR #70 at `8d1f2fe` passed all five CI jobs. The Windows job ran the local
 
 On a Windows 11 VM, the same source built an optimized x64 executable that reported 0.3.0 and passed its PowerShell diagnostic when run through the guest agent. The debug PowerShell test timed out when run over noninteractive SSH. The offline signer used a temporary test key to verify a manifest for the optimized executable. It rejected the executable relabeled 0.3.1 and rejected a changed copy. Production signing, the browser-to-agent session, and real Intune and upgrade acceptance remain open.
 
+## Screenshot consent audit, 2026-11-27
+
+MCP screenshot permission stays pending while Audit records the participant's decision. The participant socket remains responsive during the bounded write. Only the same live participant connection and grant can enable capture after a successful write. Revocation takes effect immediately. The decision, capture request, and release authorization have separate audit evidence.
+
+Four screenshot unit tests and the PostgreSQL integration test passed in isolated Linux containers. The integration test holds the audit table lock, checks that access stays pending and the participant socket responds, then releases the lock and verifies the approved flow. Reporting the recording state as allowed made the regression fail.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.

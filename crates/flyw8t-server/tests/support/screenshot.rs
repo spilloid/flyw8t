@@ -113,11 +113,43 @@ async fn screenshot_rechecks_recipient_token_and_creator_at_release() {
         "consent_pending"
     );
     let prompt = recv_kind(&mut participant, "screenshot_consent").await;
+    let mut audit_gate = server.state.db.begin().await.unwrap();
+    sqlx::query("LOCK TABLE audit_events IN SHARE MODE")
+        .execute(&mut *audit_gate)
+        .await
+        .unwrap();
     send(
         &mut participant,
         json!({"type":"screenshot_permission","grant_id":prompt["grant_id"],"allow":true}),
     )
     .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let audit_waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = 'audit_events'::regclass
+                  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                  AND mode = 'RowExclusiveLock' AND NOT granted)",
+            )
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+            if audit_waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("permission audit waiting for the table lock");
+    assert_eq!(
+        status().await.json()["screenshot_access"],
+        "consent_pending"
+    );
+    // The participant's socket must still be handling messages while the audit waits.
+    send(&mut participant, json!({"type":"invalid_message"})).await;
+    let error = recv_kind(&mut participant, "error").await;
+    assert_eq!(error["message"], "malformed message");
+    audit_gate.commit().await.unwrap();
     recv_kind(&mut technician, "screenshot_allowed").await;
     assert_eq!(status().await.json()["screenshot_access"], "allowed");
     let request = server.api(Method::POST, &path, &token, Some(body.clone()), None);
