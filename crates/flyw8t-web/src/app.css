@@ -420,6 +420,6 @@ pre.cmd { white-space: pre; overflow-x: auto; overflow-wrap: normal; user-select
 }
 
 /* The operator's other products (FLYW8T_FAMILY_LINKS): links that leave this console, and say so. */
-.top nav a.family::after { content: " 97"; color: var(--muted); font-size: 0.85em; }
+.top nav a.family::after { content: " ↗"; color: var(--muted); font-size: 0.85em; }
 /* An administrator's page about one user. */
 h1 .badge { font-size: 0.78rem; letter-spacing: 0; }

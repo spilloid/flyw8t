@@ -17,6 +17,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
@@ -114,7 +115,7 @@ fn kill_on_close_job() -> Result<OwnedHandle> {
     Ok(job)
 }
 
-fn spawn(shell: &Pseudoconsole, job: &OwnedHandle) -> Result<OwnedHandle> {
+fn spawn(shell: &Pseudoconsole, job: &OwnedHandle) -> Result<(OwnedHandle, u32)> {
     let mut size = 0;
     // SAFETY: the null list asks Windows to report the required size.
     unsafe { InitializeProcThreadAttributeList(null_mut(), 2, 0, &mut size) };
@@ -200,10 +201,21 @@ fn spawn(shell: &Pseudoconsole, job: &OwnedHandle) -> Result<OwnedHandle> {
     // SAFETY: CreateProcessW transferred both handles to this process.
     unsafe { drop(OwnedHandle::from_raw_handle(info.hThread)) };
     // SAFETY: the process handle is also owned by the caller after CreateProcessW.
-    Ok(unsafe { OwnedHandle::from_raw_handle(info.hProcess) })
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+    Ok((process, info.dwProcessId))
 }
 
 const OUTPUT_LIMIT: usize = 256 * 1024;
+
+fn process_session(pid: u32) -> Result<u32> {
+    let mut session = 0;
+    // SAFETY: session is a writable output slot.
+    if unsafe { ProcessIdToSessionId(pid, &mut session) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("reading the Windows session ID for process {pid}"));
+    }
+    Ok(session)
+}
 
 struct ConsoleOutput {
     chunks: Receiver<Result<Vec<u8>>>,
@@ -254,7 +266,12 @@ fn console_marker_reads_preserve_the_tail_across_pipe_chunks() -> Result<()> {
 }
 
 /// Prove that the local PowerShell host accepts console input and can be interrupted and closed.
-pub fn check() -> Result<()> {
+pub fn check(require_session_zero: bool) -> Result<()> {
+    let session = process_session(std::process::id())?;
+    ensure!(
+        !require_session_zero || session == 0,
+        "the diagnostic is running in Windows session {session}, expected session 0"
+    );
     let (create_console, close_console) = load_pseudoconsole_api()?;
     let job_handle = kill_on_close_job()?;
     let (console_input, input) = pipe()?;
@@ -303,7 +320,12 @@ pub fn check() -> Result<()> {
     let job = job_handle;
     let child = spawn(&console, &job);
     drop((console_input, console_output));
-    let child = child?;
+    let (child, pid) = child?;
+    let child_session = process_session(pid)?;
+    ensure!(
+        child_session == session,
+        "PowerShell started in Windows session {child_session}, expected session {session}"
+    );
     let mut assigned = 0;
     // SAFETY: both handles are live and assigned points to a writable BOOL.
     if unsafe { IsProcessInJob(child.as_raw_handle(), job.as_raw_handle(), &mut assigned) } == 0 {
@@ -350,5 +372,5 @@ pub fn check() -> Result<()> {
 
 #[test]
 fn background_powershell_keeps_state_and_interrupts_a_running_command() -> Result<()> {
-    check()
+    check(false)
 }

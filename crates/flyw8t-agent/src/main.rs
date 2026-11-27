@@ -60,6 +60,10 @@ enum Command {
         #[cfg(windows)]
         #[arg(long)]
         powershell: bool,
+        /// Require both the diagnostic and PowerShell to run in the Windows service session.
+        #[cfg(windows)]
+        #[arg(long, requires = "powershell")]
+        require_session_zero: bool,
     },
     /// Verify a newer Windows agent candidate's signed manifest and Authenticode publisher.
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -67,6 +71,9 @@ enum Command {
         /// Use this independently supplied hex key for this check. Defaults to the local pin.
         #[arg(long)]
         public_key: Option<String>,
+        /// Require a fresh allow decision from this device's enrolled server using the local pin.
+        #[arg(long, conflicts_with = "public_key")]
+        fleet_policy: bool,
         #[arg(long)]
         manifest: PathBuf,
         #[arg(long)]
@@ -313,6 +320,7 @@ fn main() -> Result<()> {
         #[cfg(all(windows, target_arch = "x86_64"))]
         Command::UpdateCheck {
             public_key,
+            fleet_policy,
             manifest,
             artifact,
         } => {
@@ -327,10 +335,32 @@ fn main() -> Result<()> {
                 ),
             };
             let release = flyw8t_agent::update_verify::check(&manifest, &artifact, &key)?;
-            println!(
-                "Verified Windows x64 agent candidate {} using the {source} release key.",
-                release.version
-            );
+            if fleet_policy {
+                use flyw8t_protocol::messages::AgentUpdatePolicy;
+                let version = release.version.clone();
+                let cfg = AgentConfig::load(&state_dir)?;
+                let policy = runtime()?
+                    .block_on(flyw8t_agent::connection::observe_update_policy(
+                        &cfg, release,
+                    ))
+                    .context("cannot confirm automatic agent update eligibility")?;
+                match policy {
+                    AgentUpdatePolicy::Enabled => println!(
+                        "Verified Windows x64 agent candidate {version} with the pinned release key. The current fleet policy allows automatic updates."
+                    ),
+                    AgentUpdatePolicy::OrganizationPaused => {
+                        anyhow::bail!("the organization has paused automatic agent updates")
+                    }
+                    AgentUpdatePolicy::DeviceOptedOut => {
+                        anyhow::bail!("this device has opted out of automatic agent updates")
+                    }
+                };
+            } else {
+                println!(
+                    "Verified Windows x64 agent candidate {} using the {source} release key.",
+                    release.version
+                );
+            }
             Ok(())
         }
         #[cfg(all(windows, target_arch = "x86_64"))]
@@ -356,11 +386,13 @@ fn main() -> Result<()> {
         Command::TerminalCheck {
             #[cfg(windows)]
             powershell,
+            #[cfg(windows)]
+            require_session_zero,
         } => {
             #[cfg(windows)]
             if powershell {
-                flyw8t_agent::terminal::check_powershell()?;
-                println!("Local PowerShell input, output, Ctrl+C, and process exit verified.");
+                flyw8t_agent::terminal::check_powershell(require_session_zero)?;
+                println!("Local PowerShell input, output, Ctrl+C, process exit, and Windows session isolation verified.");
                 return Ok(());
             }
             use flyw8t_agent::terminal::{check, Readiness};

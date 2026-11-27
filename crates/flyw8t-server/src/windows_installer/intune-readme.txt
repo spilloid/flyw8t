@@ -22,6 +22,11 @@ Assign to a test group first. After installation, check the device's site,
 connection, and version in Flyw8t. Uninstall removes the Windows service
 and retains the endpoint identity for recovery.
 
+For an existing enrollment, apply the signed agent upgrade separately and
+wait for the agent to check in. Detection uses the original enrollment
+scope, which an upgraded agent can recover from the console's token history.
+Check that scope with flyw8t-agent status --json on the device.
+
 The installer can enroll new devices only while the token is valid and has
 uses left. Use a newly issued bundle for later enrollment waves. Anyone
 holding the app package can recover its token, so share it privately.

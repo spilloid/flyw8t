@@ -1,6 +1,6 @@
 # Agent protocol (version 1)
 
-The agent makes one outbound WebSocket connection to `wss://<server>/api/agent/ws` (plain `ws://` only to loopback). Every message is one JSON text frame tagged by `"type"`. The types live in `crates/flyw8t-protocol`; unknown message types and unknown actions fail to deserialize and end the connection.
+The running agent maintains an outbound WebSocket connection to `wss://<server>/api/agent/ws` (plain `ws://` only to loopback). Every message is one JSON text frame tagged by `"type"`. The types live in `crates/flyw8t-protocol`; unknown message types and unknown actions fail to deserialize and end the connection.
 
 ## Windows physical console
 
@@ -27,7 +27,7 @@ Windows reports the session attached to the physical console and identifies its 
 | Idle connection | 3 × heartbeat with no message → closed | both |
 | Handshakes per source IP | 60 / min; enrollments 10 / min | server |
 | Inbound messages per authenticated connection | 100 / s (then `Refused{RateLimited}` and close) | server |
-| Agent processes per state directory | 1 (exclusive OS lock; a starting agent waits up to 15 s for a previous one to exit) | agent |
+| Long-lived agent processes per state directory | 1 (exclusive OS lock; a starting agent waits up to 15 s for a previous one to exit) | agent |
 
 ## Handshake
 
@@ -48,6 +48,8 @@ agent                                   server
 
 **Authentication signature.** Ed25519 over `"flyw8t/agent-auth/v1\0" ‖ nonce ‖ device_id (16 bytes)`. The nonce is fresh per connection, so a captured signature is useless on any other connection (`replayed_authentication_is_refused`). The server tries every credential on record for that device. A match on an active credential succeeds. A match on a revoked one returns `Refused{Revoked}`, which stops the agent permanently. No match returns `Refused{AuthFailed}`. "Revoked" is never disclosed to someone who cannot sign with that key.
 
+`Welcome` can carry `enrollment_scope` when the device's original enrollment token is still recorded in the same organization. This gives upgraded agents with older configurations the original organization and site without changing their device ID or key. The token's historical scope is available even after it expires, runs out of uses, or is revoked. Current site assignments can change independently. Agents keep any scope already recorded locally.
+
 **Enrollment signature.** Ed25519 by the *new* key over `"flyw8t/agent-enroll/v1\0" ‖ nonce ‖ public_key ‖ SHA-256(token)`. It proves possession of the private key being registered and binds it to one token without signing the secret itself. The server:
 
 1. hashes the token and locks its row;
@@ -56,6 +58,8 @@ agent                                   server
 4. increments `uses`, creates the device **in the token's organization and site** (the device's `facts` are display hints only), stores the public key, and audits it, all in one transaction.
 
 Every failure returns the same message, so there is no oracle for which tokens exist. The reason is in the audit log.
+
+**Agent update preflight.** An enrolled device can send `AgentUpdatePolicyRequest{protocol_version, device_id, signature, candidate}` as a handshake message. The signature uses the device key over `"flyw8t/agent-update-policy/v1\0" ‖ nonce ‖ device_id (16 bytes) ‖ candidate signing bytes`. The server rechecks the credential and reads effective organization and device preferences in a single database statement. It commits an audit event before replying with `AgentUpdatePolicyResult{policy}` and closing. Possible policy values are `enabled`, `organization_paused` and `device_opted_out`. The candidate is a device-reported release version, size and digest. The standard long-lived connection can stay open. Older servers reject the new request, and existing agent handshakes continue using the same messages as before.
 
 ## Messages after `Welcome`
 

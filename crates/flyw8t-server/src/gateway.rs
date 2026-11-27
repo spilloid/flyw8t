@@ -223,11 +223,13 @@ async fn handle(
                 )
                 .await;
             }
-            match authenticate(state, &nonce, device_id, &signature).await? {
+            let message = auth::auth_message(&nonce, device_id);
+            match authenticate(state, device_id, &message, &signature).await? {
                 AuthResult::Ok {
                     hostname,
                     key,
                     organization_id,
+                    enrollment_scope,
                 } => {
                     connected(
                         state,
@@ -235,6 +237,7 @@ async fn handle(
                         stream,
                         device_id,
                         organization_id,
+                        enrollment_scope,
                         hostname,
                         key,
                         agent_version,
@@ -276,11 +279,75 @@ async fn handle(
                 }
             }
         }
+        AgentMsg::AgentUpdatePolicyRequest {
+            protocol_version,
+            device_id,
+            signature,
+            candidate,
+        } => {
+            if protocol_version != PROTOCOL_VERSION {
+                return refuse(
+                    sink,
+                    RefusalCode::ProtocolVersion,
+                    "unsupported protocol version",
+                )
+                .await;
+            }
+            if candidate.validate_metadata().is_err() {
+                return refuse(
+                    sink,
+                    RefusalCode::BadMessage,
+                    "invalid update candidate metadata",
+                )
+                .await;
+            }
+            let message = auth::agent_update_policy_message(&nonce, device_id, &candidate);
+            let (key, organization_id) = match authenticate(state, device_id, &message, &signature)
+                .await?
+            {
+                AuthResult::Ok {
+                    key,
+                    organization_id,
+                    ..
+                } => (key, organization_id),
+                AuthResult::Revoked => {
+                    return refuse(
+                        sink,
+                        RefusalCode::Revoked,
+                        "this device's credential has been revoked",
+                    )
+                    .await;
+                }
+                AuthResult::Failed => {
+                    return refuse(sink, RefusalCode::AuthFailed, "authentication failed").await;
+                }
+            };
+            let policy = crate::agent_update_policy::observe(
+                &state.db,
+                device_id,
+                organization_id,
+                &key,
+                &candidate,
+                &ip,
+            )
+            .await?;
+            match policy {
+                Some(policy) => send(sink, &ServerMsg::AgentUpdatePolicyResult { policy }).await,
+                None => {
+                    refuse(
+                        sink,
+                        RefusalCode::Revoked,
+                        "device enrollment is no longer active",
+                    )
+                    .await
+                }
+            }
+        }
         _ => {
             refuse(
                 sink,
                 RefusalCode::BadMessage,
-                "expected enroll or authenticate",
+                "expected a handshake message",
             )
             .await
         }
@@ -399,41 +466,58 @@ enum AuthResult {
         hostname: String,
         key: Vec<u8>,
         organization_id: Uuid,
+        enrollment_scope: Option<EnrollmentScope>,
     },
     Revoked,
     Failed,
 }
 
+#[derive(sqlx::FromRow)]
+struct DeviceCredential {
+    public_key: Vec<u8>,
+    active: bool,
+    hostname: String,
+    organization_id: Uuid,
+    enrollment_org: Option<Uuid>,
+    enrollment_site: Option<Uuid>,
+}
+
 async fn authenticate(
     state: &Shared,
-    nonce: &[u8],
     device_id: Uuid,
+    message: &[u8],
     signature_b64: &str,
 ) -> anyhow::Result<AuthResult> {
     let Ok(signature) = base64::engine::general_purpose::STANDARD.decode(signature_b64) else {
         return Ok(AuthResult::Failed);
     };
-    let creds: Vec<(Vec<u8>, bool, String, Uuid)> = sqlx::query_as(
-        "SELECT c.public_key, c.revoked_at IS NULL AND d.retired_at IS NULL, d.hostname, d.organization_id
+    // A device can move sites. Only the original enrollment token identifies its enrollment scope.
+    let creds = sqlx::query_as::<_, DeviceCredential>(
+        "SELECT c.public_key, (c.revoked_at IS NULL AND d.retired_at IS NULL) AS active, d.hostname,
+                d.organization_id, t.organization_id AS enrollment_org, t.site_id AS enrollment_site
            FROM device_credentials c JOIN devices d ON d.id = c.device_id
+           LEFT JOIN enrollment_tokens t ON t.id = d.enrolled_via AND t.organization_id = d.organization_id
           WHERE c.device_id = $1",
     )
     .bind(device_id)
     .fetch_all(&state.db)
     .await?;
-    let message = auth::auth_message(nonce, device_id);
     // Only a key that actually signed this nonce decides the answer, so "revoked" is never
     // disclosed to someone who cannot prove possession of that key.
-    for (key, active, hostname, organization_id) in creds {
-        if UnparsedPublicKey::new(&ED25519, &key)
-            .verify(&message, &signature)
+    for cred in creds {
+        if UnparsedPublicKey::new(&ED25519, &cred.public_key)
+            .verify(message, &signature)
             .is_ok()
         {
-            return Ok(if active {
+            return Ok(if cred.active {
                 AuthResult::Ok {
-                    hostname,
-                    key,
-                    organization_id,
+                    hostname: cred.hostname,
+                    key: cred.public_key,
+                    organization_id: cred.organization_id,
+                    enrollment_scope: cred.enrollment_org.map(|organization_id| EnrollmentScope {
+                        organization_id,
+                        site_id: cred.enrollment_site,
+                    }),
                 }
             } else {
                 AuthResult::Revoked
@@ -450,6 +534,7 @@ async fn connected(
     stream: &mut Stream,
     device_id: Uuid,
     organization_id: Uuid,
+    enrollment_scope: Option<EnrollmentScope>,
     hostname: String,
     key: Vec<u8>,
     agent_version: String,
@@ -472,6 +557,7 @@ async fn connected(
             device_id,
             heartbeat_secs: state.config.heartbeat_secs,
             organization_id: Some(organization_id),
+            enrollment_scope,
         },
     )
     .await?;
@@ -663,7 +749,9 @@ async fn on_message(
                 send(sink, &ServerMsg::TrustUpdate { versions }).await?;
             }
         }
-        AgentMsg::Enroll { .. } | AgentMsg::Authenticate { .. } => {
+        AgentMsg::Enroll { .. }
+        | AgentMsg::Authenticate { .. }
+        | AgentMsg::AgentUpdatePolicyRequest { .. } => {
             let _ = refuse(sink, RefusalCode::BadMessage, "already authenticated").await;
             anyhow::bail!("handshake message on an authenticated connection");
         }

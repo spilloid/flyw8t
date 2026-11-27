@@ -43,7 +43,13 @@ flyw8t-agent update-check --manifest flyw8t-agent-windows-x64-update.json --arti
 
 For an offline diagnostic, `update-check --public-key KEY` uses the explicitly supplied key for that invocation. The saved pin applies when the argument is omitted.
 
-The updater still needs manifest delivery and Windows service replacement and recovery.
+After the enrolled server supports update preflight, add `--fleet-policy` to check whether a verified local candidate is eligible under the current fleet preference. This mode requires the locally pinned release key and queries the existing enrollment over a short-lived authenticated socket. Run as an administrator on the enrolled device. An organization pause or device opt-out yields an error. An unavailable server, revoked credential or unsupported policy query also yields an error. The long-lived agent connection and its work continue during the check.
+
+```powershell
+flyw8t-agent update-check --fleet-policy --manifest flyw8t-agent-windows-x64-update.json --artifact flyw8t-agent-v0.3.1-x86_64-pc-windows-msvc.exe
+```
+
+Audit records the effective policy and the candidate version, size and digest reported by the agent. Its result is a point-in-time preflight. Automated rollout still needs an approved release, delivery, policy rechecks, service replacement, and rollback after a failed reconnect.
 
 ## Fleet policy
 

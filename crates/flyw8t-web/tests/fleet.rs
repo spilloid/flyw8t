@@ -199,9 +199,9 @@ fn device_workspace_puts_actions_and_results_before_reference_on_small_screens()
     assert!(page.contains("Org / East site"));
     assert!(page.contains("Bring the spare power supply."));
     let position = |marker| page.find(marker).expect(marker);
-    assert!(position("Front desk") < position("Help someone"));
+    assert!(position("Front desk") < position("Start a screen share"));
     assert!(
-        position("Refresh data") < position("Help someone")
+        position("Refresh data") < position("Start a screen share")
             && position("Run approved script") < position(r#"id="device-jobs""#)
             && position("Troubleshooting tools") > position(r#"id="device-jobs""#)
     );

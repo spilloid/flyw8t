@@ -1,4 +1,4 @@
-//! Administrative update preferences. Policy and its audit event commit together.
+//! Fleet update preferences and audited policy observations.
 
 use crate::audit::Audit;
 use crate::auth::{self, WebUser};
@@ -9,8 +9,55 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use flyw8t_domain::Permission;
+use flyw8t_protocol::{agent_update::Release, messages::AgentUpdatePolicy};
 use serde_json::json;
+use sqlx::PgPool;
 use uuid::Uuid;
+
+/// Take an effective policy observation for the device credential that just proved possession.
+pub(crate) async fn observe(
+    db: &PgPool,
+    device: Uuid,
+    org: Uuid,
+    key: &[u8],
+    candidate: &Release,
+    client_ip: &str,
+) -> sqlx::Result<Option<AgentUpdatePolicy>> {
+    let mut tx = db.begin().await?;
+    let observed: Option<(bool, bool, String)> = sqlx::query_as(
+        "SELECT o.automatic_agent_updates, d.agent_updates_opt_out, d.hostname
+           FROM devices d JOIN organizations o ON o.id = d.organization_id
+           JOIN device_credentials c ON c.device_id = d.id
+          WHERE d.id = $1 AND o.id = $2 AND c.public_key = $3
+            AND d.retired_at IS NULL AND c.revoked_at IS NULL",
+    )
+    .bind(device)
+    .bind(org)
+    .bind(key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((enabled, opted_out, hostname)) = observed else {
+        return Ok(None);
+    };
+    let policy = match (enabled, opted_out) {
+        (false, _) => AgentUpdatePolicy::OrganizationPaused,
+        (true, true) => AgentUpdatePolicy::DeviceOptedOut,
+        (true, false) => AgentUpdatePolicy::Enabled,
+    };
+    let event = Audit::device(device, &hostname, "device.agent_update_preflight")
+        .org(org)
+        .target("device", device)
+        .ip(client_ip)
+        .detail(json!({ "policy": policy, "device_reported_candidate": candidate }));
+    let event = if policy == AgentUpdatePolicy::Enabled {
+        event
+    } else {
+        event.denied()
+    };
+    event.record(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(Some(policy))
+}
 
 pub(crate) async fn organization(
     State(state): State<Shared>,

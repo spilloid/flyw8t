@@ -199,6 +199,16 @@ async fn device_changes_respect_organization_scope_and_role() {
     let allowed = tech.get(&server, &format!("/devices/{}", a[0])).await;
     assert_eq!(allowed.status, StatusCode::OK);
     assert!(allowed.body.contains("flyw8t://open/assist?host=WS-01"));
+    for text in [
+        "Start a screen share",
+        "grants control separately",
+        "Open physical desktop",
+        "Sign in with RDP",
+        "Open direct SSH",
+    ] {
+        assert!(allowed.body.contains(text), "missing {text}");
+    }
+    assert!(!allowed.body.contains("flyw8t://open/powershell"));
     let hidden = tech.get(&server, &format!("/devices/{}", b[0])).await;
     assert_eq!(hidden.status, StatusCode::NOT_FOUND);
     assert!(!hidden.body.contains("flyw8t://"));
