@@ -30,7 +30,7 @@ The script uses the digest in the 0.2.0 release notes. It creates a unique Compo
 
 ## Code signing
 
-Both the signing check and the release workflow use `.github/actions/sign-release` and the company's Azure Artifact Signing account (corporate-strategy D-0047). The action Authenticode-signs all Windows executables, adds an RFC 3161 timestamp and checks each signature. Timestamping keeps signatures verifiable after the three-day signing certificate expires. Configure `SIGNING_EXPECTED_SUBJECT` to verify the publisher as well. Linux binaries are covered by `SHA256SUMS` only.
+Both the signing check and the release workflow use `.github/actions/sign-release` and the company's Azure Artifact Signing account (corporate-strategy D-0047). The action verifies the Authenticode signature, RFC 3161 timestamp, and exact publisher on each Windows executable. Set `SIGNING_EXPECTED_SUBJECT` to the certificate's publisher name, the same name with a `CN=` prefix, or the complete subject. Timestamping keeps signatures verifiable after the three-day signing certificate expires. Linux binaries are covered by `SHA256SUMS` only.
 
 The job signs in with GitHub OIDC; no signing secret is stored. The `release` environment holds the settings and may deploy only from `main` and `v*` tags.
 

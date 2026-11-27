@@ -78,6 +78,12 @@ enum Command {
         manifest: PathBuf,
         #[arg(long)]
         artifact: PathBuf,
+        /// Manifest for the running version's fallback image. Requires the local release key pin.
+        #[arg(long, requires = "rollback_artifact", conflicts_with = "public_key")]
+        rollback_manifest: Option<PathBuf>,
+        /// Original signed fallback executable for the running version.
+        #[arg(long, requires = "rollback_manifest", conflicts_with = "public_key")]
+        rollback_artifact: Option<PathBuf>,
     },
     /// Pin or inspect the local Windows agent release verification key.
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -323,6 +329,8 @@ fn main() -> Result<()> {
             fleet_policy,
             manifest,
             artifact,
+            rollback_manifest,
+            rollback_artifact,
         } => {
             use flyw8t_agent::update_verify::key_pin;
             let (key, source) = match public_key {
@@ -335,6 +343,13 @@ fn main() -> Result<()> {
                 ),
             };
             let release = flyw8t_agent::update_verify::check(&manifest, &artifact, &key)?;
+            let rollback = rollback_manifest
+                .zip(rollback_artifact)
+                .map(|(manifest, artifact)| {
+                    flyw8t_agent::update_verify::check_rollback(&manifest, &artifact, &key)
+                        .context("verifying the rollback artifact")
+                })
+                .transpose()?;
             if fleet_policy {
                 use flyw8t_protocol::messages::AgentUpdatePolicy;
                 let version = release.version.clone();
@@ -359,6 +374,12 @@ fn main() -> Result<()> {
                 println!(
                     "Verified Windows x64 agent candidate {} using the {source} release key.",
                     release.version
+                );
+            }
+            if let Some(rollback) = rollback {
+                println!(
+                    "Verified Windows x64 rollback artifact {} using the pinned release key.",
+                    rollback.version
                 );
             }
             Ok(())
@@ -496,4 +517,29 @@ fn prepare_state_dir(state_dir: &std::path::Path) -> Result<()> {
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
+}
+
+#[cfg(all(test, windows, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollback_paths_are_paired_and_require_the_pin() {
+        let update = [
+            "flyw8t-agent",
+            "update-check",
+            "--manifest",
+            "candidate.json",
+            "--artifact",
+            "candidate.exe",
+        ];
+        let manifest = ["--rollback-manifest", "rollback.json"];
+        let artifact = ["--rollback-artifact", "rollback.exe"];
+        assert!(Cli::try_parse_from(update).is_ok());
+        assert!(Cli::try_parse_from(update.into_iter().chain(manifest)).is_err());
+        assert!(Cli::try_parse_from(update.into_iter().chain(artifact)).is_err());
+        let pair = update.into_iter().chain(manifest).chain(artifact);
+        assert!(Cli::try_parse_from(pair.clone()).is_ok());
+        assert!(Cli::try_parse_from(pair.chain(["--public-key", "explicit"])).is_err());
+    }
 }

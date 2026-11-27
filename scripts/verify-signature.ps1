@@ -24,11 +24,18 @@ Get-ChildItem dist/*.exe | ForEach-Object { $_.FullName } |
 #>
 param(
     [Parameter(Mandatory)][string[]]$Files,
-    # Substring the signer's subject must contain, e.g. 'O=Spilloid'. Catches a
-    # correctly-signed binary that was signed by the wrong certificate profile.
-    [string]$ExpectedSubject
+    # Match a publisher name (with optional CN= prefix) or a complete subject.
+    [string]$ExpectedSubject = 'CN=Joseph Spillers'
 )
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($ExpectedSubject)) {
+    throw 'The expected Authenticode publisher is required.'
+}
+$expectedName = if ($ExpectedSubject -cmatch '^CN=([^,=]+)$') {
+    $Matches[1]
+} elseif (-not $ExpectedSubject.Contains('=')) {
+    $ExpectedSubject
+}
 $failed = @()
 
 foreach ($file in $Files) {
@@ -43,8 +50,13 @@ foreach ($file in $Files) {
         $failed += "$path - signed but not timestamped; the signature expires with the 3-day signing certificate"
         continue
     }
-    if ($ExpectedSubject -and $sig.SignerCertificate.Subject -notlike "*$ExpectedSubject*") {
-        $failed += "$path - signed by '$($sig.SignerCertificate.Subject)', expected it to contain '$ExpectedSubject'"
+    $publisherMatches = if ($null -ne $expectedName) {
+        [string]::Equals($sig.SignerCertificate.GetNameInfo('SimpleName', $false), $expectedName, [StringComparison]::Ordinal)
+    } else {
+        [string]::Equals($sig.SignerCertificate.Subject, $ExpectedSubject, [StringComparison]::Ordinal)
+    }
+    if (-not $publisherMatches) {
+        $failed += "$path - signed by '$($sig.SignerCertificate.Subject)', expected exact publisher '$ExpectedSubject'"
         continue
     }
 

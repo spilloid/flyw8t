@@ -369,6 +369,12 @@ The macOS protocol suite passed 51 tests with one fixture generator ignored. The
 
 Native Windows preflight with a production-signed candidate, managed distribution, service replacement and rollback still need acceptance. The integration review used the same model family.
 
+## Rollback artifact preflight, 2026-11-27
+
+The Windows update check can verify a staged fallback alongside the upgrade candidate. Paired fallback arguments use the pinned release key, require the exact running version, and share the candidate's file-handle publisher verification. The protected Windows signing rehearsal exercises the same fallback path with its signed build.
+
+An isolated Linux container on 10t7 passed 40 agent library tests, 51 protocol tests, and focused agent Clippy. One protocol fixture generator stayed ignored. Replacing exact fallback verification with the upgrade version rule failed the new regression. Restoring the rule passed. Actual service rollback and enrolled reconnect remain open.
+
 ## Windows and technician workflow checks, 2026-11-27
 
 An optimized Windows candidate built at `86ea760` passed the fixed-input PowerShell diagnostic on a Windows 11 VM under LocalSystem. The diagnostic checked Session 0 for both processes, persistent PowerShell state, prompt input, Ctrl+C, and a clean exit. The installed service stayed in place during the scratch test. The live browser terminal and employee meeting scenario remain open.
@@ -394,6 +400,18 @@ All six PostgreSQL fleet-health tests passed. Changing the declared setup filena
 The offline signer and Windows update checker use one validator for the agent image. The signer rejects a site enrollment package in both verification modes even when the manifest signature and digest are correct. The signer writes and flushes a temporary manifest beside the destination before publishing it without overwriting an existing file.
 
 On 10t7, 58 signer and protocol tests passed in an isolated Linux container. One fixture generator remained ignored. Workspace formatting and signer and protocol Clippy passed. Bypassing the image check failed the enrollment package regression. Allowing publication to replace the destination failed the concurrent writer regression. Both suites passed after restoring the checks. Native Windows publisher verification, service replacement, reconnect and rollback remain open.
+
+## Background terminal handoff, 2026-11-27
+
+The MCP adapter checks an explicit device through the existing scoped read API and returns its browser connection options link. The destination comes from the configured Flyw8t origin and the verified device ID. The browser uses its own sign-in for the background terminal policy check.
+
+All 15 adapter tests, the PostgreSQL device-page scope test, and adapter Clippy passed on 10t7. Removing the returned-device ID check made the handoff regression fail with a mismatched device. The restored test passed. The live session, five-minute reconnect, and lifecycle status are tracked in the background terminal checklist.
+
+The browser handoff puts the policy check directly in Connect and explains offline and permission restrictions. Independent review checked device scope and the authenticated POST, including CSRF protection. On 10t7, both PostgreSQL policy tests and the device role and organization scope test passed.
+
+## Windows release publisher verification, 2026-11-27
+
+Independent review found that the release verification script accepted a publisher prefix. On Kubert, we verified the published 0.2.0 binary against its release checksum. The old verifier accepted the prefix. The new verifier accepted the exact configured publisher, the complete subject, and the built-in publisher default. It rejected the prefix, wildcard, different case, and empty setting.
 
 ## Substitutions and gaps
 

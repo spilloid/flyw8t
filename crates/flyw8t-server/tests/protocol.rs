@@ -439,6 +439,16 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
     .await;
     drop(legacy);
 
+    let page = admin.get(&server, &format!("/devices/{device}")).await;
+    let section = page.body.find("id=\"device-connection-options\"").unwrap();
+    let button = page
+        .body
+        .find("Check background terminal policy</button>")
+        .unwrap();
+    let details = page.body.find("class=\"desktop-link-help\"").unwrap();
+    assert!(section < button && button < details);
+    assert!(page.body.contains(&format!("action=\"{path}\"")));
+
     let (request, served) = tokio::join!(
         async {
             let ServerMsg::CheckBackgroundTerminalPolicy { request_id } =

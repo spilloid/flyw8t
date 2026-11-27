@@ -1,3 +1,4 @@
+use super::VersionCheck;
 use anyhow::{anyhow, ensure, Context, Result};
 use flyw8t_protocol::agent_update::{
     Release, SignedRelease, MAX_MANIFEST_BYTES, MAX_WINDOWS_AGENT_BYTES,
@@ -23,26 +24,41 @@ const RELEASE_PUBLISHER: &str = "Joseph Spillers";
 
 /// Check a candidate against the running build's version. The operator supplies the trusted key separately.
 pub fn check(manifest: &Path, candidate: &Path, key: &[u8; 32]) -> Result<Release> {
-    check_with_version(manifest, candidate, key, env!("CARGO_PKG_VERSION"))
+    check_artifact(
+        manifest,
+        candidate,
+        key,
+        VersionCheck::NewerThan(env!("CARGO_PKG_VERSION")),
+    )
 }
 
-fn check_with_version(
+/// Check a local fallback image for the exact running version and its trusted publisher.
+pub fn check_rollback(manifest: &Path, artifact: &Path, key: &[u8; 32]) -> Result<Release> {
+    check_artifact(
+        manifest,
+        artifact,
+        key,
+        VersionCheck::Exact(env!("CARGO_PKG_VERSION")),
+    )
+}
+
+fn check_artifact(
     manifest: &Path,
-    candidate: &Path,
+    artifact: &Path,
     key: &[u8; 32],
-    installed_version: &str,
+    version: VersionCheck<'_>,
 ) -> Result<Release> {
     let manifest_file = File::open(manifest).context("opening the Windows update manifest")?;
     let signed = SignedRelease::parse(&read_bounded(&manifest_file, MAX_MANIFEST_BYTES)?)?;
     // Retain the same handle from digest computation through Windows trust verification. Share mode
-    // refuses a candidate opened for writing or deletion and prevents either while we hold the handle.
+    // refuses an artifact opened for writing or deletion and prevents either while we hold the handle.
     let mut file = OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ)
-        .open(candidate)
-        .context("opening the Windows update candidate for verification")?;
+        .open(artifact)
+        .context("opening the Windows update artifact for verification")?;
     let bytes = read_bounded(&file, MAX_WINDOWS_AGENT_BYTES)?;
-    signed.verify(key, installed_version, &bytes)?;
+    version.verify(&signed, key, &bytes)?;
     file.rewind()?;
     verify_publisher(&file)?;
     Ok(signed.release)
@@ -181,6 +197,27 @@ mod tests {
     use flyw8t_protocol::trust::Bytes;
 
     #[test]
+    fn rollback_requires_authenticode_after_a_valid_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("unsigned agent.exe");
+        let manifest = dir.path().join("rollback.json");
+        let version = env!("CARGO_PKG_VERSION");
+        let bytes = super::super::release_fixture::versioned_image(version);
+        let key = SigningKey::from_bytes(&[24; 32]);
+        let release = Release::from_artifact(version.into(), &bytes).unwrap();
+        let signature = Bytes(key.sign(&release.signing_bytes()).to_bytes().to_vec());
+        let signed = SignedRelease { release, signature };
+        std::fs::write(&artifact, bytes).unwrap();
+        std::fs::write(&manifest, serde_json::to_vec(&signed).unwrap()).unwrap();
+        assert!(
+            check_rollback(&manifest, &artifact, &key.verifying_key().to_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains("Windows Authenticode verification failed")
+        );
+    }
+
+    #[test]
     #[ignore = "requires a timestamped release artifact from the Windows signing rehearsal"]
     fn authenticode_is_required_for_a_manifest_valid_candidate() {
         let candidate = std::env::var_os("FLYW8T_TEST_SIGNED_AGENT")
@@ -202,14 +239,36 @@ mod tests {
         let staged = dir.path().join("staged agent.exe");
         std::fs::write(&staged, &signed_bytes).unwrap();
         assert_eq!(
-            check_with_version(&manifest, &staged, &public_key, "0.0.0")
-                .expect("released agent must pass Windows update verification"),
+            check_artifact(
+                &manifest,
+                &staged,
+                &public_key,
+                VersionCheck::NewerThan("0.0.0"),
+            )
+            .expect("released agent must pass Windows update verification"),
             release,
         );
         assert!(check(&manifest, &staged, &public_key)
             .unwrap_err()
             .to_string()
             .contains("must be newer"));
+
+        assert_eq!(
+            check_rollback(&manifest, &staged, &public_key)
+                .expect("matching release must pass rollback artifact verification"),
+            release,
+        );
+        let wrong_version = check_artifact(
+            &manifest,
+            &staged,
+            &public_key,
+            VersionCheck::Exact("0.0.0"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            wrong_version.downcast_ref::<flyw8t_protocol::agent_update::Error>(),
+            Some(flyw8t_protocol::agent_update::Error::UnexpectedReleaseVersion { .. })
+        ));
 
         // The COFF timestamp is covered by Authenticode. A fresh fixture manifest still
         // describes the modified bytes exactly, so only the publisher check can refuse them.
@@ -218,7 +277,16 @@ mod tests {
         modified[pe_offset + 8] ^= 1;
         std::fs::write(&staged, &modified).unwrap();
         write_manifest(&modified);
-        assert!(check_with_version(&manifest, &staged, &public_key, "0.0.0")
+        assert!(check_artifact(
+            &manifest,
+            &staged,
+            &public_key,
+            VersionCheck::NewerThan("0.0.0"),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Windows Authenticode verification failed"));
+        assert!(check_rollback(&manifest, &staged, &public_key)
             .unwrap_err()
             .to_string()
             .contains("Windows Authenticode verification failed"));
