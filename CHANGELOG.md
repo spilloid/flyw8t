@@ -7,7 +7,7 @@ All notable changes to flyw8t. Dates are UTC.
 - Clarify device connection actions and distinguish recorded screen-share media connections from Windows desktop launches in Device Activity.
 
 - Record the participant's screenshot permission before enabling capture for the named MCP client. Revocation stops capture immediately.
-- Check local PowerShell input, output, interruption, and cleanup on Windows with `flyw8t-agent terminal-check --powershell`.
+- Check local PowerShell input, output, interruption, and cleanup on Windows with `flyw8t-agent terminal-check --powershell`, including forced cleanup while PowerShell waits for input.
 - Verify background terminal access in the browser. The single-use confirmation rechecks the technician's sign-in and the original agent connection, and records the result in Device Activity.
 - Enforce the browser confirmation deadline when queuing a background terminal policy recheck and accepting its reply.
 - Set the automatic agent update policy per organization, or opt out an individual device. Changes appear in Audit and Device Activity.

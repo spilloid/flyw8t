@@ -8,7 +8,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
-use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Console::{COORD, HPCON};
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob, JobObjectExtendedLimitInformation, SetInformationJobObject,
@@ -265,8 +265,18 @@ fn console_marker_reads_preserve_the_tail_across_pipe_chunks() -> Result<()> {
     Ok(())
 }
 
-/// Prove that the local PowerShell host accepts console input and can be interrupted and closed.
+/// Prove that local PowerShell handles input, interruption, normal exit, and forced cleanup.
 pub fn check(require_session_zero: bool) -> Result<()> {
+    probe(require_session_zero, Shutdown::Graceful)?;
+    probe(require_session_zero, Shutdown::AtPrompt)
+}
+
+enum Shutdown {
+    Graceful,
+    AtPrompt,
+}
+
+fn probe(require_session_zero: bool, shutdown: Shutdown) -> Result<()> {
     let session = process_session(std::process::id())?;
     ensure!(
         !require_session_zero || session == 0,
@@ -334,6 +344,40 @@ pub fn check(require_session_zero: bool) -> Result<()> {
     ensure!(assigned != 0, "PowerShell was not assigned to its job");
     let mut input = File::from(input);
 
+    match shutdown {
+        Shutdown::Graceful => {
+            check_interaction(&mut input, &mut received, &child)?;
+            drop(job);
+        }
+        Shutdown::AtPrompt => {
+            input.write_all(b"Read-Host ('flyw8t' + '-disconnect')\r")?;
+            received.read_until("flyw8t-disconnect")?;
+            // SAFETY: the child process handle remains live across both waits.
+            ensure!(
+                unsafe { WaitForSingleObject(child.as_raw_handle(), 0) } == WAIT_TIMEOUT,
+                "PowerShell exited before the disconnect check"
+            );
+            // Keep the input pipe and pseudoconsole open so only job teardown stops PowerShell.
+            drop(job);
+            // SAFETY: the child process handle is still live after closing the job.
+            ensure!(
+                unsafe { WaitForSingleObject(child.as_raw_handle(), 5_000) } == WAIT_OBJECT_0,
+                "PowerShell stayed alive after its job closed"
+            );
+        }
+    }
+    drop((input, console));
+    reader
+        .join()
+        .map_err(|_| anyhow!("the PowerShell output reader stopped unexpectedly"))?;
+    Ok(())
+}
+
+fn check_interaction(
+    input: &mut File,
+    received: &mut ConsoleOutput,
+    child: &OwnedHandle,
+) -> Result<()> {
     // Build markers at runtime to distinguish command output from echoed keystrokes.
     input.write_all(b"function prompt { 'flyw8t' + '-prompt> ' }\r")?;
     received.read_until("flyw8t-prompt>")?;
@@ -363,10 +407,6 @@ pub fn check(require_session_zero: bool) -> Result<()> {
             && GetExitCodeProcess(child.as_raw_handle(), &mut code) != 0
     };
     ensure!(exited && code == 0, "PowerShell did not exit cleanly");
-    drop((input, job, console));
-    reader
-        .join()
-        .map_err(|_| anyhow!("the PowerShell output reader stopped unexpectedly"))?;
     Ok(())
 }
 
