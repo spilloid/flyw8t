@@ -48,6 +48,33 @@ jobs:
           path: dist/*.exe
           retention-days: 1
 
+  intune-install:
+    name: Signed Intune bundle on a clean Windows runner
+    needs: sign
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: signed-binaries
+          path: dist
+      - name: Verify signed installation, detection, uninstall and retry
+        shell: pwsh
+        env:
+          FLYW8T_TEST_DATABASE_URL: postgres://postgres:root@127.0.0.1:5432/postgres
+          FLYW8T_TEST_EXPECT_SIGNED_INSTALL: '1'
+        run: |
+          $env:FLYW8T_TEST_AGENT_BINARY = (Resolve-Path './dist/flyw8t-agent.exe').Path
+          ./scripts/verify-signature.ps1 -Files $env:FLYW8T_TEST_AGENT_BINARY -ExpectedSubject 'CN=Joseph Spillers'
+          $service = @(Get-Service -Name 'postgresql-x64-*')
+          if ($service.Count -ne 1) { throw 'Expected one hosted PostgreSQL instance.' }
+          Set-Service $service[0].Name -StartupType Manual
+          Start-Service $service[0].Name
+          cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-server --test windows_installer -- --ignored
+
   browser-launch:
     name: Signed Windows browser handoff on a clean user
     needs: sign

@@ -41,7 +41,7 @@ jobs:
         env:
           FLYW8T_TEST_DATABASE_URL: postgres://postgres:root@127.0.0.1:5432/postgres
         run: cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-server --test trust --test script_runs -- --include-ignored
-      - name: Install the organization and site package silently on Windows
+      - name: Test quiet Windows installation and retry from the Intune bundle
         shell: pwsh
         env:
           FLYW8T_TEST_DATABASE_URL: postgres://postgres:root@127.0.0.1:5432/postgres

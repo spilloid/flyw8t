@@ -2,11 +2,15 @@
 #![cfg(windows)]
 
 mod common;
+#[path = "common/intune_bundle.rs"]
+mod intune_bundle;
 
 use common::*;
 use flyw8t_agent::{config, service, AgentConfig};
+use flyw8t_protocol::{enrollment_package::EnrollmentPackage, messages::EnrollmentScope};
 use reqwest::{header, StatusCode};
 use std::{
+    io::Cursor,
     path::{Path, PathBuf},
     process::Output,
     time::Duration,
@@ -132,12 +136,34 @@ async fn verify_local_terminal_policy(
     }
 }
 
+async fn assert_intune_detection(detector: &Path, expect_detected: bool) {
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    command.arg(detector);
+    let output = run_fixture_command(command, "running the Intune detector").await;
+    let (exit_code, response) = if expect_detected {
+        (0, "Flyw8t enrollment detected")
+    } else {
+        (1, "")
+    };
+    assert_eq!(output.status.code(), Some(exit_code));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), response);
+    assert!(output.stderr.is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "installs the service on a disposable Windows runner backed by PostgreSQL"]
-async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolling() {
+async fn intune_package_enrolls_quietly_and_preserves_its_identity_on_retry() {
     let binary = PathBuf::from(
         std::env::var_os("FLYW8T_TEST_AGENT_BINARY").expect("path to the built Windows agent"),
     );
+    let expect_signed = std::env::var("FLYW8T_TEST_EXPECT_SIGNED_INSTALL").as_deref() == Ok("1");
     let baseline = std::fs::read(&binary).unwrap();
     let state_dir = config::default_state_dir().unwrap();
     let state_root = state_dir.parent().unwrap();
@@ -183,22 +209,32 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
     .unwrap();
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("Flyw8t-Setup-x64.exe");
+    let detector = temp.path().join("Detect-Flyw8t.ps1");
+    let path = format!("/organizations/{org}/enrollment-tokens");
+    let expected_detector = admin
+        .post(
+            &server,
+            &path,
+            &[
+                ("site", &site.to_string()),
+                ("download", "intune-detection"),
+            ],
+        )
+        .await;
+    assert_eq!(expected_detector.status, StatusCode::OK);
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     let response = reqwest::Client::builder()
         .no_proxy()
         .build()
         .unwrap()
-        .post(format!(
-            "{}/organizations/{org}/enrollment-tokens",
-            server.url()
-        ))
+        .post(format!("{}{path}", server.url()))
         .header(header::COOKIE, &admin.cookie)
         .header(header::ORIGIN, &server.state.config.public_url)
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(form(&[
             ("csrf", admin.csrf.as_str()),
-            ("download", "windows"),
+            ("download", "intune"),
             ("site", &site.to_string()),
             ("ttl_minutes", "60"),
             ("max_uses", "1"),
@@ -207,16 +243,38 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    std::fs::write(&package, response.bytes().await.unwrap()).unwrap();
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=Flyw8t-Intune.zip"
+    );
+    let files = intune_bundle::unpack(&response.bytes().await.unwrap(), &expected_detector.body);
+    let (original_length, _) = EnrollmentPackage::read(&mut Cursor::new(&files.installer))
+        .unwrap()
+        .expect("packaged executable is missing its enrollment trailer");
+    assert_eq!(original_length, baseline.len() as u64);
+    assert!(
+        files.installer.starts_with(&baseline),
+        "the bundled executable must embed the exact fixture binary"
+    );
+    std::fs::write(&package, files.installer).unwrap();
+    std::fs::write(&detector, files.detector).unwrap();
+    std::fs::write(temp.path().join("Uninstall-Flyw8t.cmd"), files.uninstall).unwrap();
 
     let first = run_as_system(&package, "--quiet", "LocalSystem quiet installation").await;
     assert_success(&first, "LocalSystem quiet installation");
-    assert_eq!(
-        std::fs::read(&installed).unwrap(),
-        baseline,
+    assert!(
+        std::fs::read(&installed).unwrap() == baseline,
         "the service image contains only the original agent bytes"
     );
     let initial = AgentConfig::load(&state_dir).unwrap();
+    assert_eq!(
+        initial.enrollment_scope,
+        Some(EnrollmentScope {
+            organization_id: org,
+            site_id: Some(site),
+        })
+    );
     let device = initial.device_id.unwrap();
     let key = std::fs::read(initial.key_path()).unwrap();
     let enrollment: (Uuid, Option<Uuid>) =
@@ -232,6 +290,7 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
         || async { server.state.registry.connected_since(device).is_some() },
     )
     .await;
+    assert_intune_detection(&detector, expect_signed).await;
     let terminal = run_as_system(
         &installed,
         "terminal-check --powershell --require-session-zero",
@@ -264,18 +323,45 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
     .await;
 
     // The one-use package is spent. A service-only retry keeps the original identity and site.
-    service::uninstall().unwrap();
+    let mut uninstall = Command::new("cmd.exe");
+    uninstall
+        .current_dir(temp.path())
+        .args(["/d", "/c", "Uninstall-Flyw8t.cmd"]);
+    let removed = run_fixture_command(uninstall, "running the Intune uninstall command").await;
+    assert_success(&removed, "Intune uninstall");
     wait_for(
         "service record to be removed",
         Duration::from_secs(15),
-        || async { service::status().is_ok_and(|state| state.is_none()) },
+        || async {
+            service::status().is_ok_and(|state| state.is_none())
+                && server.state.registry.connected_since(device).is_none()
+        },
     )
     .await;
+    assert_intune_detection(&detector, false).await;
+    let saved = AgentConfig::load(&state_dir).unwrap();
+    assert_eq!(saved.device_id, Some(device));
+    assert_eq!(saved.enrollment_scope, initial.enrollment_scope);
+    assert!(
+        std::fs::read(saved.key_path()).unwrap() == key,
+        "uninstall changed the device key"
+    );
     let resumed = setup(&package, "--quiet").await;
     assert_success(&resumed, "quiet retry after service removal");
+    wait_for(
+        "reinstalled service to reconnect under the same device",
+        Duration::from_secs(60),
+        || async { server.state.registry.connected_since(device).is_some() },
+    )
+    .await;
     let current = AgentConfig::load(&state_dir).unwrap();
     assert_eq!(current.device_id, Some(device));
-    assert_eq!(std::fs::read(current.key_path()).unwrap(), key);
+    assert_eq!(current.enrollment_scope, initial.enrollment_scope);
+    assert!(
+        std::fs::read(current.key_path()).unwrap() == key,
+        "reinstall changed the device key"
+    );
+    assert_intune_detection(&detector, expect_signed).await;
     let uses: i32 =
         sqlx::query_scalar("SELECT uses FROM enrollment_tokens WHERE organization_id = $1")
             .bind(org)

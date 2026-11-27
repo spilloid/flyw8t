@@ -375,6 +375,12 @@ The technician workspace labels the invitation, physical desktop, RDP, and direc
 
 The attended browser peers finish the transport and security-code checks before reporting connected media. The viewer also requires a frame. The unsupported certificate API still produces the existing browser notice. All 32 Node support tests passed. Removing the reporting gate in an isolated copy failed both the certificate mismatch and delayed certificate tests. Full browser integration and a two-device session with a participant-selected Windows surface remain open.
 
+## Win32 deployment bundle rehearsal, 2026-11-27
+
+The native Windows installer test takes its installer, detector, and uninstall command from the same Intune download. It confirms the embedded binary matches the fixture before installation and compares the installed service binary with the original bytes. The packaged uninstall and quiet retry exercise service removal, detection, reconnect, and preservation of the original site, device ID, and key. Normal CI expects the detector to reject its unsigned fixture. A separate clean Windows job in the signing check verifies the signed agent's publisher and expects detection to succeed.
+
+Windows rehearsal and managed Intune assignment results remain open. The production signing environment stays on the existing signing job. The validation job uses the signed artifact from that job and runs with repository read access.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.

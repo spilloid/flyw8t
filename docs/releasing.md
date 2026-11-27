@@ -60,3 +60,9 @@ rehearsal uses disposable Windows runners.
 3. Remove the registration from **Browser links**, close the app, and repeat the browser launch. Confirm that Windows no longer opens that copy of the technician app. Record the candidate SHA, Windows and browser versions, and result.
 
 The executable also accepts `--register-protocol` and `--unregister-protocol` for per-user setup from a deployment script.
+
+## Signed Intune bundle rehearsal
+
+The signing check downloads the signed agent onto a clean Windows runner and verifies its publisher. A loopback console generates a site-specific Intune bundle using that exact executable. The test unpacks the bundle, installs as LocalSystem, runs the bundled detector and uninstall command, and retries with the spent one-use package. It checks the installed bytes, site, device ID, key, and token use count.
+
+Complete the Intune pilot in an authorized tenant with the published candidate. Record the app upload, the assignment to a pilot device, and the managed results for installation, detection, and uninstall. Keep enrollment bundles out of the evidence archive because they contain a credential.
