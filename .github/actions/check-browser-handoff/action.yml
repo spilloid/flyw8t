@@ -1,5 +1,5 @@
 name: Check the Windows browser handoff
-description: Exercise first-use registration, three device links and removal on a fresh hosted runner.
+description: Exercise first-use registration, Windows device links and removal on a fresh hosted runner.
 inputs:
   binaries:
     description: Directory containing the matching technician and server executables.

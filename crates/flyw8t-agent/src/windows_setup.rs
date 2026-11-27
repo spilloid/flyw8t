@@ -203,6 +203,7 @@ fn enroll_and_install(
     let cfg = AgentConfig {
         server_url: package.server_url,
         device_id: None,
+        enrollment_scope: None,
         ca_cert_pem: None,
         state_dir,
     };

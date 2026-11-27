@@ -49,10 +49,30 @@ enum Command {
     /// Run the agent in the foreground.
     Run,
     /// Show enrollment and journal state.
-    Status,
-    /// Check for an SSH 2.0 greeting from the local terminal service at 127.0.0.1:22.
-    TerminalCheck,
-    /// Change the administrator's local background terminal opt-in.
+    Status {
+        /// Print the local enrollment record and agent version as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check the local terminal facilities.
+    TerminalCheck {
+        /// Exercise local Windows PowerShell input, output, and Ctrl+C through a pseudoconsole.
+        #[cfg(windows)]
+        #[arg(long)]
+        powershell: bool,
+    },
+    /// Verify a newer Windows agent candidate's signed manifest and Authenticode publisher.
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    UpdateCheck {
+        /// The release verification key from an independent trusted source, in hex.
+        #[arg(long)]
+        public_key: String,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        artifact: PathBuf,
+    },
+    /// Inspect or change the administrator's local background terminal opt-in.
     #[cfg(windows)]
     TerminalPolicy {
         #[command(subcommand)]
@@ -83,6 +103,8 @@ enum TrustCmd {
 #[cfg(windows)]
 #[derive(Subcommand)]
 enum TerminalPolicyCmd {
+    /// Check the local policy for this enrolled device.
+    Status,
     /// Enable the local policy for this enrolled device.
     Enable,
     /// Revoke the local opt-in for this enrolled device.
@@ -116,6 +138,8 @@ fn main() -> Result<()> {
                 .open(p)
         })
     };
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    flyw8t_agent::retain_windows_release_version();
     #[cfg(windows)]
     if let Some(mode) = windows_setup_mode::SetupMode::parse(std::env::args_os().skip(1)) {
         use windows_setup_mode::SetupMode;
@@ -192,6 +216,7 @@ fn main() -> Result<()> {
                 server_url: server,
                 ca_cert_pem,
                 device_id: None,
+                enrollment_scope: None,
                 state_dir,
             };
             config::ws_url(&cfg.server_url)?;
@@ -233,8 +258,20 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Status => {
+        Command::Status { json } => {
             let cfg = AgentConfig::load(&state_dir)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "agent_version": flyw8t_agent::AGENT_VERSION,
+                        "server_url": cfg.server_url,
+                        "device_id": cfg.device_id,
+                        "enrollment_scope": cfg.enrollment_scope,
+                    })
+                );
+                return Ok(());
+            }
             if let Ok(key) = flyw8t_agent::identity::DeviceKey::load(&cfg.key_path()) {
                 println!(
                     "device key id: {}",
@@ -254,7 +291,29 @@ fn main() -> Result<()> {
             println!("unacknowledged job reports: {}", journal.unreported().len());
             Ok(())
         }
-        Command::TerminalCheck => {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        Command::UpdateCheck {
+            public_key,
+            manifest,
+            artifact,
+        } => {
+            let mut key = [0u8; 32];
+            hex::decode_to_slice(public_key, &mut key)
+                .context("the update public key must be 64 hex digits")?;
+            let release = flyw8t_agent::update_verify::check(&manifest, &artifact, &key)?;
+            println!("Verified Windows x64 agent candidate {}.", release.version);
+            Ok(())
+        }
+        Command::TerminalCheck {
+            #[cfg(windows)]
+            powershell,
+        } => {
+            #[cfg(windows)]
+            if powershell {
+                flyw8t_agent::terminal::check_powershell()?;
+                println!("Local PowerShell input, output, Ctrl+C, and process exit verified.");
+                return Ok(());
+            }
             use flyw8t_agent::terminal::{check, Readiness};
             match runtime()?.block_on(check()) {
                 Readiness::GreetingReceived => {
@@ -274,8 +333,15 @@ fn main() -> Result<()> {
         }
         #[cfg(windows)]
         Command::TerminalPolicy { action } => {
-            let allow = matches!(action, TerminalPolicyCmd::Enable);
-            flyw8t_agent::terminal::configure_background_policy(&state_dir, allow)?;
+            use flyw8t_agent::terminal::{background_policy_enabled, configure_background_policy};
+            let allow = match action {
+                TerminalPolicyCmd::Status => background_policy_enabled(&state_dir)?,
+                TerminalPolicyCmd::Enable | TerminalPolicyCmd::Disable => {
+                    let allow = matches!(action, TerminalPolicyCmd::Enable);
+                    configure_background_policy(&state_dir, allow)?;
+                    allow
+                }
+            };
             if allow {
                 println!("Background terminal policy enabled locally.");
             } else {

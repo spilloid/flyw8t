@@ -556,6 +556,38 @@ async fn console_renders_cleanly_everywhere() {
                 if signed_in != Value::Bool(true) {
                     failures.push(format!("{name}: rendered without {marker}"));
                 }
+                if *name == "organization" {
+                    let linked = cdp
+                        .eval(
+                            r#"(() => {
+                                const button = document.querySelector('button[name="download"][value="intune"]');
+                                if (!button || !button.closest('details')) return false;
+                                button.closest('details').open = true;
+                                return button.form?.id === 'windows-enrollment-form';
+                            })()"#,
+                        )
+                        .await;
+                    if linked != Value::Bool(true) {
+                        failures.push(format!(
+                            "{name}: Intune download is missing its enrollment form"
+                        ));
+                    }
+                }
+                if matches!(*name, "organization" | "device") {
+                    let editable = cdp
+                        .eval(
+                            r#"(() => {
+                        const policy = document.querySelector('#agent-update-policy');
+                        if (!policy) return false;
+                        policy.open = true;
+                        return !!policy.querySelector('form select[name="policy"]');
+                    })()"#,
+                        )
+                        .await;
+                    if editable != Value::Bool(true) {
+                        failures.push(format!("{name}: automatic update settings are unavailable"));
+                    }
+                }
                 let overflow = cdp
                     .eval("document.documentElement.scrollWidth > window.innerWidth")
                     .await;

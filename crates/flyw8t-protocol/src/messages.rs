@@ -33,6 +33,8 @@ pub enum ServerMsg {
         /// The organization's id, which an agent enrolling with `--org` requires to match (ADR-0015 section 3).
         #[serde(default)]
         organization_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enrollment_scope: Option<EnrollmentScope>,
     },
     /// Trust-list versions (ADR-0015 section 7): the whole chain for a request made before authenticating, or the
     /// versions after the one the agent holds. The agent verifies every one; the server is only the courier.
@@ -60,6 +62,13 @@ pub enum ServerMsg {
     CheckPhysicalConsole { request_id: Uuid },
     /// Inspect the endpoint administrator's setting on this connection.
     CheckBackgroundTerminalPolicy { request_id: Uuid },
+}
+
+/// The organization and site the server assigned when the device enrolled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnrollmentScope {
+    pub organization_id: Uuid,
+    pub site_id: Option<Uuid>,
 }
 
 /// One script run, with everything the agent needs to decide for itself whether it may run.

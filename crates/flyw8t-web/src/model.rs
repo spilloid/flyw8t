@@ -322,6 +322,20 @@ pub struct DeviceDetail {
     pub sites: Vec<OrgRef>,
     /// Custom fields as they resolve for this device (secrets masked).
     pub fields: Vec<ResolvedField>,
+    #[serde(skip)]
+    pub agent_update_policy: AgentUpdatePolicy,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AgentUpdatePolicy {
+    pub organization_enabled: bool,
+    pub device_opted_out: bool,
+}
+
+impl AgentUpdatePolicy {
+    pub fn allows_automatic_updates(self) -> bool {
+        self.organization_enabled && !self.device_opted_out
+    }
 }
 
 pub struct InventorySample {
@@ -414,6 +428,8 @@ pub struct OrgSummary {
     pub name: String,
     pub device_count: i64,
     pub sites: Vec<SiteView>,
+    #[serde(skip)]
+    pub automatic_agent_updates: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }

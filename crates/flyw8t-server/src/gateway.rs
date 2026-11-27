@@ -10,7 +10,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use base64::Engine;
-use flyw8t_protocol::messages::{AgentMsg, DeviceFacts, RefusalCode};
+use flyw8t_protocol::messages::{AgentMsg, DeviceFacts, EnrollmentScope, RefusalCode};
 use flyw8t_protocol::{auth, InventoryReport, ServerMsg, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -173,13 +173,14 @@ async fn handle(
                 .await;
             }
             match enroll(state, &nonce, &token, &public_key, &signature, &facts, &ip).await {
-                Ok((device_id, organization, organization_id)) => {
+                Ok((device_id, organization, scope)) => {
                     send(
                         sink,
                         &ServerMsg::Enrolled {
                             device_id,
                             organization,
-                            organization_id: Some(organization_id),
+                            organization_id: Some(scope.organization_id),
+                            enrollment_scope: Some(scope),
                         },
                     )
                     .await
@@ -296,7 +297,7 @@ async fn enroll(
     signature_b64: &str,
     facts: &DeviceFacts,
     ip: &str,
-) -> Result<(Uuid, String, Uuid), String> {
+) -> Result<(Uuid, String, EnrollmentScope), String> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let public_key = b64
         .decode(public_key_b64)
@@ -326,7 +327,7 @@ async fn enroll(
     };
     let os_family: String = facts.os_family.chars().take(32).collect();
 
-    let result: anyhow::Result<Result<(Uuid, String, Uuid), String>> = async {
+    let result = async {
         let mut tx = state.db.begin().await?;
         let row: Option<(Uuid, Uuid, Option<Uuid>, String, bool)> = sqlx::query_as(
             "SELECT t.id, t.organization_id, t.site_id, o.name,
@@ -379,7 +380,10 @@ async fn enroll(
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(Ok((device_id, org_name, org_id)))
+        Ok::<_, anyhow::Error>(Ok((device_id, org_name, EnrollmentScope {
+            organization_id: org_id,
+            site_id,
+        })))
     }
     .await;
     result.map_err(|e| format!("internal error: {e:#}"))?

@@ -265,6 +265,64 @@ The final browser capture run passed. Enrollment and Device Activity captures we
 
 The operator chose automatic agent updates as the default with an explicit opt-out. ADR-0008 records the organization and device settings and the evidence expected from an early Windows pilot. The updater remains release work.
 
+## Enrollment scope for managed deployment, 2026-11-26
+
+The server now reports the enrolled organization and site IDs to the agent. The agent saves them with the device identity and exposes them through `status --json`. The PostgreSQL fleet suite passed for site-specific and organization-wide enrollment. Older agents and servers can lack the scope record. The recorded IDs describe enrollment time, and site changes still need verification against the console. Generating the Intune package and validating assignment in a real tenant remain open.
+
+The enrollment form now generates an Intune detection script for the selected site without issuing a credential. The fleet HTTP test passed for the download and for refusal of an unknown site. A PowerShell fixture with mocked Windows service and signature checks passed 16 cases. Deleting the site comparison in a temporary copy made the detector accept a wrong-site fixture. The Chrome capture suite and focused server and web Clippy passed. Native Windows and Intune tenant acceptance remain open.
+
+## Background terminal policy audit, 2026-11-26
+
+When access changes during a live policy check, the console withholds the endpoint reply and logs a denial against the original request. The PostgreSQL regression test failed before the fix because the request had no matching result, then passed with the denial recorded. All 29 PostgreSQL protocol, console, fleet and script-trust tests passed. Protocol Clippy and the Windows agent cross-target check also passed. An elevated Windows operator can inspect the local opt-in with `flyw8t-agent terminal-policy status`. The installer fixture now checks this command alongside the console check. Native Windows execution and independent review remain open.
+
+## Intune deployment bundle, 2026-11-26
+
+The enrollment form now generates the Win32 application package on the server. The download includes the selected site's installer, detection script and Intune settings. This follows the paired artifacts in [SpoolSmith](https://spilloid.github.io/spoolsmith/guide/intune.html#the-intunewin-file). The server writes the [Win32 archive layout](https://learn.microsoft.com/en-us/troubleshoot/mem/intune/app-management/develop-deliver-working-win32-app-via-intune) with [ProfileVersion1 encryption metadata](https://learn.microsoft.com/en-us/graph/api/resources/intune-apps-fileencryptioninfo?view=graph-rest-1.0). It pairs the detector with the exact organization and site from the enrollment request.
+
+The five PostgreSQL fleet tests, focused Clippy, and Chrome capture suite passed. The expanded enrollment panel was inspected at desktop and phone widths. The package test opens the HTTP download, verifies the metadata and ciphertext authentication, rejects a changed ciphertext byte, decrypts the inner archive, and uses the recovered credential to enroll in the selected site. It compares the detector with the separate download. An independent Python and OpenSSL check unpacked a bundle from a loopback server and matched the original agent bytes to the published v0.2.0 Windows release checksum. Upload, assignment, silent install, detection and uninstall in a real Intune tenant remain open.
+
+## Signed Windows agent release manifests, 2026-11-26
+
+The offline signer can create a dedicated agent release key, sign a Windows x64 manifest for the original build artifact, and verify the signed version, file size and SHA-256 against a trusted public key. It refuses to sign a personalized enrollment installer. Verification rejects same-version and older candidates. The encrypted key file binds the key to its release or script purpose.
+
+The protocol and signer suites passed 56 tests and their Clippy check passed. A temporary test key signed a manifest for the published v0.2.0 Windows agent after its checksum matched the release list. OpenSSL independently verified the signature. Removing the SHA-256 comparison made the same-size artifact mutation pass verification and fail the regression test. Endpoint trust provisioning, automatic rollout and Windows service replacement and rollback remain open.
+
+## Automatic update preferences, 2026-11-26
+
+The organization policy defaults to enabled. Devices can follow their organization or opt out. Pausing and resuming an organization preserves device opt-outs. Only administrators can change these settings. Each change saves its audit record in the same transaction, and Device Activity shows the relevant organization and device changes.
+
+All 12 PostgreSQL console and fleet tests passed, including role and CSRF refusals, scope isolation, idempotent saves, and the pause and resume sequence. A separate migration rehearsal preserved an existing organization and offline device and applied the enabled default. An isolated check of the four policy combinations rejected a copy that omitted the organization pause. Focused Clippy and the web fleet test compilation passed. Chrome lost its connection on the first run. The capture suite passed after freeing space from stale compiler caches, and the desktop organization and phone device controls were inspected. The Windows updater still needs to consume these preferences and prove installation and rollback.
+
+## Windows update preflight, 2026-11-26
+
+The Windows x64 agent now checks a candidate against its running version and an independently supplied release key. It holds the executable open for read sharing while checking the signed size and SHA-256, x64 PE header, and timestamped Authenticode publisher. The command reports the verified version. The signing rehearsal includes a Windows runtime test that checks the real signed build and rejects a damaged copy even when a fixture manifest correctly describes its bytes.
+
+Windows-targeted Clippy and the portable candidate test passed. Removing the architecture check made the wrong-architecture regression fail. An independent check matched the published v0.2.0 agent checksum, inspected its expected publisher and timestamp record, and showed that the test's COFF change alters the Authenticode image digest. The signing workflow YAML parsed locally. Native WinVerifyTrust execution, pinned key provisioning, automatic delivery and service rollback remain open.
+
+## Background terminal admission, 2026-11-26
+
+After an enabled policy response, the device page offers a 30-second, single-use confirmation bound to the technician's browser sign-in, device, and agent connection. Confirmation checks the technician's current access and repeats the policy check on that connection. Device Activity shows the outcome, and the audit links it to the policy check.
+
+All 15 PostgreSQL protocol tests passed against local fixtures. The new regression covers a separate sign-in, another device, replay, a change to local policy, and a replacement connection. Removing the connection check made the regression fail. The restored test and focused Clippy passed. Desktop and phone captures of the device page were inspected. The interactive PowerShell session and acceptance on Windows remain open.
+
+## Interactive PowerShell scope, 2026-11-26
+
+The operator approved ordinary PowerShell commands in a live technician terminal. The project guidance now applies catalog validation and script signing to jobs and records the separate terminal authorization requirements. The threat model records how endpoint opt-in and the Windows identity affect the scope of a terminal session.
+
+A Windows-only test exercises a local PowerShell process through ConPTY with fixed commands. It checks persistent state, Ctrl+C, prompt replies, and an orderly exit. Windows-targeted Clippy passed for the test and its Windows path helper in isolation. The full agent cross-check requires Windows C runtime headers for `ring`. The test still needs to run on Windows, and the browser-to-agent process and stream remain open.
+
+## Background terminal and signed deployment checks, 2026-11-26
+
+The confirmation now checks its original deadline immediately before contacting the agent and limits the observation to the time remaining. The expiry regression passed with a synthetic outbound agent connection. Removing the check caused the regression to see a probe after expiry. All 15 PostgreSQL protocol tests passed, including a check that a missing CSRF token leaves the legitimate confirmation usable. The ConPTY fixture now keeps leftover bytes between reads and checks for unwanted command completion through the returning prompt. Windows-targeted Clippy passed for the fixture in isolation, and the pipe-reader regression failed when the unread bytes were discarded again.
+
+The signed Windows rehearsal now selects a real fixture site at enrollment and asks the console for a generated Intune detector for that site and another site. It checks the downloaded scripts against the local template and runs them against the installed signed agent. The matching site must return exit code zero with detection output. The other site must return exit code one with empty output. The handoff smoke test now finds the protocol links on the current device page and opens the connection options when needed. JavaScript syntax checks and the PostgreSQL enrollment package test passed, and PostgreSQL accepted the new fixture seed. The native Windows runs and interactive background terminal remain open.
+
+## 0.3.0 candidate process and artifact checks, 2026-11-26
+
+The candidate uses workspace version 0.3.0 so enrollment downloads name the matching Windows release artifact. The release workflow checks the version reported by the built agent before uploading it. Windows x64 agents embed the build version in a read-only PE section. The signer, update verifier, and installer asset lookup compare that version with the selected release. The signer and agent tests passed locally. Removing the signer check made the relabel regression fail. An optimized Windows linker probe preserved the version through ThinLTO and symbol stripping. The offline signer accepted that probe at its embedded version and rejected it with a newer filename and manifest version. The native signed agent still needs the Windows signing rehearsal.
+
+The agent's local `terminal-check --powershell` command exercises fixed PowerShell inputs through ConPTY, checks persistent state and prompt replies, interrupts a running command, and verifies process exit. The child enters a kill-on-close Job Object at creation. The agent resolves ConPTY when the diagnostic runs so platforms without it can still load the executable. The Windows installer fixture runs the installed binary's check as LocalSystem. Windows-targeted linting of the diagnostic passed in isolation. The live terminal, native LocalSystem result, and an employee-session acceptance run remain open.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.

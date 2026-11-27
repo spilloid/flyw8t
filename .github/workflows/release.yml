@@ -63,6 +63,12 @@ jobs:
           account: ${{ vars.SIGNING_ACCOUNT }}
           profile: ${{ vars.SIGNING_PROFILE }}
           expected-subject: ${{ vars.SIGNING_EXPECTED_SUBJECT }}
+      - name: Verify the agent version matches the release tag
+        shell: bash
+        run: |
+          agent="dist/flyw8t-agent-${GITHUB_REF_NAME}-${{ matrix.target }}${{ matrix.ext }}"
+          got=$("$agent" --version | tr -d '\r')
+          test "$got" = "flyw8t-agent ${GITHUB_REF_NAME#v}" || { echo "Agent reports '$got', tag is ${GITHUB_REF_NAME}."; exit 1; }
       - uses: actions/upload-artifact@v5
         with:
           name: bin-${{ matrix.target }}

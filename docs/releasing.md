@@ -21,7 +21,7 @@ Both the signing check and the release workflow use `.github/actions/sign-releas
 
 The job signs in with GitHub OIDC; no signing secret is stored. The `release` environment holds the settings and may deploy only from `main` and `v*` tags.
 
-For initial Azure setup, run `scripts/setup-signing.ps1` as the subscription owner. To verify a downloaded set of Windows binaries in PowerShell, run the following from the release checkout with the four executables in `dist`.
+For initial Azure setup, run `scripts/setup-signing.ps1` as the subscription owner. To verify a downloaded set of Windows binaries in PowerShell, run the following from the release checkout with the five executables in `dist`.
 
 ```powershell
 ./scripts/verify-signature.ps1 -Files (Get-ChildItem ./dist -Filter '*.exe').FullName -ExpectedSubject "CN=Joseph Spillers"
@@ -39,11 +39,13 @@ against the reviewed template. It enrolls its disposable Windows runner in a
 loopback console using the signed agent and the downloaded file. If runner policy
 refuses the file before the enrollment prompt, it exercises the verified clipboard
 commands under the existing policy.
-It checks the Windows service status and the device's live row, then uninstalls
-that service. No operator or customer endpoint is part of the rehearsal.
+It checks the Windows service status and the device's live row. It also runs
+the generated Intune detection scripts against that signed installation for the
+matching site and for another site before removing the trial service. The
+rehearsal uses disposable Windows runners.
 
 1. Sign in with a clean Windows user account. Place the signed technician executable in the directory where it will stay. Launch it and select **Browser links → Enable for this Windows user**. Close the app.
-2. Sign in to the candidate web console and open a Windows device. Under **Open in Flyw8t Technician**, try **Help someone**, **Unattended console**, and **Windows sign-in**. Accept the browser's external-app prompt if shown. For each link, confirm that the app shows the intended computer and mode and waits for a click on **Find sessions**, **Check console**, or **Connect**. Close the app between checks.
+2. Sign in to the candidate web console and open a Windows device. Under **Connect**, try **Remote control** and **Sign in with RDP**. Expand **Technician and connection options** to try **Help a Windows session through Technician** and **Direct SSH**. Accept the browser's external-app prompt if shown. For each link, confirm that the app shows the intended computer and mode and waits for the technician to continue. Close the app between checks.
 3. Remove the registration from **Browser links**, close the app, and repeat the browser launch. Confirm that Windows no longer opens that copy of the technician app. Record the candidate SHA, Windows and browser versions, and result.
 
 The executable also accepts `--register-protocol` and `--unregister-protocol` for per-user setup from a deployment script.

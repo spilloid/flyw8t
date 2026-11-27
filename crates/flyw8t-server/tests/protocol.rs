@@ -410,6 +410,257 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
     server.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn background_terminal_policy_audits_access_revoked_during_check() {
+    use axum::http::StatusCode;
+    use flyw8t_protocol::messages::{BackgroundTerminalPolicy, CAP_BACKGROUND_TERMINAL_POLICY};
+
+    let server = start_fresh().await;
+    let (admin, org, agent) = enrolled(&server).await;
+    let device = agent.device_id;
+    sqlx::query("UPDATE devices SET os_family = 'windows' WHERE id = $1")
+        .bind(device)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let email = "policy-technician@example.test";
+    let added = admin
+        .post(
+            &server,
+            "/admin/users",
+            &[
+                ("email", email),
+                ("display_name", "Policy technician"),
+                ("password", "example-password-123"),
+                ("role", "technician"),
+                ("org", &org.to_string()),
+            ],
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::SEE_OTHER);
+    let technician = server.login(email, "example-password-123").await;
+    let mut current = RawAgent::authenticate_with_capabilities(
+        &server,
+        &agent,
+        true,
+        &[CAP_BACKGROUND_TERMINAL_POLICY],
+    )
+    .await;
+    wait_connected(&server, device).await;
+
+    let path = format!("/devices/{device}/background-terminal/check");
+    let (request_id, response) = tokio::join!(
+        async {
+            let ServerMsg::CheckBackgroundTerminalPolicy { request_id } =
+                next(&mut current.ws).await
+            else {
+                panic!("expected a background terminal policy check");
+            };
+            let removal = sqlx::query(
+                "DELETE FROM user_organizations WHERE organization_id = $1
+                 AND user_id = (SELECT id FROM users WHERE email = $2)",
+            )
+            .bind(org)
+            .bind(email)
+            .execute(&server.state.db)
+            .await
+            .unwrap();
+            assert_eq!(removal.rows_affected(), 1);
+            current
+                .send(&AgentMsg::BackgroundTerminalPolicyStatus {
+                    request_id,
+                    policy: BackgroundTerminalPolicy::Enabled,
+                })
+                .await;
+            request_id
+        },
+        technician.post(&server, &path, &[])
+    );
+    assert_eq!(response.status, StatusCode::FORBIDDEN);
+    assert!(!response.body.contains("Local policy is enabled"));
+
+    let events: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT action, outcome, detail FROM audit_events
+         WHERE organization_id = $1 AND target_id = $2 AND actor_label = $3
+           AND action IN ('device.background_terminal_policy.requested', 'device.background_terminal_policy.result')
+         ORDER BY id",
+    )
+    .bind(org)
+    .bind(device)
+    .bind(email)
+    .fetch_all(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        events,
+        [
+            (
+                "device.background_terminal_policy.requested".into(),
+                "success".into(),
+                serde_json::json!({"request_id": request_id})
+            ),
+            (
+                "device.background_terminal_policy.result".into(),
+                "denied".into(),
+                serde_json::json!({"request_id": request_id, "status": "access_changed"})
+            )
+        ]
+    );
+    drop(current);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn terminal_confirmation_is_single_use_and_rechecks_the_same_browser_and_agent() {
+    use axum::http::{header, StatusCode};
+    use flyw8t_protocol::messages::{
+        BackgroundTerminalPolicy as Policy, CAP_BACKGROUND_TERMINAL_POLICY,
+    };
+
+    async fn reply(agent: &mut RawAgent, policy: Policy) -> Uuid {
+        let ServerMsg::CheckBackgroundTerminalPolicy { request_id } = next(&mut agent.ws).await
+        else {
+            panic!("expected a background terminal policy request");
+        };
+        agent
+            .send(&AgentMsg::BackgroundTerminalPolicyStatus { request_id, policy })
+            .await;
+        request_id
+    }
+
+    let server = start_fresh().await;
+    let (admin, org, agent) = enrolled(&server).await;
+    let device = agent.device_id;
+    sqlx::query("UPDATE devices SET os_family = 'windows' WHERE id = $1")
+        .bind(device)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let same_user = server.login(ADMIN_EMAIL, ADMIN_PASSWORD).await;
+    let capabilities = &[CAP_BACKGROUND_TERMINAL_POLICY];
+    let mut live =
+        RawAgent::authenticate_with_capabilities(&server, &agent, true, capabilities).await;
+    wait_connected(&server, device).await;
+    let previous = server.state.registry.current_conn(device).unwrap();
+    let check = format!("/devices/{device}/background-terminal/check");
+    let confirm = format!("/devices/{device}/background-terminal/admission");
+    let token_from = |html: &str| extract(html, r#"name="admission" value="([^"]+)""#).unwrap();
+
+    let (policy_check, initial) = tokio::join!(
+        reply(&mut live, Policy::Enabled),
+        admin.post(&server, &check, &[]),
+    );
+    assert_eq!(initial.status, StatusCode::OK);
+    assert_eq!(initial.headers[header::CACHE_CONTROL], "no-store");
+    assert!(initial.body.contains("Verify session access"));
+    let secret = token_from(&initial.body);
+    let fields = [("admission", secret.as_str())];
+    let missing_csrf = axum::http::Request::post(&confirm)
+        .header(header::COOKIE, &admin.cookie)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from(format!("admission={secret}")))
+        .unwrap();
+    assert_eq!(
+        server.request(missing_csrf).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        same_user.post(&server, &confirm, &fields).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let other_device = format!("/devices/{}/background-terminal/admission", Uuid::new_v4());
+    assert_eq!(
+        admin.post(&server, &other_device, &fields).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let (attempt, confirmed) = tokio::join!(
+        reply(&mut live, Policy::Enabled),
+        admin.post(&server, &confirm, &fields),
+    );
+    assert_ne!(attempt, policy_check);
+    assert_eq!(confirmed.status, StatusCode::OK);
+    assert!(confirmed.body.contains("Technician access verified."));
+    assert!(!confirmed.body.contains("Verify session access"));
+    assert_eq!(
+        admin.post(&server, &confirm, &fields).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    let (_, ready) = tokio::join!(
+        reply(&mut live, Policy::Enabled),
+        admin.post(&server, &check, &[])
+    );
+    let declined_secret = token_from(&ready.body);
+    let fields = [("admission", declined_secret.as_str())];
+    let (_, denied) = tokio::join!(
+        reply(&mut live, Policy::Disabled),
+        admin.post(&server, &confirm, &fields)
+    );
+    assert!(denied.body.contains("Local policy is disabled."));
+    assert!(!denied.body.contains("Technician access verified."));
+
+    let (_, ready) = tokio::join!(
+        reply(&mut live, Policy::Enabled),
+        admin.post(&server, &check, &[])
+    );
+    let stale_secret = token_from(&ready.body);
+    let mut replacement =
+        RawAgent::authenticate_with_capabilities(&server, &agent, true, capabilities).await;
+    wait_for("replacement agent", Duration::from_secs(10), || async {
+        server
+            .state
+            .registry
+            .current_conn(device)
+            .is_some_and(|connection| connection != previous)
+    })
+    .await;
+    let stale = admin
+        .post(&server, &confirm, &[("admission", &stale_secret)])
+        .await;
+    assert!(stale.body.contains("disconnected or reconnected"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), next(&mut replacement.ws))
+            .await
+            .is_err()
+    );
+
+    let recorded: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT outcome, detail FROM audit_events WHERE organization_id = $1 AND target_id = $2
+           AND action = 'device.background_terminal_admission.result' ORDER BY id",
+    )
+    .bind(org)
+    .bind(device)
+    .fetch_all(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(recorded.len(), 3);
+    assert_eq!(
+        recorded[0],
+        (
+            "success".into(),
+            serde_json::json!({
+                "request_id": attempt, "policy_check_id": policy_check, "status": "enabled", "connection": previous
+            })
+        )
+    );
+    assert_eq!(recorded[1].0, "denied");
+    assert_eq!(recorded[1].1["status"], "disabled");
+    assert_eq!(recorded[2].0, "failed");
+    assert_eq!(recorded[2].1["status"], "not_connected");
+    let activity = admin
+        .get(&server, &format!("/devices/{device}/activity"))
+        .await;
+    assert!(activity
+        .body
+        .contains("Background terminal access confirmation recorded"));
+    assert!(!activity.body.contains(&secret));
+    drop(live);
+    drop(replacement);
+    server.stop().await;
+}
+
 fn finished_exit0(text: &str) -> JobPhase {
     JobPhase::Finished(Box::new(Finished {
         outcome: ExecOutcome::Exited { code: 0 },

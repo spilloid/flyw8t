@@ -4,6 +4,19 @@
 
 On 2026-11-26 the operator scoped the **0.2.0 pre-release** to Windows agent setup and enrollment, including silent deployment of a site package. Broader foundation checks remain listed below with their own evidence requirements.
 
+## 0.3.0 sprint acceptance
+
+- [x] Device workspace with stored inventory trends and a refresh action.
+- [x] Approved scripts with one-time and recurring schedules, delivery windows, and run-on-reconnect.
+- [x] Device Activity with operator and job evidence, including linked browser screen-share activity.
+- [ ] Background PowerShell on an enrolled Windows PC, including interactive prompts and Ctrl+C while the employee continues working.
+- [ ] Quiet enrollment and a site-specific Intune Win32 assignment that detects the signed installation and preserves device identity on retry.
+- [ ] Browser remote control, consented MCP screenshot and input tools, and Network access through a selected opted-in device.
+- [ ] Default-on signed agent updates, including device and organization opt-outs, reconnect evidence, and rollback.
+- [ ] Live Windows acceptance, a verified GitHub release, and the HomeLab rollout.
+
+The first three items have local candidate evidence. Repeat their checks against the release commit. The Device Activity scope above covers browser screen sharing. Native desktop session evidence is part of the browser and Windows acceptance work still underway.
+
 ## Product contract
 
 | Release | Required scope |

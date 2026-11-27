@@ -133,6 +133,7 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "user-signed-out" => (true, "That user was signed out everywhere."),
         "device-revoked" => (true, "Device credential revoked and its connection closed."),
         "device-updated" => (true, "Device updated."),
+        "agent-update-policy-saved" => (true, "Agent update policy saved."),
         "device-retired" => (true, "Device retired: its credential is revoked and its connection closed."),
         "devices-tagged" => (true, "Tag added to the selected devices."),
         "devices-untagged" => (true, "Tag removed from the selected devices."),
@@ -513,7 +514,7 @@ pub async fn device_activity(
 
 // Read the device and its live enrollment again before displaying a reply. A membership change,
 // sign-out or retirement during the short agent round trip must take effect.
-async fn windows_observation_target(
+pub(crate) async fn windows_observation_target(
     tx: &mut sqlx::PgConnection,
     p: &Principal,
     device: Uuid,
@@ -599,79 +600,6 @@ pub async fn check_physical_console(
         .await?;
         tx.commit().await?;
         html(flyw8t_web::physical_console_result(
-            &ctx(&p, None),
-            device,
-            &name,
-            view,
-        ))
-    })
-    .await
-}
-
-pub async fn check_background_terminal_policy(
-    State(state): State<Shared>,
-    WebUser(p): WebUser,
-    Path(device): Path<Uuid>,
-    body: Bytes,
-) -> Response {
-    use crate::registry::ConsoleCheckError;
-    use flyw8t_protocol::messages::BackgroundTerminalPolicy;
-    use flyw8t_web::BackgroundTerminalPolicyCheck as Check;
-
-    page(&p, async {
-        check_csrf(&p, &Form::parse(&body))?;
-        p.require(Permission::ViewDevices)?;
-        p.require(Permission::RunControlSessions)?;
-        let request_id = Uuid::new_v4();
-        let mut tx = state.db.begin().await?;
-        let (org, _) = windows_observation_target(&mut tx, &p, device).await?;
-        Audit::user(&p, "device.background_terminal_policy.requested")
-            .org(org)
-            .target("device", device)
-            .detail(json!({"request_id": request_id}))
-            .record(&mut *tx)
-            .await?;
-        tx.commit().await?;
-
-        let reply = state
-            .registry
-            .check_background_terminal_policy(device, request_id)
-            .await;
-        let mut tx = state.db.begin().await?;
-        let (current_org, name) = windows_observation_target(&mut tx, &p, device).await?;
-        if current_org != org {
-            return Err(AppError::NotFound);
-        }
-        let observation = reply.and_then(|(connection, policy)| {
-            if state.registry.current_conn(device) != Some(connection) {
-                return Err(ConsoleCheckError::NotConnected);
-            }
-            Ok((connection, policy))
-        });
-        let (view, status, connection, verified) = match observation {
-            Ok((connection, BackgroundTerminalPolicy::Enabled)) => {
-                (Check::Enabled, "enabled", Some(connection), true)
-            }
-            Ok((connection, BackgroundTerminalPolicy::Disabled)) => {
-                (Check::Disabled, "disabled", Some(connection), true)
-            }
-            Ok((connection, BackgroundTerminalPolicy::Unavailable)) => {
-                (Check::Unavailable, "unavailable", Some(connection), false)
-            }
-            Err(ConsoleCheckError::NotConnected) => (Check::Offline, "not_connected", None, false),
-            Err(ConsoleCheckError::Unsupported) => (Check::Unsupported, "unsupported", None, false),
-            Err(ConsoleCheckError::Busy) => (Check::Busy, "busy", None, false),
-            Err(ConsoleCheckError::Timeout) => (Check::TimedOut, "timeout", None, false),
-        };
-        let audit = Audit::user(&p, "device.background_terminal_policy.result")
-            .org(org)
-            .target("device", device)
-            .detail(json!({"request_id": request_id, "status": status, "connection": connection}));
-        if verified { audit } else { audit.failed() }
-            .record(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        html(flyw8t_web::background_terminal_policy_result(
             &ctx(&p, None),
             device,
             &name,
@@ -1159,6 +1087,22 @@ pub async fn create_enrollment_token(
         check_csrf(&p, &form)?;
         p.require(Permission::ManageEnrollment)?;
         let org = visible_org(&state, &p, id).await?;
+        let site: Option<Uuid> = form.get("site").filter(|s| !s.is_empty()).map(|s| s.parse()).transpose().map_err(|_| AppError::BadRequest("Unknown site.".into()))?;
+        let site_name = site.map(|id| {
+            org.sites.iter().find(|view| view.id == id).map(|view| view.name.clone())
+                .ok_or_else(|| AppError::BadRequest("Unknown site.".into()))
+        }).transpose()?;
+        let download = form.get("download");
+        if download == Some("intune-detection") {
+            let script = crate::windows_installer::intune_detection_script(
+                &state.config.public_url, id, site,
+            );
+            return Ok(([
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CONTENT_DISPOSITION, "attachment; filename=Detect-Flyw8t.ps1"),
+                (header::CACHE_CONTROL, "no-store"),
+            ], script).into_response());
+        }
         let ttl_minutes: i64 = form.get("ttl_minutes").and_then(|v| v.parse().ok()).unwrap_or(60);
         if !(5..=1440).contains(&ttl_minutes) {
             return Err(AppError::BadRequest("Validity must be between 5 minutes and 24 hours.".into()));
@@ -1167,24 +1111,27 @@ pub async fn create_enrollment_token(
         if !(1..=100).contains(&max_uses) {
             return Err(AppError::BadRequest("Devices must be between 1 and 100.".into()));
         }
-        let site: Option<Uuid> = form.get("site").filter(|s| !s.is_empty()).map(|s| s.parse()).transpose().map_err(|_| AppError::BadRequest("Unknown site.".into()))?;
-        let site_name = site.map(|id| {
-            org.sites.iter().find(|view| view.id == id).map(|view| view.name.clone())
-                .ok_or_else(|| AppError::BadRequest("Unknown site.".into()))
-        }).transpose()?;
-        let download = form.get("download") == Some("windows");
-        let template = if download { Some(crate::windows_installer::template(&state).await?) } else { None };
         let secret = format!("{}{}", auth::ENROLL_PREFIX, auth::random_secret(32));
-        let installer = template.map(|base| -> AppResult<Vec<u8>> {
-            let mut exe = base.to_vec();
+        let installer = if matches!(download, Some("windows" | "intune")) {
+            let mut exe = crate::windows_installer::template(&state).await?.to_vec();
             flyw8t_protocol::enrollment_package::EnrollmentPackage {
                 server_url: state.config.public_url.clone(),
                 organization: org.name.clone(),
                 site: site_name,
                 token: secret.clone(),
             }.append(&mut exe).map_err(|error| AppError::Internal(error.into()))?;
-            Ok(exe)
-        }).transpose()?;
+            if download == Some("intune") {
+                let detector = crate::windows_installer::intune_detection_script(
+                    &state.config.public_url, id, site,
+                );
+                let bundle = crate::windows_installer::intune_deployment_bundle(exe, detector).await?;
+                Some(("attachment; filename=Flyw8t-Intune.zip", bundle))
+            } else {
+                Some(("attachment; filename=Flyw8t-Setup-x64.exe", exe))
+            }
+        } else {
+            None
+        };
         let mut tx = state.db.begin().await?;
         auth::recheck_actor(&mut tx, &p, Some(id), false).await?;
         let (token_id,): (Uuid,) = sqlx::query_as(
@@ -1206,12 +1153,12 @@ pub async fn create_enrollment_token(
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
-        if let Some(exe) = installer {
+        if let Some((disposition, bytes)) = installer {
             return Ok(([
                 (header::CONTENT_TYPE, "application/octet-stream"),
-                (header::CONTENT_DISPOSITION, "attachment; filename=Flyw8t-Setup-x64.exe"),
+                (header::CONTENT_DISPOSITION, disposition),
                 (header::CACHE_CONTROL, "no-store"),
-            ], exe).into_response());
+            ], bytes).into_response());
         }
         let revealed = RevealedSecret {
             label: format!("Enrollment token for {}", org.name),

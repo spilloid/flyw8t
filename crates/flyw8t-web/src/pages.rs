@@ -921,6 +921,38 @@ fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
     .into_any()
 }
 
+fn device_agent_update_policy(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
+    let policy = d.agent_update_policy;
+    let status = if d.row.retired {
+        "Device retired"
+    } else if policy.allows_automatic_updates() {
+        "Enabled by policy"
+    } else if !policy.organization_enabled && policy.device_opted_out {
+        "Organization paused · Device opted out"
+    } else if policy.device_opted_out {
+        "Device opted out"
+    } else {
+        "Paused by organization"
+    };
+    let edit = (ctx.is_admin && !d.row.retired).then(|| view! {
+        <form method="post" action=format!("/devices/{}/agent-update-policy", d.row.id) class="inline-form">
+            <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+            <label>"Device preference"<select name="policy">
+                <option value="inherit" selected=!policy.device_opted_out>"Follow organization"</option>
+                <option value="opt-out" selected=policy.device_opted_out>"Opt out"</option>
+            </select></label>
+            <button type="submit">"Save preference"</button>
+        </form>
+    });
+    view! {
+        <details id="agent-update-policy" class="device-section">
+            <summary>"Automatic agent updates · "{status}</summary>
+            <p class="hint">"This preference applies when signed automatic updates are available. An organization pause applies to every device."</p>
+            {edit}
+        </details>
+    }
+}
+
 /// The device's last report at a glance: disks, memory, uptime and how old the report is.
 fn inventory_trend(
     samples: impl Iterator<Item = (OffsetDateTime, u8)>,
@@ -1227,6 +1259,7 @@ pub fn physical_console_result(
     shell("Physical console check", ctx, Nav::Devices, None, body)
 }
 
+#[derive(Clone, Copy)]
 pub enum BackgroundTerminalPolicyCheck {
     Enabled,
     Disabled,
@@ -1235,6 +1268,12 @@ pub enum BackgroundTerminalPolicyCheck {
     Offline,
     Busy,
     TimedOut,
+    Expired,
+}
+
+pub enum BackgroundTerminalStep {
+    Policy(Option<String>),
+    Confirmation,
 }
 
 pub fn background_terminal_policy_result(
@@ -1242,10 +1281,18 @@ pub fn background_terminal_policy_result(
     device: uuid::Uuid,
     device_name: &str,
     result: BackgroundTerminalPolicyCheck,
+    step: BackgroundTerminalStep,
 ) -> String {
     use BackgroundTerminalPolicyCheck::*;
 
+    let title = match &step {
+        BackgroundTerminalStep::Policy(_) => "Background terminal policy",
+        BackgroundTerminalStep::Confirmation => "Background terminal access",
+    };
     let finding = match result {
+        Enabled if matches!(&step, BackgroundTerminalStep::Confirmation) => {
+            "Technician access verified."
+        }
         Enabled => "Local policy is enabled.",
         Disabled => "Local policy is disabled.",
         Unavailable => "The agent could not verify local policy.",
@@ -1253,19 +1300,32 @@ pub fn background_terminal_policy_result(
         Offline => "The agent disconnected or reconnected during the check.",
         Busy => "The agent or console is busy.",
         TimedOut => "The agent did not answer in time.",
+        Expired => "This confirmation expired. Check local policy again.",
+    };
+    let confirmation = match step {
+        BackgroundTerminalStep::Policy(Some(secret)) => Some(view! {
+            <form method="post" action=format!("/devices/{device}/background-terminal/admission") class="inline-form">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <input type="hidden" name="admission" value=secret/>
+                <button type="submit">"Verify session access"</button>
+                <span class="muted small">"This confirmation is valid for 30 seconds in this sign-in session."</span>
+            </form>
+        }),
+        _ => None,
     };
     let body = view! {
         <p class="crumbs">
             <a href="/devices">"Devices"</a>" / "<a href=format!("/devices/{device}")>{device_name.to_owned()}</a>
         </p>
-        <h1>"Background terminal policy"</h1>
+        <h1>{title}</h1>
         <section class="card" aria-labelledby="terminal-policy-finding">
             <h2 id="terminal-policy-finding">{finding}</h2>
+            {confirmation}
             <p>"Interactive PowerShell sessions are still in development."</p>
             <p class="muted small">"Checked at "<time datetime=fmt::iso(ctx.now)>{fmt::timestamp(ctx.now)}</time></p>
         </section>
     };
-    shell("Background terminal policy", ctx, Nav::Devices, None, body)
+    shell(title, ctx, Nav::Devices, None, body)
 }
 
 pub fn device_page(
@@ -1421,6 +1481,7 @@ pub fn device_page(
             </div>
             <div id="device-management">
                 {manage}
+                {device_agent_update_policy(ctx, &d)}
                 {fields_card(ctx, &d.fields, "device", d.row.id)}
                 {danger}
             </div>
@@ -2118,7 +2179,7 @@ pub fn organization_page(
         view! {
             <p>"Choose the site, download the installer, and open it on the Windows PC. Setup shows the destination and asks for administrator approval."</p>
             {return_to_setup}
-            <form method="post" action=url class="inline-form">
+            <form id="windows-enrollment-form" method="post" action=url class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                 <label>"Site"<select name="site"><option value="">"(none)"</option>{site_opts}</select></label>
                 <label>"Valid for"<select name="ttl_minutes">
@@ -2137,6 +2198,10 @@ pub fn organization_page(
                 <p>"Run the downloaded package as SYSTEM or from an elevated process."</p>
                 <pre><code>"Flyw8t-Setup-x64.exe --quiet"</code></pre>
                 <p class="hint">"Set the device count and validity for your rollout before downloading."</p>
+                <button type="submit" form="windows-enrollment-form" name="download" value="intune">"Download Intune bundle"</button>
+                <p class="hint">"Includes the .intunewin app, matching detection script, and Intune settings."</p>
+                <button type="submit" form="windows-enrollment-form" name="download" value="intune-detection" class="secondary">"Download Intune detection script"</button>
+                <p class="hint">"Use the same site selection for the installer and detection script."</p>
             </details>
             <details>
                 <summary>"Manual setup downloads"</summary>
@@ -2184,6 +2249,17 @@ pub fn organization_page(
         })
         .collect_view();
     let devices_href = format!("/devices?org={id}");
+    let update_policy = org.automatic_agent_updates;
+    let update_policy_form = ctx.is_admin.then(|| view! {
+        <form method="post" action=format!("/organizations/{id}/agent-update-policy") class="inline-form">
+            <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+            <label>"Organization policy"<select name="policy">
+                <option value="enabled" selected=update_policy>"Enabled"</option>
+                <option value="paused" selected=!update_policy>"Paused"</option>
+            </select></label>
+            <button type="submit">"Save policy"</button>
+        </form>
+    });
     let rename = ctx.is_admin.then(|| {
         let url = format!("/organizations/{id}/rename");
         view! {
@@ -2214,6 +2290,11 @@ pub fn organization_page(
                 {enroll_form}
             </section>
         </div>
+        <details id="agent-update-policy" class="card">
+            <summary>"Automatic agent updates · "{if update_policy { "Enabled" } else { "Paused" }}</summary>
+            <p class="hint">"This policy applies when signed automatic updates are available. Pausing covers the whole organization. Devices keep their own opt-outs."</p>
+            {update_policy_form}
+        </details>
         {fields_card(ctx, &fields, "organization", id)}
         {rename}
         <section>

@@ -62,7 +62,7 @@ The founding brief suggested separate `storage` and `integrations` crates. They 
 | Browser → server | HTTPS (TLS natively or at a proxy; plaintext only for a loopback public URL) | Session cookie (HttpOnly, SameSite=Strict, `__Host-` + Secure when HTTPS), per-session CSRF token on every POST, CSP `default-src 'none'`, a hash authorizes the static clipboard helper on enrollment confirmation. |
 | Integration → server | HTTPS | Bearer `fw8_…` token: SHA-256 at rest, revocable, expiring, scopes that only narrow the owner's role. API accepts bearer tokens only, never cookies. |
 | Agent → server | WSS, outbound from the endpoint | Per-connection nonce signed by the device's Ed25519 key; 1 MiB message cap; every report checked against the device that owns the job. Tenancy comes from the enrollment token, never from the device. |
-| Server → agent | Same connection | The agent validates every action against its own compiled-in catalog and rejects anything else; there is no shell and no arbitrary command. |
+| Server → agent | Same connection | The agent validates built-in jobs against its own compiled-in catalog and applies endpoint trust checks to signed script jobs. Interactive terminal sessions are in development. |
 | Server → database | Local network / Compose network | Credentials from the environment; append-only triggers on history tables. |
 
 See [threat-model.md](threat-model.md) for what each control is defending against and what is not yet defended.
@@ -89,7 +89,7 @@ The center of the product. Summary here; the contract is [job-lifecycle.md](job-
 - Single binary: `enroll`, `run` (foreground), `status`, `service install|uninstall|run`.
 - Windows service: automatic start, LocalSystem, restart-on-failure actions (also for a non-crash failure). `enroll` creates the state folders (which hold the private key) owned by Administrators and open only to SYSTEM and Administrators, in the same call that creates them (`winsec.rs`); `service install` copies the agent to Program Files and registers that copy. Existing folders are checked and refused, never repaired. The service logs to `logs\agent.log` in the state folder. Run for real once on Windows 11 ([deployment.md](deployment.md), dev-process row 36); a reboot is not yet checked.
 - Bounded everywhere: 2 concurrent jobs, a 256-entry report buffer, 256 KiB per output stream, 1 MiB per message, 30 s connect and handshake deadlines, backoff from 1 s capped at 60 s with jitter.
-- Actions are compiled Rust. Child processes are fixed absolute paths (`%SystemRoot%\System32\…`) with argument vectors built from validated parameters, `CREATE_NO_WINDOW`, stdin closed, kill on timeout or cancel or drop. No shell anywhere.
+- Built-in actions are compiled Rust. Child processes use fixed absolute paths (`%SystemRoot%\System32\…`), arguments built from validated parameters, `CREATE_NO_WINDOW`, closed stdin, and termination on timeout, cancellation, or drop. [Signed script jobs](decisions/ADR-0015-script-trust-and-running.md) and the planned [interactive background terminal](background-terminal.md) have their own execution contracts.
 - Endpoint support remains Windows-first today. Linux collector/action paths are exercised in CI but do not constitute a supported Linux endpoint release. The accepted [1.0 contract](roadmap.md) requires macOS alongside Windows, with Mac permission/session experiments starting at 0.2; Linux endpoint delivery is deferred. Mac packaging and native capture/input still need implementation and physical-machine evidence.
 
 ## Web console (implemented)

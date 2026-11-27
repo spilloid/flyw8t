@@ -705,7 +705,12 @@ pub async fn enroll(
             device_id,
             organization,
             organization_id,
+            enrollment_scope,
         } => {
+            anyhow::ensure!(
+                enrollment_scope.is_none_or(|scope| Some(scope.organization_id) == organization_id),
+                "the server returned inconsistent enrollment organization IDs"
+            );
             if let Some(p) = &pinned {
                 if organization_id != Some(p.organization_id) {
                     bail!(
@@ -721,6 +726,7 @@ pub async fn enroll(
                 crate::trust::store(&cfg.state_dir, p)?;
             }
             cfg.device_id = Some(device_id);
+            cfg.enrollment_scope = enrollment_scope;
             cfg.save()?;
             let _ = ws.close(None).await;
             Ok((device_id, organization, pinned))

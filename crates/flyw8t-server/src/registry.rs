@@ -230,7 +230,13 @@ impl Registry {
         deadline: Instant,
     ) -> Result<PhysicalConsoleState, ConsoleCheckError> {
         match self
-            .observe(device_id, request_id, CheckKind::PhysicalConsole, deadline)
+            .observe(
+                device_id,
+                request_id,
+                CheckKind::PhysicalConsole,
+                deadline,
+                None,
+            )
             .await?
         {
             (_, CheckReply::PhysicalConsole(state)) => Ok(state),
@@ -243,6 +249,7 @@ impl Registry {
         &self,
         device_id: Uuid,
         request_id: Uuid,
+        expected_connection: Option<Uuid>,
     ) -> Result<(Uuid, BackgroundTerminalPolicy), ConsoleCheckError> {
         match self
             .observe(
@@ -250,6 +257,7 @@ impl Registry {
                 request_id,
                 CheckKind::BackgroundTerminalPolicy,
                 Instant::now() + DEVICE_CHECK_TIMEOUT,
+                expected_connection,
             )
             .await?
         {
@@ -264,6 +272,7 @@ impl Registry {
         request_id: Uuid,
         kind: CheckKind,
         deadline: Instant,
+        expected_connection: Option<Uuid>,
     ) -> Result<(Uuid, CheckReply), ConsoleCheckError> {
         let (guard, reply) = {
             let mut live = self.live.lock().unwrap();
@@ -271,6 +280,9 @@ impl Registry {
                 .conns
                 .get(&device_id)
                 .ok_or(ConsoleCheckError::NotConnected)?;
+            if expected_connection.is_some_and(|id| id != conn.conn_id) {
+                return Err(ConsoleCheckError::NotConnected);
+            }
             let message = match kind {
                 CheckKind::PhysicalConsole if conn.physical_console_check => {
                     ServerMsg::CheckPhysicalConsole { request_id }

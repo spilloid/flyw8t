@@ -278,7 +278,7 @@ pub async fn device_activity(
     let (at, source, id) = before.map_or((None, None, None), |c| (Some(c.0), Some(c.1), Some(c.2)));
     let rows: Vec<Row> = sqlx::query_as(
         "WITH scoped_device AS (
-             SELECT id, organization_id FROM devices WHERE id = $1 AND ($2 OR organization_id = ANY($3))
+             SELECT id, organization_id, enrolled_at FROM devices WHERE id = $1 AND ($2 OR organization_id = ANY($3))
          ), device_jobs AS (
              SELECT j.id, j.organization_id,
                     CASE WHEN j.action = 'script.run' THEN
@@ -290,7 +290,9 @@ pub async fn device_activity(
              SELECT a.at, 0::smallint AS source, a.id,
                     CASE WHEN a.action IN ('device.support.connected', 'device.support.ended')
                          THEN coalesce(a.detail->>'technician', a.actor_label) ELSE a.actor_label END AS actor,
-                    a.action, a.outcome, NULL::uuid AS job, NULL::text AS job_action,
+                    CASE WHEN a.action = 'device.agent_update_policy'
+                         THEN a.action || '.' || (a.detail->>'to_opted_out') ELSE a.action END AS action,
+                    a.outcome, NULL::uuid AS job, NULL::text AS job_action,
                     CASE WHEN a.action IN ('device.support.connected', 'device.support.ended')
                               AND ($2 OR a.detail->>'technician_id' = $8)
                          THEN a.detail->>'session_id' END AS support_session
@@ -301,6 +303,12 @@ pub async fn device_activity(
                         AND a.action IN ('device.connect', 'device.disconnect')
                     )
               )
+             UNION ALL
+             SELECT a.at, 0::smallint, a.id, a.actor_label, a.action || '.' || (a.detail->>'to_enabled'),
+                    a.outcome, NULL::uuid, NULL::text, NULL::text
+               FROM audit_events a JOIN scoped_device d ON a.organization_id = d.organization_id
+              WHERE a.target_type = 'organization' AND a.action = 'organization.agent_update_policy'
+                AND a.target_id = d.organization_id AND a.at >= d.enrolled_at
              UNION ALL
              SELECT a.at, 0::smallint, a.id, a.actor_label, a.action, a.outcome, j.id, j.action, NULL::text
                FROM audit_events a JOIN device_jobs j ON a.target_id = j.id AND a.organization_id = j.organization_id
@@ -340,6 +348,18 @@ pub async fn device_activity(
                     "device.connect" => "Agent authenticated",
                     "device.disconnect" => "Agent connection closed",
                     "device.update" => "Device details changed",
+                    "device.agent_update_policy.true" => {
+                        "Device opted out of automatic agent updates"
+                    }
+                    "device.agent_update_policy.false" => {
+                        "Device follows the organization update policy"
+                    }
+                    "organization.agent_update_policy.true" => {
+                        "Organization enabled automatic agent updates"
+                    }
+                    "organization.agent_update_policy.false" => {
+                        "Organization paused automatic agent updates"
+                    }
                     "device.revoke" => "Device credential revoked",
                     "device.retire" => "Device retired",
                     "device.physical_console.requested" => "Physical console check requested",
@@ -349,6 +369,12 @@ pub async fn device_activity(
                     }
                     "device.background_terminal_policy.result" => {
                         "Background terminal policy check recorded"
+                    }
+                    "device.background_terminal_admission.requested" => {
+                        "Background terminal access confirmation requested"
+                    }
+                    "device.background_terminal_admission.result" => {
+                        "Background terminal access confirmation recorded"
                     }
                     "device.support.connected" => "Linked screen share connected",
                     "device.support.ended" => "Linked screen share ended",
@@ -447,8 +473,10 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
     let Some(row) = row else { return Ok(None) };
     let row = device_row(state, row);
     let org_id = row.organization.id;
-    let (enrolled_at, notes, site_id, os_family): (OffsetDateTime, String, Option<Uuid>, String) = sqlx::query_as(
-        "SELECT enrolled_at, notes, site_id, os_family FROM devices WHERE id = $1 AND organization_id = $2",
+    let (enrolled_at, notes, site_id, os_family, device_opted_out, organization_enabled):
+        (OffsetDateTime, String, Option<Uuid>, String, bool, bool) = sqlx::query_as(
+        "SELECT d.enrolled_at, d.notes, d.site_id, d.os_family, d.agent_updates_opt_out, o.automatic_agent_updates
+         FROM devices d JOIN organizations o ON o.id = d.organization_id WHERE d.id = $1 AND d.organization_id = $2",
     )
     .bind(id)
     .bind(org_id)
@@ -505,6 +533,10 @@ pub async fn device(state: &Shared, p: &Principal, id: Uuid) -> sqlx::Result<Opt
         site_id,
         sites,
         fields,
+        agent_update_policy: AgentUpdatePolicy {
+            organization_enabled,
+            device_opted_out,
+        },
     }))
 }
 
@@ -873,8 +905,9 @@ pub async fn organizations(
     only: Option<Uuid>,
 ) -> sqlx::Result<Vec<OrgSummary>> {
     let (all, orgs) = p.scope();
-    let rows: Vec<(Uuid, String, OffsetDateTime, i64)> = sqlx::query_as(
-        "SELECT o.id, o.name, o.created_at, (SELECT count(*) FROM devices d WHERE d.organization_id = o.id AND d.retired_at IS NULL)
+    let rows: Vec<(Uuid, String, OffsetDateTime, i64, bool)> = sqlx::query_as(
+        "SELECT o.id, o.name, o.created_at, (SELECT count(*) FROM devices d WHERE d.organization_id = o.id AND d.retired_at IS NULL),
+                o.automatic_agent_updates
            FROM organizations o WHERE ($1 OR o.id = ANY($2)) AND ($3::uuid IS NULL OR o.id = $3) ORDER BY lower(o.name)",
     )
     .bind(all)
@@ -883,7 +916,7 @@ pub async fn organizations(
     .fetch_all(&state.db)
     .await?;
     let mut out = Vec::with_capacity(rows.len());
-    for (id, name, created_at, device_count) in rows {
+    for (id, name, created_at, device_count, automatic_agent_updates) in rows {
         let sites: Vec<(Uuid, String)> = sqlx::query_as(
             "SELECT id, name FROM sites WHERE organization_id = $1 ORDER BY lower(name)",
         )
@@ -895,6 +928,7 @@ pub async fn organizations(
             name,
             device_count,
             created_at,
+            automatic_agent_updates,
             sites: sites
                 .into_iter()
                 .map(|(id, name)| SiteView { id, name })

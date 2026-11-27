@@ -25,7 +25,7 @@ jobs:
         run: cargo build --locked -p flyw8t-agent -p flyw8t-technician -p flyw8t-server --target x86_64-pc-windows-msvc
       - name: Registered device link opens the idle technician chooser
         run: ./scripts/test-technician-handoff.ps1 -Binary ./target/x86_64-pc-windows-msvc/debug/flyw8t-technician.exe
-      - name: First-use Chrome prompt and three device-page links
+      - name: First-use Chrome prompt and Windows device-page links
         uses: ./.github/actions/check-browser-handoff
         with:
           binaries: target/x86_64-pc-windows-msvc/debug

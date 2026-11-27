@@ -93,6 +93,10 @@ fn windows_device(connection: Connection) -> DeviceDetail {
         site_id: None,
         sites: Vec::new(),
         fields: Vec::new(),
+        agent_update_policy: AgentUpdatePolicy {
+            organization_enabled: true,
+            device_opted_out: false,
+        },
     }
 }
 
@@ -586,6 +590,7 @@ fn enrollment_downloads_are_pinned_and_setup_commands_are_separate_from_the_toke
         name: "Org".into(),
         device_count: 0,
         sites: vec![],
+        automatic_agent_updates: true,
         created_at: now(),
     };
     let revealed = RevealedSecret {

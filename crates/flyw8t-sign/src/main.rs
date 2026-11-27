@@ -4,6 +4,7 @@
 
 mod keyfile;
 mod state;
+mod update;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -47,6 +48,11 @@ enum Cmd {
     Keygen {
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Create a release key and sign or verify Windows agent update manifests.
+    Update {
+        #[command(subcommand)]
+        cmd: update::Cmd,
     },
     /// Show a key's id, or what this machine holds.
     Show {
@@ -250,7 +256,7 @@ fn passphrase(confirm: bool) -> Result<String> {
 }
 
 fn open_key(p: &Path) -> Result<keyfile::OfflineKey> {
-    keyfile::open(p, &passphrase(false)?)
+    keyfile::open(p, &passphrase(false)?, keyfile::Purpose::ScriptTrust)
 }
 
 fn confirm(yes: bool, what: &str) -> Result<()> {
@@ -431,11 +437,12 @@ fn run(cli: Cli) -> Result<()> {
     let state = || State::open(cli.state.clone().unwrap_or_else(State::default_root));
     match cli.cmd {
         Cmd::Keygen { out } => {
-            let (k, bytes) = keyfile::generate(&passphrase(true)?)?;
+            let (k, bytes) = keyfile::generate(&passphrase(true)?, keyfile::Purpose::ScriptTrust)?;
             keyfile::write_private(&out, &bytes)?;
             println!("Made {}\nkey id {}", out.display(), k.id());
             println!("Keep a second copy somewhere else: losing every copy of a root means re-enrolling every agent.");
         }
+        Cmd::Update { cmd } => update::run(cmd, cli.yes)?,
         Cmd::Show { key } => {
             if let Some(k) = key {
                 let k = open_key(&k)?;

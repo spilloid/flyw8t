@@ -57,7 +57,7 @@ fn valid_identification(line: &[u8]) -> bool {
 #[cfg(windows)]
 mod policy {
     use crate::config::{default_state_dir, is_default_state_dir};
-    use crate::winsec::{check_private_dir, create_dir, Created, PRIVATE};
+    use crate::winsec::{check_private_dir, check_private_file, create_dir, Created, PRIVATE};
     use anyhow::{ensure, Context, Result};
     use flyw8t_protocol::messages::BackgroundTerminalPolicy;
     use std::path::{Path, PathBuf};
@@ -100,12 +100,21 @@ mod policy {
         }
     }
 
-    pub fn configure(state_dir: &Path, allow: bool) -> Result<()> {
+    fn enrolled_marker(state_dir: &Path) -> Result<PathBuf> {
         let state = protected_state(state_dir)?;
+        check_private_file(&state.join("agent.json"))?;
         let device = crate::AgentConfig::load(&state)?
             .device_id
             .context("the agent is not enrolled")?;
-        let path = marker(&state, device);
+        Ok(marker(&state, device))
+    }
+
+    pub fn status(state_dir: &Path) -> Result<bool> {
+        enabled(&enrolled_marker(state_dir)?)
+    }
+
+    pub fn configure(state_dir: &Path, allow: bool) -> Result<()> {
+        let path = enrolled_marker(state_dir)?;
         if allow {
             ensure!(
                 create_dir(&path, PRIVATE)? != Created::NotElevated,
@@ -123,6 +132,13 @@ mod policy {
 pub use policy::configure as configure_background_policy;
 #[cfg(windows)]
 pub(crate) use policy::read as read_background_policy;
+#[cfg(windows)]
+pub use policy::status as background_policy_enabled;
+
+#[cfg(windows)]
+mod windows_console;
+#[cfg(windows)]
+pub use windows_console::check as check_powershell;
 
 #[cfg(test)]
 mod tests {

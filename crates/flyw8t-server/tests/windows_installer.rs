@@ -59,14 +59,13 @@ fn assert_success(output: &Output, description: &str) {
     );
 }
 
-async fn setup_as_system(executable: &Path) -> Output {
-    // Exercise the installer itself in the System context used by managed Windows deployments.
-    // The task runs the EXE directly so LastTaskResult is the installer's real exit status.
+async fn run_as_system(executable: &Path, arguments: &str, description: &str) -> Output {
+    // The task runs the EXE directly so LastTaskResult is the executable's real exit status.
     let mut command = powershell(
         r#"
 $ErrorActionPreference = 'Stop'
-$name = 'Flyw8t quiet installer test ' + [Guid]::NewGuid()
-$action = New-ScheduledTaskAction -Execute $env:FLYW8T_TEST_PACKAGE_PATH -Argument '--quiet'
+$name = 'Flyw8t LocalSystem acceptance test ' + [Guid]::NewGuid()
+$action = New-ScheduledTaskAction -Execute $env:FLYW8T_TEST_EXECUTABLE -Argument $env:FLYW8T_TEST_ARGUMENTS
 $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 130)
 Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null
@@ -82,20 +81,21 @@ try {
         $resultReady = $info.LastTaskResult -notin @(0x41301, 0x41303)
         if ($info.LastRunTime -ne $previousRun -and $state -eq 'Ready' -and $resultReady) {
             if ($info.LastTaskResult -ne 0) {
-                throw ('LocalSystem quiet setup returned task result 0x{0:X8} ({0})' -f $info.LastTaskResult)
+                throw ('LocalSystem acceptance returned task result 0x{0:X8} ({0})' -f $info.LastTaskResult)
             }
             exit 0
         }
     } while ($timer.Elapsed.TotalSeconds -lt 135)
-    throw 'LocalSystem quiet setup exceeded its deadline.'
+    throw 'LocalSystem acceptance exceeded its deadline.'
 } finally {
     Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $name -Confirm:$false
 }
 "#,
     );
-    command.env("FLYW8T_TEST_PACKAGE_PATH", executable);
-    run_fixture_command(command, "LocalSystem quiet setup").await
+    command.env("FLYW8T_TEST_EXECUTABLE", executable);
+    command.env("FLYW8T_TEST_ARGUMENTS", arguments);
+    run_fixture_command(command, description).await
 }
 
 async fn verify_local_terminal_policy(
@@ -105,21 +105,30 @@ async fn verify_local_terminal_policy(
     device: Uuid,
 ) {
     let path = format!("/devices/{device}/background-terminal/check");
-    let default = admin.post(server, &path, &[]).await;
-    assert_eq!(default.status, StatusCode::OK);
-    assert!(default.body.contains("Local policy is disabled"));
-
     for (action, expected) in [
-        ("enable", "Local policy is enabled"),
-        ("disable", "Local policy is disabled"),
+        (None, "disabled"),
+        (Some("enable"), "enabled"),
+        (Some("disable"), "disabled"),
     ] {
+        if let Some(action) = action {
+            let mut command = Command::new(exe);
+            command.args(["terminal-policy", action]);
+            let output = run_fixture_command(command, "changing local terminal policy").await;
+            assert_success(&output, "changing local terminal policy");
+        }
         let mut command = Command::new(exe);
-        command.args(["terminal-policy", action]);
-        let output = run_fixture_command(command, "changing local terminal policy").await;
-        assert_success(&output, "changing local terminal policy");
+        command.args(["terminal-policy", "status"]);
+        let output = run_fixture_command(command, "reading local terminal policy").await;
+        assert_success(&output, "reading local terminal policy");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("Background terminal policy {expected} locally."),
+        );
         let observed = admin.post(server, &path, &[]).await;
         assert_eq!(observed.status, StatusCode::OK);
-        assert!(observed.body.contains(expected));
+        assert!(observed
+            .body
+            .contains(&format!("Local policy is {expected}")));
     }
 }
 
@@ -200,7 +209,7 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
     assert_eq!(response.status(), StatusCode::OK);
     std::fs::write(&package, response.bytes().await.unwrap()).unwrap();
 
-    let first = setup_as_system(&package).await;
+    let first = run_as_system(&package, "--quiet", "LocalSystem quiet installation").await;
     assert_success(&first, "LocalSystem quiet installation");
     assert_eq!(
         std::fs::read(&installed).unwrap(),
@@ -223,6 +232,13 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
         || async { server.state.registry.connected_since(device).is_some() },
     )
     .await;
+    let terminal = run_as_system(
+        &installed,
+        "terminal-check --powershell",
+        "LocalSystem PowerShell check",
+    )
+    .await;
+    assert_success(&terminal, "LocalSystem PowerShell check");
     verify_local_terminal_policy(&server, &admin, &installed, device).await;
 
     let repeated = setup(&package, "/quiet").await;

@@ -310,6 +310,8 @@ async fn a_new_enrollment_token_comes_with_the_commands_to_run() {
         .body
         .contains("Deploy quietly with Intune or Group Policy"));
     assert!(again.body.contains("Flyw8t-Setup-x64.exe --quiet"));
+    assert!(again.body.contains("Download Intune bundle"));
+    assert!(again.body.contains("Download Intune detection script"));
     assert!(!again.headers["content-security-policy"]
         .to_str()
         .unwrap()
@@ -317,6 +319,14 @@ async fn a_new_enrollment_token_comes_with_the_commands_to_run() {
 
     // The token shown separately can enroll a device.
     let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
+    let recorded = flyw8t_agent::AgentConfig::load(agent.dir.path()).unwrap();
+    assert_eq!(
+        recorded.enrollment_scope,
+        Some(flyw8t_protocol::messages::EnrollmentScope {
+            organization_id: org,
+            site_id: None,
+        })
+    );
     let list = admin.get(&server, "/devices").await;
     assert!(list.body.contains(&agent.device_id.to_string()));
     server.stop().await;
@@ -341,54 +351,200 @@ async fn a_windows_installer_only_enrolls_into_its_selected_site() {
     .fetch_one(&server.state.db)
     .await
     .unwrap();
+    let path = format!("/organizations/{org}/enrollment-tokens");
+    let detection = admin
+        .post(
+            &server,
+            &path,
+            &[
+                ("site", &site.to_string()),
+                ("download", "intune-detection"),
+            ],
+        )
+        .await;
+    assert_eq!(detection.status, StatusCode::OK);
+    assert_eq!(detection.headers[header::CACHE_CONTROL], "no-store");
+    assert!(detection.headers[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("Detect-Flyw8t.ps1"));
+    assert!(detection.body.starts_with('\u{feff}'));
+    assert!(detection
+        .body
+        .contains(&format!("$expectedOrganization = '{org}'")));
+    assert!(detection
+        .body
+        .contains(&format!("$expectedSite = '{site}'")));
+    assert!(detection.body.contains(&format!(
+        "$expectedServer = '{}'",
+        server.state.config.public_url
+    )));
+    assert!(!detection.body.contains("fw8e_"));
+    let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(tokens, 0, "detection download does not issue a credential");
+    for download in ["intune", "intune-detection"] {
+        let invalid = admin
+            .post(
+                &server,
+                &path,
+                &[
+                    ("site", &Uuid::new_v4().to_string()),
+                    ("download", download),
+                ],
+            )
+            .await;
+        assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     let base = b"MZ synthetic test agent";
     server
         .state
         .windows_agent_template
         .set(base.to_vec())
         .unwrap();
-    let body = format!("csrf={}&site={site}&download=windows", admin.csrf);
-    let reply = flyw8t_server::router(server.state.clone())
-        .oneshot(
-            Request::post(format!("/organizations/{org}/enrollment-tokens"))
-                .header(header::COOKIE, &admin.cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(reply.status(), StatusCode::OK);
-    assert_eq!(reply.headers()[header::CACHE_CONTROL], "no-store");
-    assert!(reply.headers()[header::CONTENT_DISPOSITION]
-        .to_str()
-        .unwrap()
-        .contains("Flyw8t-Setup-x64.exe"));
-    let bytes = to_bytes(reply.into_body(), 16 * 1024).await.unwrap();
-    let (base_len, package) = EnrollmentPackage::read(&mut Cursor::new(&bytes))
-        .unwrap()
-        .unwrap();
-    assert_eq!(base_len as usize, base.len());
-    assert_eq!(&bytes[..base_len as usize], base);
-    assert_eq!(package.organization, "Contoso");
-    assert_eq!(package.site.as_deref(), Some("Main Office"));
-    let device = TestAgent::enroll(&server.url(), &package.token)
-        .await
-        .unwrap();
-    let saved: (Uuid, Option<Uuid>) =
-        sqlx::query_as("SELECT organization_id, site_id FROM devices WHERE id = $1")
-            .bind(device.device_id)
-            .fetch_one(&server.state.db)
+    for (download, filename) in [
+        ("windows", "Flyw8t-Setup-x64.exe"),
+        ("intune", "Flyw8t-Intune.zip"),
+    ] {
+        let body = format!("csrf={}&site={site}&download={download}", admin.csrf);
+        let reply = flyw8t_server::router(server.state.clone())
+            .oneshot(
+                Request::post(&path)
+                    .header(header::COOKIE, &admin.cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
             .await
             .unwrap();
-    assert_eq!(saved, (org, Some(site)));
-    assert!(
-        TestAgent::enroll(&server.url(), &package.token)
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(reply.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            reply.headers()[header::CONTENT_DISPOSITION],
+            format!("attachment; filename={filename}")
+        );
+        let bytes = to_bytes(reply.into_body(), 32 * 1024).await.unwrap();
+        let installer = if download == "intune" {
+            unpack_intune_installer(&bytes, &detection.body)
+        } else {
+            bytes.to_vec()
+        };
+        let (base_len, package) = EnrollmentPackage::read(&mut Cursor::new(&installer))
+            .unwrap()
+            .unwrap();
+        assert_eq!(base_len as usize, base.len());
+        assert_eq!(&installer[..base_len as usize], base);
+        assert_eq!(package.organization, "Contoso");
+        assert_eq!(package.site.as_deref(), Some("Main Office"));
+        let device = TestAgent::enroll(&server.url(), &package.token)
             .await
-            .is_err(),
-        "default setup allows one PC"
-    );
+            .unwrap();
+        let saved: (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT organization_id, site_id FROM devices WHERE id = $1")
+                .bind(device.device_id)
+                .fetch_one(&server.state.db)
+                .await
+                .unwrap();
+        assert_eq!(saved, (org, Some(site)));
+        let recorded = flyw8t_agent::AgentConfig::load(device.dir.path()).unwrap();
+        assert_eq!(
+            recorded.enrollment_scope,
+            Some(flyw8t_protocol::messages::EnrollmentScope {
+                organization_id: org,
+                site_id: Some(site),
+            })
+        );
+        assert!(
+            TestAgent::enroll(&server.url(), &package.token)
+                .await
+                .is_err(),
+            "default setup allows one PC"
+        );
+    }
     server.stop().await;
+}
+
+fn unpack_intune_installer(bundle: &[u8], expected_detector: &str) -> Vec<u8> {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use ring::{digest, hmac};
+    use std::io::{Cursor, Read};
+    use zip::ZipArchive;
+
+    fn file(zip: &mut ZipArchive<Cursor<&[u8]>>, name: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        zip.by_name(name).unwrap().read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    let mut bundle = ZipArchive::new(Cursor::new(bundle)).unwrap();
+    assert_eq!(bundle.len(), 3);
+    assert_eq!(
+        file(&mut bundle, "Detect-Flyw8t.ps1"),
+        expected_detector.as_bytes()
+    );
+    let instructions = String::from_utf8(file(&mut bundle, "README.txt")).unwrap();
+    assert!(instructions.contains("Flyw8t-Setup-x64.exe --quiet"));
+    assert!(instructions.contains("cmd.exe /d /c Uninstall-Flyw8t.cmd"));
+
+    let app = file(&mut bundle, "Flyw8t-Setup-x64.intunewin");
+    let mut app = ZipArchive::new(Cursor::new(app.as_slice())).unwrap();
+    assert_eq!(app.len(), 2);
+    let metadata =
+        String::from_utf8(file(&mut app, "IntuneWinPackage/Metadata/Detection.xml")).unwrap();
+    let field = |name: &str| {
+        metadata
+            .split_once(&format!("<{name}>"))
+            .unwrap()
+            .1
+            .split_once(&format!("</{name}>"))
+            .unwrap()
+            .0
+    };
+    assert_eq!(field("SetupFile"), "Flyw8t-Setup-x64.exe");
+    assert_eq!(field("FileName"), "IntunePackage.intunewin");
+    assert_eq!(field("ProfileIdentifier"), "ProfileVersion1");
+    assert_eq!(field("FileDigestAlgorithm"), "SHA256");
+    let mut encrypted = file(
+        &mut app,
+        "IntuneWinPackage/Contents/IntunePackage.intunewin",
+    );
+    assert_eq!(encrypted[..32], STANDARD.decode(field("Mac")).unwrap());
+    assert_eq!(
+        encrypted[32..48],
+        STANDARD.decode(field("InitializationVector")).unwrap()
+    );
+    let key = hmac::Key::new(
+        hmac::HMAC_SHA256,
+        &STANDARD.decode(field("MacKey")).unwrap(),
+    );
+    hmac::verify(&key, &encrypted[32..], &encrypted[..32]).unwrap();
+    encrypted[48] ^= 1;
+    assert!(hmac::verify(&key, &encrypted[32..], &encrypted[..32]).is_err());
+    encrypted[48] ^= 1;
+    let decrypted = cbc::Decryptor::<aes::Aes256>::new_from_slices(
+        &STANDARD.decode(field("EncryptionKey")).unwrap(),
+        &encrypted[32..48],
+    )
+    .unwrap()
+    .decrypt_padded_mut::<Pkcs7>(&mut encrypted[48..])
+    .unwrap();
+    assert_eq!(
+        decrypted.len(),
+        field("UnencryptedContentSize").parse::<usize>().unwrap()
+    );
+    assert_eq!(
+        digest::digest(&digest::SHA256, decrypted).as_ref(),
+        STANDARD.decode(field("FileDigest")).unwrap()
+    );
+    let mut payload = ZipArchive::new(Cursor::new(decrypted)).unwrap();
+    assert_eq!(payload.len(), 2);
+    let uninstall = String::from_utf8(file(&mut payload, "Uninstall-Flyw8t.cmd")).unwrap();
+    assert!(uninstall.contains("service uninstall"));
+    file(&mut payload, "Flyw8t-Setup-x64.exe")
 }
 
 #[tokio::test(flavor = "multi_thread")]

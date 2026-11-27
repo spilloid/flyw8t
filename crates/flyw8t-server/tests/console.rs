@@ -38,6 +38,192 @@ async fn seed(server: &TestServer, sql: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn fleet_update_preferences_respect_the_organization_pause_and_audit_changes() {
+    let server = start_fresh().await;
+    let admin = server.admin_sudo().await;
+    let org = admin.create_org(&server, "Update pilot").await;
+    let foreign = admin.create_org(&server, "Other fleet").await;
+    let tech = technician(&server, &admin, "pilot-tech@example.test", org).await;
+    let mut ids = Vec::new();
+    for (name, organization) in [("opted-out", org), ("inherited", org), ("outside", foreign)] {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO devices (organization_id, hostname, os_family) VALUES ($1, $2, 'windows')
+             RETURNING id",
+        )
+        .bind(organization)
+        .bind(name)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let organization = format!("/organizations/{org}");
+    let device = format!("/devices/{}", ids[0]);
+    let inherited = format!("/devices/{}", ids[1]);
+    let outside = format!("/devices/{}", ids[2]);
+    let org_policy = format!("{organization}/agent-update-policy");
+    let device_policy = format!("{device}/agent-update-policy");
+    let initial = admin.get(&server, &device).await;
+    assert_eq!(initial.status, StatusCode::OK);
+    assert!(initial.body.contains("Enabled by policy"));
+    assert!(initial.body.contains(&device_policy));
+    assert!(admin
+        .get(&server, &organization)
+        .await
+        .body
+        .contains(&org_policy));
+    let tech_page = tech.get(&server, &device).await;
+    assert!(tech_page.body.contains("Enabled by policy"));
+    assert!(!tech_page.body.contains(&device_policy));
+    assert_eq!(
+        tech.get(&server, &outside).await.status,
+        StatusCode::NOT_FOUND
+    );
+    for path in [&org_policy, &device_policy] {
+        assert_eq!(
+            tech.post(&server, path, &[("policy", "paused")])
+                .await
+                .status,
+            StatusCode::FORBIDDEN,
+        );
+    }
+    let missing_csrf = axum::http::Request::post(&org_policy)
+        .header(axum::http::header::COOKIE, &admin.cookie)
+        .body(axum::body::Body::from("policy=paused"))
+        .unwrap();
+    assert_eq!(
+        server.request(missing_csrf).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        admin
+            .post(
+                &server,
+                &org_policy,
+                &[("policy", "paused"), ("policy", "enabled")]
+            )
+            .await
+            .status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+
+    for (path, policy) in [
+        (&device_policy, "opt-out"),
+        (&device_policy, "opt-out"),
+        (&org_policy, "paused"),
+    ] {
+        assert_eq!(
+            admin
+                .post(&server, path, &[("policy", policy)])
+                .await
+                .status,
+            StatusCode::SEE_OTHER,
+        );
+    }
+    assert!(admin
+        .get(&server, &device)
+        .await
+        .body
+        .contains("Organization paused · Device opted out"));
+    assert!(admin
+        .get(&server, &inherited)
+        .await
+        .body
+        .contains("Paused by organization"));
+    assert!(admin
+        .get(&server, &outside)
+        .await
+        .body
+        .contains("Enabled by policy"));
+    assert_eq!(
+        admin
+            .post(&server, &device_policy, &[("policy", "enabled")])
+            .await
+            .status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the device can only opt out or inherit"
+    );
+    assert_eq!(
+        admin
+            .post(&server, &org_policy, &[("policy", "enabled")])
+            .await
+            .status,
+        StatusCode::SEE_OTHER,
+    );
+    assert!(admin
+        .get(&server, &device)
+        .await
+        .body
+        .contains("Device opted out"));
+    assert!(admin
+        .get(&server, &inherited)
+        .await
+        .body
+        .contains("Enabled by policy"));
+    assert_eq!(
+        admin
+            .post(&server, &device_policy, &[("policy", "inherit")])
+            .await
+            .status,
+        StatusCode::SEE_OTHER,
+    );
+    assert!(admin
+        .get(&server, &device)
+        .await
+        .body
+        .contains("Enabled by policy"));
+
+    let activity = tech.get(&server, &format!("{device}/activity")).await;
+    for label in [
+        "Device opted out of automatic agent updates",
+        "Organization paused automatic agent updates",
+        "Organization enabled automatic agent updates",
+        "Device follows the organization update policy",
+    ] {
+        assert_eq!(activity.body.matches(label).count(), 1, "{label}");
+    }
+    let other_activity = admin.get(&server, &format!("{outside}/activity")).await;
+    assert!(!other_activity
+        .body
+        .contains("Organization paused automatic agent updates"));
+    let events: Vec<(String, Uuid, Value)> = sqlx::query_as(
+        "SELECT action, target_id, detail FROM audit_events WHERE organization_id = $1
+           AND action IN ('organization.agent_update_policy', 'device.agent_update_policy') ORDER BY id",
+    )
+    .bind(org)
+    .fetch_all(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        events,
+        [
+            (
+                "device.agent_update_policy".into(),
+                ids[0],
+                serde_json::json!({"from_opted_out": false, "to_opted_out": true})
+            ),
+            (
+                "organization.agent_update_policy".into(),
+                org,
+                serde_json::json!({"from_enabled": true, "to_enabled": false})
+            ),
+            (
+                "organization.agent_update_policy".into(),
+                org,
+                serde_json::json!({"from_enabled": false, "to_enabled": true})
+            ),
+            (
+                "device.agent_update_policy".into(),
+                ids[0],
+                serde_json::json!({"from_opted_out": true, "to_opted_out": false})
+            ),
+        ],
+    );
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn device_activity_combines_scoped_audit_and_recorded_job_events() {
     let server = start_fresh().await;
     let admin = server.admin_sudo().await;

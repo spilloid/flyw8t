@@ -4,7 +4,18 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## Unreleased
 
+- Check local PowerShell input, output, interruption, and cleanup on Windows with `flyw8t-agent terminal-check --powershell`.
+- Verify background terminal access in the browser. The single-use confirmation rechecks the technician's sign-in and the original agent connection, and records the result in Device Activity.
+- Set the automatic agent update policy per organization, or opt out an individual device. Changes appear in Audit and Device Activity.
+- Verify a newer Windows x64 update candidate locally with `flyw8t-agent update-check`. It checks the signed release manifest and the timestamped Authenticode publisher.
+- Prepare and verify Windows x64 agent update manifests offline with `flyw8t-sign update` and a dedicated release key. The manifest version must match the version embedded in the candidate.
+- Download a site-specific Intune bundle containing the Win32 app, matching detection script, and install and uninstall settings.
+- Download an Intune detection script from Windows enrollment. It checks the service registration, signed agent version, and organization and site recorded at enrollment.
+
+- Report the organization and site recorded at enrollment through `flyw8t-agent status --json` for managed deployment checks.
+
 - Verify an enrolled Windows device's local background-terminal policy from connection options. Device Activity records the technician who requested the check and the result.
+- Check an enrolled Windows agent's opt-in with `flyw8t-agent terminal-policy status`. A console policy check denied after an access change records the denial against the original request.
 - The device workspace shows memory and disk history from saved inventory. Refresh data queues an inventory job and brings the technician back to the device.
 - Device connection actions distinguish a consented screen share, the signed-in physical desktop, and an RDP sign-in. Local Technician setup and direct SSH are under connection options.
 - Choose the SSH account independently of the computer in Technician. Approved Windows script results show the PowerShell account class reported by the agent.

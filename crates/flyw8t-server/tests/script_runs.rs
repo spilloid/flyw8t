@@ -178,6 +178,7 @@ async fn approved_scripts_run_and_c3_waits_for_a_signature_for_this_device() {
         server_url: server.url(),
         ca_cert_pem: None,
         device_id: None,
+        enrollment_scope: None,
         state_dir: state_dir.clone(),
     };
     let (device, _, _) = flyw8t_agent::enroll(

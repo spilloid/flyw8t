@@ -34,6 +34,7 @@ async fn agent_enrolls_and_runs_jobs_over_native_tls() {
         server_url: url.clone(),
         ca_cert_pem: None,
         device_id: None,
+        enrollment_scope: None,
         state_dir: untrusting.path().into(),
     };
     let err = flyw8t_agent::enroll(cfg, &token, None).await.unwrap_err();
@@ -48,6 +49,7 @@ async fn agent_enrolls_and_runs_jobs_over_native_tls() {
         server_url: url.clone(),
         ca_cert_pem: Some(cert_pem),
         device_id: None,
+        enrollment_scope: None,
         state_dir: state.path().into(),
     };
     let (device_id, _, _) = flyw8t_agent::enroll(cfg, &token, None).await.unwrap();

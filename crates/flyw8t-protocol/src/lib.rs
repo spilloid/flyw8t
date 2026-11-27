@@ -5,6 +5,7 @@
 //! device signs to prove its identity. See `docs/agent-protocol.md` for the prose contract;
 //! this crate is the executable half of it.
 
+pub mod agent_update;
 pub mod auth;
 pub mod catalog;
 pub mod desktop_link;

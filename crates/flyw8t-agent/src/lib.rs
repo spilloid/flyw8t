@@ -20,10 +20,22 @@ pub mod spent;
 pub mod terminal;
 pub mod tls;
 pub mod trust;
+#[cfg(any(all(windows, target_arch = "x86_64"), test))]
+pub mod update_verify;
 #[cfg(windows)]
 pub mod winsec;
 
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Keep the Windows update release version in the linked image for offline verification.
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub fn retain_windows_release_version() {
+    const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
+    // SAFETY: this dedicated read-only PE section holds only the compiled version string.
+    #[unsafe(link_section = ".fw8tver")]
+    static RECEIPT: [u8; VERSION.len()] = *VERSION.as_bytes().first_chunk().unwrap();
+    std::hint::black_box(&RECEIPT);
+}
 
 /// What this agent supports beyond the built-in catalog.
 pub const CAPABILITIES: &[&str] = &[

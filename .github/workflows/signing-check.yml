@@ -38,6 +38,10 @@ jobs:
           account: ${{ vars.SIGNING_ACCOUNT }}
           profile: ${{ vars.SIGNING_PROFILE }}
           expected-subject: ${{ vars.SIGNING_EXPECTED_SUBJECT }}
+      - name: Verify the signed agent with Windows update preflight
+        env:
+          FLYW8T_TEST_SIGNED_AGENT: ${{ github.workspace }}/dist/flyw8t-agent.exe
+        run: cargo test --locked --release --target x86_64-pc-windows-msvc -p flyw8t-agent --lib update_verify::windows::tests::authenticode_is_required_for_a_manifest_valid_candidate -- --exact --ignored
       - uses: actions/upload-artifact@v5
         with:
           name: signed-binaries

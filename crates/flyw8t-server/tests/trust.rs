@@ -82,6 +82,7 @@ fn agent_cfg(server: &TestServer, dir: &std::path::Path) -> AgentConfig {
         server_url: server.url(),
         ca_cert_pem: None,
         device_id: None,
+        enrollment_scope: None,
         state_dir: dir.to_path_buf(),
     }
 }

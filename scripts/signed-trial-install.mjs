@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const lines = text => text.replaceAll('\r\n', '\n');
 
-export async function exerciseSignedTrial({ origin, binaries, shell, call, evaluate, waitFor }) {
+export async function exerciseSignedTrial({ origin, binaries, shell, call, evaluate, waitFor, organization, site, otherSite }) {
   assert.equal(process.platform, 'win32');
   assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
   assert.equal(process.env.RUNNER_OS, 'Windows');
@@ -85,13 +85,15 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
   ].join('\n'));
 
   await call('Page.navigate', { url: origin + '/devices' });
-  const setupLink = 'a[href^="/organizations/"][href$="#enroll-device"]';
+  const organizationPath = '/organizations/' + organization;
+  const setupLink = 'a[href="' + organizationPath + '#enroll-device"]';
   await waitFor(() => evaluate('!!document.querySelector(' + JSON.stringify(setupLink) + ')'), 'Device enrollment shortcut missing');
   await evaluate('document.querySelector(' + JSON.stringify(setupLink) + ').click()');
-  const form = 'form[action$="/enrollment-tokens"]';
+  const form = '#windows-enrollment-form';
   await waitFor(() => evaluate('!!document.querySelector(' + JSON.stringify(form) + ')'), 'Organization enrollment form missing');
   await evaluate('(() => { const f=document.querySelector(' + JSON.stringify(form) + ');' +
     'if (new URL(f.action).origin!==location.origin || f.method!=="post" || f.elements.max_uses.value!=="1") throw Error();' +
+    'f.elements.site.value=' + JSON.stringify(site) + '; if (!f.elements.site.value) throw Error();' +
     'f.requestSubmit(); return true; })()');
   await waitFor(() => evaluate('!!document.querySelector("#enrollment-commands")'), 'Enrollment setup commands missing');
   const text = await evaluate('document.querySelector("#enrollment-commands").value');
@@ -189,6 +191,42 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
     const finding = await evaluate('document.querySelector("#console-finding")?.textContent');
     assert.ok(observations.has(finding), 'The signed Windows service must answer the physical console check');
     console.log('Verified signed agent enrollment from the ' + setupSource + ', Running service and matching device console reply (' + observations.get(finding) + ').');
+
+    await call('Page.navigate', { url: origin + organizationPath + '#enroll-device' });
+    const detectorButton = 'button[name="download"][value="intune-detection"]';
+    await waitFor(() => evaluate('!!document.querySelector(' + JSON.stringify(detectorButton) + ')'),
+      'Intune detection download is missing');
+    const detectorTemplate = await fs.readFile('crates/flyw8t-server/src/intune-detection.ps1', 'utf8');
+    for (const [selectedSite, expectedExit] of [[site, 0], [otherSite, 1]]) {
+      const detectorDir = path.join(dir, selectedSite);
+      await fs.mkdir(detectorDir);
+      await call('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: detectorDir });
+      const detectorPath = path.join(detectorDir, 'Detect-Flyw8t.ps1');
+      await evaluate('(() => { const b=document.querySelector(' + JSON.stringify(detectorButton) + ');' +
+        'const f=b.form; if (f?.id!=="windows-enrollment-form" || f.action!==' +
+        JSON.stringify(origin + organizationPath + '/enrollment-tokens') + ' || !f.elements.csrf?.value) throw Error();' +
+        'f.elements.site.value=' + JSON.stringify(selectedSite) + '; if (!f.elements.site.value) throw Error();' +
+        'f.requestSubmit(b); return true; })()');
+      await waitFor(async () => {
+        try { await fs.access(detectorPath); return true; }
+        catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+      }, 'Browser did not save the Intune detection script');
+      const expectedDetector = '\uFEFF' + lines(detectorTemplate
+        .replaceAll('__SERVER_URL__', "'" + origin + "'")
+        .replaceAll('__ORGANIZATION_ID__', "'" + organization + "'")
+        .replaceAll('__SITE_ID__', "'" + selectedSite + "'")
+        .replaceAll('__VERSION__', "'" + version + "'"));
+      assert.ok(lines(await fs.readFile(detectorPath, 'utf8')) === expectedDetector,
+        'Downloaded detector differs from the reviewed site-specific template');
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', detectorPath], {
+        cwd: dir, encoding: 'utf8', timeout: 30000, windowsHide: true
+      });
+      assert.ok(!result.error && result.status === expectedExit,
+        'Intune detector did not return the expected exit code for the selected site');
+      assert.equal(result.stdout.trim(), expectedExit === 0 ? 'Flyw8t enrollment detected' : '');
+      assert.equal(result.stderr.trim(), '');
+    }
+    console.log('Verified the generated Intune detector against the installed signed agent for the matching and wrong site.');
   } finally {
     // The preflight required an empty service, program and state location. Check the registered
     // executable and its digest again before uninstalling the service created by this trial.

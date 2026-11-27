@@ -9,6 +9,7 @@
 // tuple type would move the column list away from the SELECT it must match.
 #![allow(clippy::type_complexity)]
 
+mod agent_update_policy;
 pub mod api;
 pub mod audit;
 pub mod auth;
@@ -36,6 +37,7 @@ pub mod script_runs;
 pub mod scripts;
 pub mod sessions;
 pub mod support;
+mod terminal_admission;
 pub mod totp;
 pub mod trust;
 pub mod users;
@@ -65,6 +67,7 @@ pub struct AppState {
     pub limiter: ratelimit::RateLimiter,
     pub remote_access: Box<dyn remote_access::RemoteAccessProvider>,
     pub support: support::SupportHub,
+    terminal_admissions: terminal_admission::Admissions,
     pub started_unix: u64,
     pub bodies: BodyGate,
     pub oidc_flows: oidc::Flows,
@@ -98,6 +101,7 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         limiter: Default::default(),
         remote_access: Box::new(remote_access::NotConfigured),
         support: Default::default(),
+        terminal_admissions: Default::default(),
         started_unix: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
         bodies: BodyGate::default(),
         oidc_flows: Default::default(),
@@ -209,11 +213,19 @@ pub fn router(state: Shared) -> Router {
         )
         .route(
             "/devices/{id}/background-terminal/check",
-            post(web::check_background_terminal_policy),
+            post(terminal_admission::check),
+        )
+        .route(
+            "/devices/{id}/background-terminal/admission",
+            post(terminal_admission::confirm),
         )
         .route("/devices/{id}/jobs", post(web::run_job))
         .route("/devices/{id}/revoke", post(web::revoke_device))
         .route("/devices/{id}/edit", post(devices::edit))
+        .route(
+            "/devices/{id}/agent-update-policy",
+            post(agent_update_policy::device),
+        )
         .route("/devices/{id}/retire", post(devices::retire))
         .route("/devices/bulk", post(devices::bulk))
         .route("/devices/bulk/run", post(devices::bulk_run))
@@ -300,6 +312,10 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/organizations/{id}/sites", post(web::add_site))
         .route("/organizations/{id}/rename", post(web::rename_org))
+        .route(
+            "/organizations/{id}/agent-update-policy",
+            post(agent_update_policy::organization),
+        )
         .route("/sites/{id}/rename", post(web::rename_site))
         .route("/sites/{id}", get(web::site))
         .route(
