@@ -355,6 +355,22 @@ The offline signer can verify a staged update against the exact intended release
 
 The signer and protocol suites passed 56 tests, with one fixture generator ignored. The staged check also accepted the optimized Windows agent under a disposable fixture key. It rejected a different expected release version, a wrong filename, and modified bytes. Removing the exact-version comparison made the mismatch regression fail. Production Authenticode and verification of the final publication bytes remain open.
 
+## Fleet update preflight, 2026-11-27
+
+The Windows agent can check current fleet preferences after verifying a local candidate with the pinned release key and Authenticode. The short-lived socket authenticates independently of the service connection. The server records the effective policy and the device-reported release metadata before responding.
+
+The macOS protocol suite passed 51 tests with one fixture generator ignored. The focused PostgreSQL protocol test passed on isolated Linux at the update commit and at the combined candidate `e38607d`. The combined candidate also passed all six fleet-health tests, including legacy enrollment scope. The preflight test checked default enablement, organization pause and device opt-out, audit and Device Activity labels, service connection continuity, revoked credentials, and signature replay and tampering. Removing candidate metadata from the signed request in a disposable checkout made the tampering check fail at the expected assertion.
+
+Native Windows preflight with a production-signed candidate, managed distribution, service replacement and rollback still need acceptance. The integration review used the same model family.
+
+## Windows and technician workflow checks, 2026-11-27
+
+An optimized Windows candidate built at `86ea760` passed the fixed-input PowerShell diagnostic on a Windows 11 VM under LocalSystem. The diagnostic checked Session 0 for both processes, persistent PowerShell state, prompt input, Ctrl+C, and a clean exit. The installed service stayed in place during the scratch test. The live browser terminal and employee meeting scenario remain open.
+
+Legacy scope recovery passed the Linux fleet-health tests against PostgreSQL 18. Substituting the device's current assignment for the original enrollment token's site made the recovery test fail. The disposable signed Windows rehearsal exercises old local state, identity continuity, and correct-site detection. The production signing rehearsal and a real Intune assignment remain open.
+
+The technician workspace labels the invitation, physical desktop, RDP, and direct SSH actions separately. Ten web unit tests, 17 web fleet tests, and 31 browser support tests passed. The headless Chrome captures at draft revision `2f48eb8` showed the three main actions on desktop and phone. The UX work used Terra and the integration review used the same model family. [Candidate CI and captures](https://github.com/spilloid/flyw8t/actions/runs/46060321016)
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
