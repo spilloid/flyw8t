@@ -28,7 +28,7 @@ Install a test package that supports background installation without restarting 
 
 ## Direct SSH
 
-Under **Technician and connection options**, **Direct SSH** opens the existing Windows OpenSSH client over a LAN or VPN route. Specify the computer and **SSH account**. The account field accepts a user name or `DOMAIN\user`. Leave it blank for OpenSSH's default or enter `user@computer` in the computer field. OpenSSH authenticates each session independently.
+Under **Technician and connection options**, **Open direct SSH** opens the existing Windows OpenSSH client over a LAN or VPN route. Specify the computer and **SSH account**. The account field accepts a user name or `DOMAIN\user`. Leave it blank for OpenSSH's default or enter `user@computer` in the computer field. OpenSSH authenticates each session independently.
 
 `flyw8t-agent terminal-check` checks for a local SSH 2.0 greeting on port 22. The readiness check and the attachment prototype provide evidence about their own behavior. The agent-backed terminal remains open on the sprint checklist.
 
