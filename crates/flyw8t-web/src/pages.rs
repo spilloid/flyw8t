@@ -1174,18 +1174,29 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
                 })}
             </div>
             {windows.then(|| view! {
+                <div class="device-session-actions">
+                    <div>
+                        <h3>"Background terminal"</h3>
+                        <p class="muted small" id="background-terminal-hint">"Check the device’s local opt-in for the planned background PowerShell terminal. This check does not open a terminal."</p>
+                        {if !ctx.can_control {
+                            view! { <p class="muted small">"Control permission is required to check background terminal policy."</p> }.into_any()
+                        } else if !matches!(d.row.connection, Connection::Connected { .. }) {
+                            view! { <p class="muted small">"The device is offline. The agent must be connected to check background terminal policy."</p> }.into_any()
+                        } else {
+                            view! {
+                                <form method="post" action=format!("/devices/{}/background-terminal/check", d.row.id)>
+                                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                                    <button type="submit" aria-describedby="background-terminal-hint">"Check background terminal policy"</button>
+                                </form>
+                            }.into_any()
+                        }}
+                    </div>
+                </div>
                 <details class="desktop-link-help">
                     <summary>"Technician and connection options"</summary>
                     <p class="muted small">{target}" Direct connections require a LAN or VPN route."</p>
                     <p><a href=format!("flyw8t://open/assist{query}")>"Help a Windows session through Technician"</a></p>
                     <p><a href=format!("flyw8t://open/terminal{query}")>"Open direct SSH"</a>" · Opens Technician and requires a separate SSH service on the device."</p>
-                    {(ctx.can_control && matches!(d.row.connection, Connection::Connected { .. })).then(|| view! {
-                        <form method="post" action=format!("/devices/{}/background-terminal/check", d.row.id)>
-                            <p class="muted small" id="background-terminal-hint">"Reports the device’s local opt-in for the planned background PowerShell terminal."</p>
-                            <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
-                            <button type="submit" aria-describedby="background-terminal-hint">"Check background terminal policy"</button>
-                        </form>
-                    })}
                     {windows_downloads("technician", "Download Flyw8t Technician (Windows x64)")}
                     <p class="muted small">"Check the executable against SHA256SUMS and verify the publisher signature. Open Technician and choose Browser links → Enable for this Windows user."</p>
                 </details>

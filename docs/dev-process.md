@@ -403,6 +403,8 @@ All 15 adapter tests, the PostgreSQL device-page scope test, and adapter Clippy 
 
 ## Substitutions and gaps
 
+The 2026-11-27 browser terminal handoff presentation change moves the policy check into the visible Connect section and explains offline and permission restrictions. Implementation is awaiting independent review. The Mac worktree has no Cargo, test database, or Chrome; formatting, compilation, PostgreSQL tests, mutation checks, and visual capture remain open.
+
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
 - Rows 1 to 5 and 7 to 8 had no second-model implementer; the orchestrator wrote the code directly. Review independence came from tests, mutation checks, proptest, and row 6.
 - **The attended-support code (`support.rs`, `support.js`) has had no cross-family review.** It must have one before anyone relies on it.
