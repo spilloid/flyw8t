@@ -3,7 +3,7 @@
 1. In the release PR, set the workspace version in `Cargo.toml`, refresh `Cargo.lock`, update the version in `README.md`, and date the `## X.Y.Z — YYYY-MM-DD (...)` section in `CHANGELOG.md`. Merge the PR to `main`.
 2. Check that CI passed on the merge commit. Run `gh workflow run signing-check.yml --ref main`, confirm the run used that same SHA, and wait for it to pass. Use its `signed-binaries` artifact for the Windows browser launch check below. The artifact expires after one day.
 3. After the checks pass, tag that commit with `git tag -a vX.Y.Z -m "flyw8t X.Y.Z" <sha>` and push with `git push origin vX.Y.Z`.
-4. The release workflow publishes a GitHub **pre-release** with the version's changelog section as its notes. Download all nine binaries and `SHA256SUMS` into an empty directory. Confirm the asset names and run `sha256sum -c SHA256SUMS` there. Expect nine successful checks.
+4. Starting with 0.3.0, the release workflow verifies the nine expected binary names before generating checksums and publishing a GitHub **pre-release**. Download all release assets into an empty directory. Run `python3 scripts/release-assets.py vX.Y.Z <download-directory>` from the release checkout to verify the exact asset inventory and checksum manifest.
 
    | Platform | Binaries |
    | --- | --- |

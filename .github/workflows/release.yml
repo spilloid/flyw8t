@@ -121,8 +121,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Verify the release asset inventory and write checksums
+        run: python3 scripts/release-assets.py "$GITHUB_REF_NAME" dist --write-checksums
       - name: Notes from CHANGELOG
         run: |
           version="${GITHUB_REF_NAME#v}"
