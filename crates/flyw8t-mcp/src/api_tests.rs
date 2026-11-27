@@ -148,6 +148,7 @@ async fn advertises_diagnostics_only_after_opt_in() {
                 "device_list",
                 "device_system_info",
                 "device_system_info_status",
+                "device_terminal_handoff",
             ],
         ),
     ] {
@@ -171,7 +172,74 @@ async fn advertises_diagnostics_only_after_opt_in() {
                 call(&mut server, "device_list", json!({})).await["error"]["code"],
                 -32602
             );
+            assert_eq!(
+                call(
+                    &mut server,
+                    "device_terminal_handoff",
+                    json!({"device_id": DEVICE}),
+                )
+                .await["error"]["code"],
+                -32602
+            );
         }
+    }
+}
+
+#[tokio::test]
+async fn terminal_handoff_links_only_to_the_checked_device_on_the_configured_origin() {
+    let (mut server, thread) = fixture(
+        true,
+        "200 OK",
+        json!({"id": DEVICE, "retired": false, "console_url": "https://elsewhere.test"}),
+        |headers, body| {
+            assert!(headers.starts_with(&format!("GET /api/v1/devices/{DEVICE} ")));
+            assert!(body.is_empty());
+        },
+    );
+    let mut expected = server.api.as_ref().unwrap().origin.clone();
+    expected.set_path(&format!("/devices/{DEVICE}"));
+    expected.set_fragment(Some("device-connection-options"));
+
+    let invalid = call(
+        &mut server,
+        "device_terminal_handoff",
+        json!({"device_id": DEVICE, "command": "fixture-input"}),
+    )
+    .await;
+    assert_eq!(invalid["result"]["isError"], true);
+    let response = call(
+        &mut server,
+        "device_terminal_handoff",
+        json!({"device_id": DEVICE}),
+    )
+    .await;
+    thread.join().unwrap();
+    assert_eq!(
+        response["result"]["structuredContent"],
+        json!({"device_id": DEVICE, "console_url": expected.as_str()})
+    );
+}
+
+#[tokio::test]
+async fn terminal_handoff_rejects_retired_inaccessible_and_mismatched_devices() {
+    for (status, body) in [
+        ("200 OK", json!({"id": DEVICE, "retired": true})),
+        ("200 OK", json!({"id": JOB, "retired": false})),
+        ("404 Not Found", json!({"error": "unknown device"})),
+    ] {
+        let (mut server, thread) = fixture(true, status, body, |headers, body| {
+            assert!(headers.starts_with(&format!("GET /api/v1/devices/{DEVICE} ")));
+            assert!(body.is_empty());
+        });
+        let response = call(
+            &mut server,
+            "device_terminal_handoff",
+            json!({"device_id": DEVICE}),
+        )
+        .await;
+        thread.join().unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"].get("structuredContent").is_none());
     }
 }
 

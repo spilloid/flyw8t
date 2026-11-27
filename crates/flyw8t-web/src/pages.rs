@@ -1155,7 +1155,7 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
     };
     let help = format!("/support?device={}", d.row.id);
     Some(view! {
-        <section class="device-section" aria-labelledby="desktop-launch-title">
+        <section id="device-connection-options" class="device-section" aria-labelledby="desktop-launch-title">
             <h2 id="desktop-launch-title">"Connect"</h2>
             <div class="device-session-actions">
                 <div>

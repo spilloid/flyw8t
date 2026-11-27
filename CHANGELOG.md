@@ -4,6 +4,7 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## 0.3.0 (in development)
 
+- Return a device-scoped browser link to the connection options with the `device_terminal_handoff` MCP tool.
 - Clarify device connection actions and distinguish recorded screen-share media connections from Windows desktop launches in Device Activity.
 - Record browser screen-share connections after the transport and security-code checks finish and the technician receives a frame.
 

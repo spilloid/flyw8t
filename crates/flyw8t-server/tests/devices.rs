@@ -199,6 +199,7 @@ async fn device_changes_respect_organization_scope_and_role() {
     let allowed = tech.get(&server, &format!("/devices/{}", a[0])).await;
     assert_eq!(allowed.status, StatusCode::OK);
     assert!(allowed.body.contains("flyw8t://open/assist?host=WS-01"));
+    assert!(allowed.body.contains("id=\"device-connection-options\""));
     for text in [
         "Start a screen share",
         "grants control separately",

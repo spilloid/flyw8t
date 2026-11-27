@@ -33,6 +33,18 @@ struct StatusArgs {
     job_id: Uuid,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffArgs {
+    device_id: Uuid,
+}
+
+#[derive(Deserialize)]
+struct HandoffTarget {
+    id: Uuid,
+    retired: bool,
+}
+
 #[derive(Deserialize, Serialize)]
 struct DeviceSummary {
     id: Uuid,
@@ -94,10 +106,16 @@ pub(crate) enum Tool {
     List,
     SystemInfo,
     SystemInfoStatus,
+    TerminalHandoff,
 }
 
 impl Tool {
-    pub(crate) const ALL: [Self; 3] = [Self::List, Self::SystemInfo, Self::SystemInfoStatus];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::List,
+        Self::SystemInfo,
+        Self::SystemInfoStatus,
+        Self::TerminalHandoff,
+    ];
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|tool| tool.name() == name)
@@ -108,6 +126,7 @@ impl Tool {
             Self::List => "device_list",
             Self::SystemInfo => "device_system_info",
             Self::SystemInfoStatus => "device_system_info_status",
+            Self::TerminalHandoff => "device_terminal_handoff",
         }
     }
 
@@ -132,6 +151,12 @@ impl Tool {
                 &["job_id"][..],
                 true,
             ),
+            Self::TerminalHandoff => (
+                "Return the connection options link for one explicitly selected device. Requires read scope. Open the link in the technician's signed-in browser to check background terminal access.",
+                json!({"device_id":uuid}),
+                &["device_id"][..],
+                true,
+            ),
         };
         json!({
             "name": self.name(),
@@ -149,6 +174,7 @@ impl Tool {
             Self::List => list(api, if args.is_null() { json!({}) } else { args }).await?,
             Self::SystemInfo => queue(api, args).await?,
             Self::SystemInfoStatus => status(api, args).await?,
+            Self::TerminalHandoff => terminal_handoff(api, args).await?,
         };
         Ok(json!({
             "content":[{"type":"text","text":data.to_string()}],
@@ -156,6 +182,24 @@ impl Tool {
             "isError":false
         }))
     }
+}
+
+async fn terminal_handoff(api: &Api, args: Value) -> Result<Value> {
+    let args: HandoffArgs =
+        serde_json::from_value(args).map_err(|_| anyhow!("Supply a device_id UUID."))?;
+    ensure!(!args.device_id.is_nil(), "Supply a non-nil device UUID.");
+    let device_path = format!("/devices/{}", args.device_id);
+    let request = api.diagnostic_request(Method::GET, &format!("/api/v1{device_path}"));
+    let target: HandoffTarget =
+        read_reply(send(request).await?, MAX_INVENTORY_RESPONSE, refusal).await?;
+    ensure!(
+        target.id == args.device_id && !target.retired,
+        "This device is unavailable for a terminal handoff."
+    );
+    // Build the link from the configured origin and checked UUID, never endpoint-supplied text.
+    let mut url = api.url(&device_path);
+    url.set_fragment(Some("device-connection-options"));
+    Ok(json!({"device_id":args.device_id,"console_url":url.as_str()}))
 }
 
 async fn list(api: &Api, args: Value) -> Result<Value> {

@@ -29,7 +29,7 @@ pub struct Settings {
     /// Additional trusted certificate authority in PEM format.
     #[arg(long, env = "FLYW8T_MCP_CA_FILE")]
     ca_cert: Option<PathBuf>,
-    /// Enable the device list and the built-in system.info diagnostic tools.
+    /// Enable device lookup, terminal handoff, and the built-in system.info diagnostic tools.
     #[arg(long, env = "FLYW8T_MCP_DEVICE_DIAGNOSTICS")]
     device_diagnostics: bool,
 }
@@ -151,7 +151,7 @@ impl Api {
         })
     }
 
-    fn url(&self, path: &str) -> Url {
+    pub(crate) fn url(&self, path: &str) -> Url {
         let mut url = self.origin.clone();
         url.set_path(path);
         url

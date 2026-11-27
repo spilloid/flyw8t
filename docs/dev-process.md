@@ -395,6 +395,12 @@ The offline signer and Windows update checker use one validator for the agent im
 
 On 10t7, 58 signer and protocol tests passed in an isolated Linux container. One fixture generator remained ignored. Workspace formatting and signer and protocol Clippy passed. Bypassing the image check failed the enrollment package regression. Allowing publication to replace the destination failed the concurrent writer regression. Both suites passed after restoring the checks. Native Windows publisher verification, service replacement, reconnect and rollback remain open.
 
+## Background terminal handoff, 2026-11-27
+
+The MCP adapter checks an explicit device through the existing scoped read API and returns its browser connection options link. The destination comes from the configured Flyw8t origin and the verified device ID. The browser uses its own sign-in for the background terminal policy check.
+
+All 15 adapter tests, the PostgreSQL device-page scope test, and adapter Clippy passed on 10t7. Removing the returned-device ID check made the handoff regression fail with a mismatched device. The restored test passed. The live session, five-minute reconnect, and lifecycle status are tracked in the background terminal checklist.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.

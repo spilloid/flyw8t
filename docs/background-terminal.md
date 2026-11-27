@@ -18,6 +18,23 @@ An audit event records the initiator, device, execution account class, session l
 
 The console now verifies the admission conditions. From **Check background terminal policy**, an enabled device shows **Verify session access**. The confirmation has a 30-second lifetime and works once in the same browser sign-in. It rechecks the original device connection, current local opt-in, and technician access. The agent registry checks the confirmation deadline before queuing its policy request and uses that deadline to decide whether a reply is timely. The result appears in Device Activity, linked to the policy check in Audit. The interactive session and its lifecycle remain open.
 
+## Live terminal delivery checklist
+
+- [x] Provide a credential-free MCP link to the connection options for a device the integration can read. The technician opens it in their authenticated browser. [MCP handoff](mcp.md#hand-off-to-the-technician-console)
+- [ ] Show the authorized Windows account before starting. Default to PowerShell under the device's approved background account. Treat a switch to the signed-in user as a new session with its own authorization.
+- [ ] Open the live prompt through the enrolled agent. Verify working-directory and variable persistence, ordered input, streamed output, interactive replies, and Ctrl+C.
+- [ ] Keep the same PowerShell process for up to five minutes after the agent detects an unexpected attachment loss. Show the reconnect deadline in the browser. Resume only for the initiating technician after rechecking current permissions, device identity, and local policy.
+- [ ] Make one attachment writable at a time. Resume from the last displayed output position within a bounded buffer, flag any omitted output, and report unacknowledged input as unknown. Replay output only.
+- [ ] End on explicit close, process exit, revocation, local policy disable, device or agent restart, or grace-period expiry. End a signed-in-user session when that user signs out. Record the outcome separately from the attempted close.
+- [ ] Expose authorized terminal lifecycle status through MCP once the session exists.
+- [ ] Run the Windows acceptance scenario with the employee continuing to work. Verify reconnect after browser loss and after device network loss. Repeat with access revoked and after the five-minute window.
+
+## Reconnect and termination
+
+An unexpected browser or network disconnect detaches the view. The Windows agent owns the process and starts one five-minute deadline for that interruption. Pending work can continue while the PC and agent are running. Failed join attempts leave the deadline in place. A successful reattachment restores the same process and a subsequent interruption gets its own deadline. Device reboot, agent restart, or process exit requires a new session.
+
+Ctrl+C interrupts the foreground command and leaves the prompt open. The **End session** action closes the process and its job when the agent receives it. When the agent is unreachable, show termination as pending. Once the grace period expires, disable resume and report cleanup as unconfirmed until the agent supplies evidence. Permission revocation rejects reattachment and requests immediate termination when the agent is reachable. Local policy disable ends the process on the endpoint. Record detach, reattach, and confirmed termination in Device Activity with the technician, device, account class, and reason. Keep command text and terminal output out of Activity and Audit.
+
 ## Acceptance on Windows
 
 On Windows, `flyw8t-agent terminal-check --powershell` checks the local PowerShell host through a Windows pseudoconsole (ConPTY). It uses fixed commands to check variable persistence, interrupt a long-running command, answer a `Read-Host` prompt, and confirm a clean exit. A second probe closes the Windows Job Object while PowerShell is waiting for input and checks that the process stops with the input pipe and pseudoconsole still open. The quiet-install test runs the installed executable as LocalSystem with `--require-session-zero`. This mode requires the diagnostic and both PowerShell processes to run in Windows session 0. [Microsoft's pseudoconsole documentation](https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session), [Windows process session API](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-processidtosessionid)
