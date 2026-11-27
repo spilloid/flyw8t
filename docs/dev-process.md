@@ -355,6 +355,10 @@ The offline signer can verify a staged update against the exact intended release
 
 The signer and protocol suites passed 56 tests, with one fixture generator ignored. The staged check also accepted the optimized Windows agent under a disposable fixture key. It rejected a different expected release version, a wrong filename, and modified bytes. Removing the exact-version comparison made the mismatch regression fail. Production Authenticode and verification of the final publication bytes remain open.
 
+## Compose upgrade and recovery rehearsal, 2026-11-27
+
+The container CI job now rehearses the transition from the published 0.2.0 image to the candidate and recovers the 0.2.0 image from its original database snapshot. The fixture checks the exact container image IDs, migration history, MFA and organization records. The fresh-install recovery fixture runs separately. The baseline digest was verified against the release and public registry. The CI runner still needs to execute the full rehearsal.
+
 ## Fleet update preflight, 2026-11-27
 
 The Windows agent can check current fleet preferences after verifying a local candidate with the pinned release key and Authenticode. The short-lived socket authenticates independently of the service connection. The server records the effective policy and the device-reported release metadata before responding.
@@ -370,6 +374,16 @@ An optimized Windows candidate built at `86ea760` passed the fixed-input PowerSh
 Legacy scope recovery passed the Linux fleet-health tests against PostgreSQL 18. Substituting the device's current assignment for the original enrollment token's site made the recovery test fail. The disposable signed Windows rehearsal exercises old local state, identity continuity, and correct-site detection. The production signing rehearsal and a real Intune assignment remain open.
 
 The technician workspace labels the invitation, physical desktop, RDP, and direct SSH actions separately. Ten web unit tests, 17 web fleet tests, and 31 browser support tests passed. The headless Chrome captures at draft revision `2f48eb8` showed the three main actions on desktop and phone. The UX work used Terra and the integration review used the same model family. [Candidate CI and captures](https://github.com/spilloid/flyw8t/actions/runs/46060321016)
+
+## Screen-share connection evidence, 2026-11-27
+
+The attended browser peers finish the transport and security-code checks before reporting connected media. The viewer also requires a frame. The unsupported certificate API still produces the existing browser notice. All 32 Node support tests passed. Removing the reporting gate in an isolated copy failed both the certificate mismatch and delayed certificate tests. Full browser integration and a two-device session with a participant-selected Windows surface remain open.
+
+## Win32 deployment bundle rehearsal, 2026-11-27
+
+The native Windows installer test takes its installer, detector, and uninstall command from the same Intune download. It confirms the embedded binary matches the fixture before installation and compares the installed service binary with the original bytes. The packaged uninstall and quiet retry exercise service removal, detection, reconnect, and preservation of the original site, device ID, and key. Normal CI expects the detector to reject its unsigned fixture. A separate clean Windows job in the signing check verifies the signed agent's publisher and expects detection to succeed.
+
+Windows rehearsal and managed Intune assignment results remain open. The production signing environment stays on the existing signing job. The validation job uses the signed artifact from that job and runs with repository read access.
 
 ## Substitutions and gaps
 

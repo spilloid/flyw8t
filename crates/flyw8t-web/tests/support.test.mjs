@@ -23,7 +23,7 @@ const commitOf = async (d) => sha(`flyw8t-sas-commit-v1|${SID}|${await sha(d)}`)
 
 // A page with support.js loaded. `localDer` is this browser's certificate, `remoteDer` the
 // one the other end presents over DTLS.
-async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, control = false, beforeRemote, newCanvas, post }) {
+async function page({ role, localDer, remoteDer, transports = 1, delayCert = false, lateCerts = 0, certificateAccess = true, control = false, beforeRemote, newCanvas, post }) {
   const els = new Map();
   const el = (id) => {
     if (!els.has(id)) {
@@ -62,7 +62,9 @@ async function page({ role, localDer, remoteDer, transports = 1, delayCert = fal
     addTrack(t) { this.tracks.push(t); }
     ends() {
       return Array.from({ length: transports }, () => ({
-        transport: { getRemoteCertificates: () => (lateCerts-- > 0 ? [] : [remoteDer]) },
+        transport: certificateAccess
+          ? { getRemoteCertificates: () => (lateCerts-- > 0 ? [] : [remoteDer]) }
+          : {},
       }));
     }
     getSenders() { return role === 'participant' ? this.ends() : []; }
@@ -554,6 +556,7 @@ test('a certificate that does not match the commitment ends the session', async 
   assert.equal(p.el('support').dataset.sas, 'mismatch');
   assert.equal(p.track.stopped, true);
   assert.equal(p.sent('end').length, 1);
+  assert.equal(p.sent('media').length, 0, 'a rejected peer cannot create a connected audit event');
   assert.equal(p.el('sas-box').hidden, true, 'no code is shown');
 });
 
@@ -564,6 +567,7 @@ test('both sides derive the same code from the certificates in use', async () =>
   await settle();
   assert.equal(p.el('support').dataset.sas, 'shown');
   assert.match(p.sas(), /^\d{3} \d{3}$/);
+  assert.deepEqual(p.sent('media'), [{ type: 'media', state: 'connected' }]);
 
   const t = await page({ role: 'technician', localDer: tDer, remoteDer: der('participant') });
   await t.recv(state('connecting'));
@@ -668,11 +672,29 @@ test('a certificate that arrives just after "connected" still gives a code', asy
   const t = await page({ role: 'technician', localDer: tDer, remoteDer: pDer, lateCerts: 3 });
   await t.recv(state('connecting'));
   await t.recv(offer());
-  t.peers[0].connect();
+  const pc = t.peers[0];
+  pc.connect();
+  pc.ontrack({ track: { kind: 'video' }, streams: [{}] });
+  t.el('remote').onloadeddata();
+  assert.equal(t.sent('media').length, 0, 'a rendered frame still waits for the transport check');
   await new Promise((r) => setTimeout(r, 600));
   await settle();
   assert.equal(t.el('support').dataset.sas, 'shown');
   assert.equal(t.sas(), await expectedCode(tDer, pDer));
+  assert.deepEqual(t.sent('media'), [{ type: 'media', state: 'connected' }]);
+});
+
+test('a browser without certificate access reports media and shows that the code is unavailable', async () => {
+  const t = await page({ role: 'technician', localDer: der('t'), certificateAccess: false });
+  await t.recv(state('connecting'));
+  await t.recv(offer());
+  const pc = t.peers[0];
+  pc.connect();
+  pc.ontrack({ track: { kind: 'video' }, streams: [{}] });
+  t.el('remote').onloadeddata();
+  await settle();
+  assert.equal(t.el('support').dataset.sas, 'unavailable');
+  assert.deepEqual(t.sent('media'), [{ type: 'media', state: 'connected' }]);
 });
 
 test('control session: Allow consents without a picker, then offers the helper', async () => {

@@ -5,6 +5,7 @@ All notable changes to flyw8t. Dates are UTC.
 ## 0.3.0 (in development)
 
 - Clarify device connection actions and distinguish recorded screen-share media connections from Windows desktop launches in Device Activity.
+- Record browser screen-share connections after the transport and security-code checks finish and the technician receives a frame.
 
 - Record the participant's screenshot permission before enabling capture for the named MCP client. Revocation stops capture immediately.
 - Check local PowerShell input, output, interruption, and cleanup on Windows with `flyw8t-agent terminal-check --powershell`, including forced cleanup while PowerShell waits for input.
