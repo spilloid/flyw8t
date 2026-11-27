@@ -49,6 +49,11 @@ prefilled. The person must press Connect there. PortGlass's existing mTLS, allow
 session lifetime, isolated browser and audit checks still apply. The console records an
 access **request**, never a successful connection it has not observed.
 
+The handoff rechecks the technician's sign-in, the collector's current access settings,
+and the site's current inventory. It records the access request before returning the
+link. A collector revocation or newer conflicting observation takes effect before any
+handoff that has to wait for that change.
+
 The PortGlass controller must include the `open-url` command from this sprint. On Windows,
 register browser links explicitly after putting the executable in its permanent location:
 

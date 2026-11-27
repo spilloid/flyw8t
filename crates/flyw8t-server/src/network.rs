@@ -492,21 +492,97 @@ pub async fn open_interface(
     Path(id): Path<Uuid>,
     body: Bytes,
 ) -> Response {
-    page(&p,async {
-        let f=Form::parse(&body);check_csrf(&p,&f)?;p.require(Permission::RunDiagnostics)?;
-        let a=asset(&state,&p,id).await?;
-        let port:u16=f.get("port").unwrap_or("").parse().map_err(|_|AppError::BadRequest("Choose a discovered web port.".into()))?;
-        if !web_port(port)||!a.open_ports.contains(&i32::from(port)){return Err(AppError::BadRequest("Choose a discovered web port.".into()));}
-        if a.status!="up"||a.collector_revoked||!fresh(a.collected_at,OffsetDateTime::now_utc(),a.interval_secs){return Err(AppError::Conflict("A recent reachable observation from an active collector is required. Refresh inventory before opening this address.".into()));}
-        let c=collectors(&state,&p,None,Some(a.collector_id)).await?.pop().ok_or(AppError::NotFound)?;
-        let fingerprint=c.portglass_fingerprint.ok_or_else(||AppError::BadRequest("Configure this collector's PortGlass probe fingerprint first.".into()))?;
-        let (conflict,):(bool,)=sqlx::query_as("SELECT EXISTS(SELECT 1 FROM network_assets WHERE site_id=$1 AND ip=$2 AND id<>$3 AND status='up' AND collected_at >= $4)")
-            .bind(a.site.id).bind(&a.ip).bind(id).bind(a.collected_at).fetch_one(&state.db).await?;
-        if conflict {return Err(AppError::Conflict("This address was reported for another asset. Refresh inventory and confirm the device before opening it.".into()));}
-        let target=format!("{}:{port}",a.ip);let scheme=if matches!(port,443|8443){"https"}else{"http"};
-        let uri=format!("portglass://connect?fingerprint={fingerprint}&target={target}&scheme={scheme}");
-        let (org,_)=visible_site(&state,&p,a.site.id).await?;
-        Audit::user(&p,"network.access_requested").org(org).target("network_asset",id).detail(json!({"collector_id":a.collector_id,"target":target,"probe_fingerprint":fingerprint,"outcome":"handoff_only"})).record(&state.db).await?;
-        html(flyw8t_web::network_launch_page(&ctx(&p,None),a,&uri,&target))
-    }).await
+    page(&p, async {
+        let form = Form::parse(&body);
+        check_csrf(&p, &form)?;
+        p.require(Permission::RunDiagnostics)?;
+        p.require(Permission::ViewDevices)?;
+
+        let (all, orgs) = p.scope();
+        let mut tx = state.db.begin().await?;
+        let (org, site, collector): (Uuid, Uuid, Uuid) = sqlx::query_as(
+            "SELECT organization_id, site_id, collector_id FROM network_assets
+             WHERE id=$1 AND ($2 OR organization_id=ANY($3))",
+        )
+        .bind(id)
+        .bind(all)
+        .bind(orgs)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+        let invalid_port = || AppError::BadRequest("Choose a discovered web port.".into());
+        let port = form
+            .get("port")
+            .and_then(|port| port.parse::<u16>().ok())
+            .filter(|port| web_port(*port))
+            .ok_or_else(invalid_port)?;
+        auth::recheck_actor(&mut tx, &p, Some(org), false).await?;
+
+        let stale = || AppError::Conflict(
+            "A recent reachable observation from an active collector is required. Refresh inventory before opening this address.".into(),
+        );
+        // Ingest locks its collector before the site. Use the same order and reread
+        // the asset under the site lock in case another collector updated it.
+        let fingerprint: Option<String> = sqlx::query_scalar(
+            "SELECT portglass_fingerprint FROM network_collectors
+             WHERE id=$1 AND site_id=$2 AND organization_id=$3 AND revoked_at IS NULL FOR SHARE",
+        )
+        .bind(collector)
+        .bind(site)
+        .bind(org)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(stale)?;
+        sqlx::query("SELECT id FROM sites WHERE id=$1 FOR SHARE")
+            .bind(site)
+            .execute(&mut *tx)
+            .await?;
+        let asset: AssetRow = sqlx::query_as(&format!(
+            "SELECT {ASSET_COLUMNS} FROM {ASSET_FROM}
+             WHERE a.id=$1 AND a.site_id=$2 AND a.organization_id=$3 AND a.collector_id=$4",
+        ))
+        .bind(id)
+        .bind(site)
+        .bind(org)
+        .bind(collector)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(stale)?;
+        let a = asset_view(asset);
+        if !a.open_ports.contains(&i32::from(port)) {
+            return Err(invalid_port());
+        }
+        if a.status != "up" || !fresh(a.collected_at, OffsetDateTime::now_utc(), a.interval_secs) {
+            return Err(stale());
+        }
+        let fingerprint = fingerprint.ok_or_else(|| {
+            AppError::BadRequest("Configure this collector's PortGlass probe fingerprint first.".into())
+        })?;
+        let conflict: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM network_assets
+             WHERE site_id=$1 AND ip=$2 AND id<>$3 AND status='up' AND collected_at >= $4)",
+        )
+        .bind(site)
+        .bind(&a.ip)
+        .bind(id)
+        .bind(a.collected_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        if conflict {
+            return Err(AppError::Conflict("This address was reported for another asset. Refresh inventory and confirm the device before opening it.".into()));
+        }
+        let target = format!("{}:{port}", a.ip);
+        let scheme = if matches!(port, 443 | 8443) { "https" } else { "http" };
+        let uri = format!("portglass://connect?fingerprint={fingerprint}&target={target}&scheme={scheme}");
+        Audit::user(&p, "network.access_requested")
+            .org(org)
+            .target("network_asset", id)
+            .detail(json!({"collector_id":collector,"target":target,"probe_fingerprint":fingerprint,"outcome":"handoff_only"}))
+            .record(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        html(flyw8t_web::network_launch_page(&ctx(&p, None), a, &uri, &target))
+    })
+    .await
 }

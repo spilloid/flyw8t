@@ -437,6 +437,75 @@ async fn access_requires_fresh_evidence_a_web_port_and_an_unambiguous_address() 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn access_waits_for_an_in_flight_collector_revocation() {
+    let server = start_fresh().await;
+    let admin = server.admin().await;
+    let org = admin.create_org(&server, "Access customer").await;
+    let site = site(&server, &admin, org, "Office").await;
+    let (collector, key) = register(&server, &admin, site, "192.168.1.0/24").await;
+    let response = push(
+        &server,
+        "/probe/devices",
+        &key,
+        json!({"devices":[observation("192.168.1.20","",OffsetDateTime::now_utc())]}),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    let id = assets(&server, site).await[0];
+    let fingerprint = "ab".repeat(32);
+    let configured = admin
+        .post(
+            &server,
+            &format!("/network/collectors/{collector}/access"),
+            &[("portglass_fingerprint", &fingerprint)],
+        )
+        .await;
+    assert_eq!(configured.status, StatusCode::SEE_OTHER);
+
+    let mut revoke = server.state.db.begin().await.unwrap();
+    sqlx::query("UPDATE network_collectors SET revoked_at=now() WHERE id=$1")
+        .bind(collector)
+        .execute(&mut *revoke)
+        .await
+        .unwrap();
+    let writer: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *revoke)
+        .await
+        .unwrap();
+    let path = format!("/network/assets/{id}/open");
+    let (handoff, ()) = tokio::join!(admin.post(&server, &path, &[("port", "443")]), async {
+        wait_for(
+            "handoff to wait for collector revocation",
+            std::time::Duration::from_secs(5),
+            || async {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(writer)
+                .fetch_one(&server.state.db)
+                .await
+                .unwrap()
+            },
+        )
+        .await;
+        revoke.commit().await.unwrap();
+    });
+    assert_eq!(handoff.status, StatusCode::CONFLICT, "{}", handoff.body);
+    assert!(!handoff.body.contains("portglass://connect"));
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE action='network.access_requested' AND target_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 0);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn collector_restart_does_not_make_missing_devices_offline_and_history_is_bounded() {
     let server = start_fresh().await;
     let admin = server.admin().await;
