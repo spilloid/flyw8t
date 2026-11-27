@@ -415,6 +415,8 @@ Independent review found that the release verification script accepted a publish
 
 ## Substitutions and gaps
 
+The 2026-11-27 Intune fixture change runs the packaged detector and uninstall as LocalSystem through a scheduled capture wrapper. A harmless Windows-only probe checks the wrapper's exit code, streams, identity and working directory. The wrapper and installer test require a clean elevated Windows runner; neither has been run for this change, and independent review remains open.
+
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
 - Rows 1 to 5 and 7 to 8 had no second-model implementer; the orchestrator wrote the code directly. Review independence came from tests, mutation checks, proptest, and row 6.
 - **The attended-support code (`support.rs`, `support.js`) has had no cross-family review.** It must have one before anyone relies on it.

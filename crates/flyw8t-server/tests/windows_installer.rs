@@ -95,11 +95,72 @@ try {
     Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $name -Confirm:$false
 }
+
 "#,
     );
     command.env("FLYW8T_TEST_EXECUTABLE", executable);
     command.env("FLYW8T_TEST_ARGUMENTS", arguments);
     run_fixture_command(command, description).await
+}
+
+struct SystemOutput {
+    code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+// PowerShell single-quoted literals do not interpolate paths or arguments.
+fn ps_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+async fn capture_as_system(
+    executable: &str,
+    arguments: &str,
+    working_dir: &Path,
+    description: &str,
+) -> SystemOutput {
+    let temp = tempfile::tempdir().unwrap();
+    let wrapper = temp.path().join("capture.ps1");
+    let stdout = temp.path().join("stdout.txt");
+    let stderr = temp.path().join("stderr.txt");
+    let result = temp.path().join("exit.txt");
+    let literal = |path: &Path| ps_literal(path.to_str().expect("fixture path must be Unicode"));
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {{ throw 'Expected LocalSystem' }}
+$child = Start-Process -FilePath {} -ArgumentList {} -WorkingDirectory {} -RedirectStandardOutput {} -RedirectStandardError {} -Wait -PassThru
+[IO.File]::WriteAllText({}, [string]$child.ExitCode)
+"#,
+        ps_literal(executable),
+        ps_literal(arguments),
+        literal(working_dir),
+        literal(&stdout),
+        literal(&stderr),
+        literal(&result),
+    );
+    // Windows PowerShell 5.1 needs a BOM to read non-ASCII paths as UTF-8.
+    std::fs::write(
+        &wrapper,
+        [b"\xef\xbb\xbf".as_slice(), script.as_bytes()].concat(),
+    )
+    .unwrap();
+    let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let args = format!(
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+        wrapper.display()
+    );
+    let task = run_as_system(&powershell, &args, description).await;
+    assert_success(&task, description);
+    SystemOutput {
+        code: std::fs::read_to_string(result).unwrap().parse().unwrap(),
+        stdout: std::fs::read(stdout).unwrap(),
+        stderr: std::fs::read(stderr).unwrap(),
+    }
 }
 
 async fn verify_local_terminal_policy(
@@ -137,24 +198,48 @@ async fn verify_local_terminal_policy(
 }
 
 async fn assert_intune_detection(detector: &Path, expect_detected: bool) {
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-    ]);
-    command.arg(detector);
-    let output = run_fixture_command(command, "running the Intune detector").await;
+    let arguments = format!(
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+        detector.display()
+    );
+    let output = capture_as_system(
+        "powershell.exe",
+        &arguments,
+        detector.parent().unwrap(),
+        "running the Intune detector",
+    )
+    .await;
     let (exit_code, response) = if expect_detected {
         (0, "Flyw8t enrollment detected")
     } else {
         (1, "")
     };
-    assert_eq!(output.status.code(), Some(exit_code));
+    assert_eq!(output.code, exit_code);
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), response);
     assert!(output.stderr.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an elevated Windows runner to schedule a LocalSystem task"]
+async fn system_capture_preserves_exit_output_and_working_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.ps1");
+    std::fs::write(
+        &script,
+        "[Console]::Out.Write((Get-Location).Path); [Console]::Error.Write('probe error'); exit 1",
+    )
+    .unwrap();
+    let args = format!(
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+        script.display()
+    );
+    let output = capture_as_system("powershell.exe", &args, temp.path(), "SYSTEM probe").await;
+    assert_eq!(output.code, 1);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        temp.path().to_str().unwrap()
+    );
+    assert_eq!(output.stderr, b"probe error");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -323,12 +408,20 @@ async fn intune_package_enrolls_quietly_and_preserves_its_identity_on_retry() {
     .await;
 
     // The one-use package is spent. A service-only retry keeps the original identity and site.
-    let mut uninstall = Command::new("cmd.exe");
-    uninstall
-        .current_dir(temp.path())
-        .args(["/d", "/c", "Uninstall-Flyw8t.cmd"]);
-    let removed = run_fixture_command(uninstall, "running the Intune uninstall command").await;
-    assert_success(&removed, "Intune uninstall");
+    let removed = capture_as_system(
+        "cmd.exe",
+        "/d /c Uninstall-Flyw8t.cmd",
+        temp.path(),
+        "running the Intune uninstall command",
+    )
+    .await;
+    assert_eq!(
+        removed.code,
+        0,
+        "Intune uninstall failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
     wait_for(
         "service record to be removed",
         Duration::from_secs(15),
