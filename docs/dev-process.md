@@ -369,6 +369,12 @@ The macOS protocol suite passed 51 tests with one fixture generator ignored. The
 
 Native Windows preflight with a production-signed candidate, managed distribution, service replacement and rollback still need acceptance. The integration review used the same model family.
 
+## Rollback artifact preflight, 2026-11-27
+
+The Windows update check can verify a staged fallback alongside the upgrade candidate. Paired fallback arguments use the pinned release key, require the exact running version, and share the candidate's file-handle publisher verification. The protected Windows signing rehearsal exercises the same fallback path with its signed build.
+
+An isolated Linux container on 10t7 passed 40 agent library tests, 51 protocol tests, and focused agent Clippy. One protocol fixture generator stayed ignored. Replacing exact fallback verification with the upgrade version rule failed the new regression. Restoring the rule passed. Actual service rollback and enrolled reconnect remain open.
+
 ## Windows and technician workflow checks, 2026-11-27
 
 An optimized Windows candidate built at `86ea760` passed the fixed-input PowerShell diagnostic on a Windows 11 VM under LocalSystem. The diagnostic checked Session 0 for both processes, persistent PowerShell state, prompt input, Ctrl+C, and a clean exit. The installed service stayed in place during the scratch test. The live browser terminal and employee meeting scenario remain open.

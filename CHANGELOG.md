@@ -16,6 +16,7 @@ All notable changes to flyw8t. Dates are UTC.
 - Enforce the browser confirmation deadline when queuing a background terminal policy recheck and accepting its reply.
 - Set the automatic agent update policy per organization, or opt out an individual device. Changes appear in Audit and Device Activity.
 - Verify a newer Windows x64 update candidate locally with `flyw8t-agent update-check`. It checks the signed release manifest and the timestamped Authenticode publisher.
+- Verify a staged rollback executable for the running Windows x64 agent version alongside an update candidate with `update-check` and the local release key pin.
 - Check the enrolled device's current automatic update policy after verifying a local candidate with `update-check --fleet-policy`. Audit and Device Activity record the decision.
 - Pin and inspect the Windows agent release public key with `flyw8t-agent update-trust`. Update preflight uses this pin by default.
 - Prepare and verify Windows x64 agent update manifests offline with `flyw8t-sign update` and a dedicated release key. The manifest version must match the version embedded in the candidate.
