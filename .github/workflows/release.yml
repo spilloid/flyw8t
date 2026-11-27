@@ -1,6 +1,6 @@
 name: release
 
-# A pushed tag `vX.Y.Z` builds the server, agent and MCP adapter for Windows and Linux,
+# A pushed tag `vX.Y.Z` builds the server, agent, MCP adapter and script signer for Windows and Linux,
 # including the native technician app on Windows, and publishes them
 # with SHA-256 sums, as a GitHub pre-release whose notes are that version's CHANGELOG section.
 # It also pushes the server image to ghcr.io/<owner>/flyw8t-server:X.Y.Z (unsigned; the release
@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
-      - run: cargo build --release --locked --target ${{ matrix.target }} -p flyw8t-server -p flyw8t-agent -p flyw8t-mcp
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p flyw8t-server -p flyw8t-agent -p flyw8t-mcp -p flyw8t-sign
       - name: Build the native Windows technician client
         if: matrix.os == 'windows-latest'
         run: cargo build --release --locked --target ${{ matrix.target }} -p flyw8t-technician
@@ -45,7 +45,7 @@ jobs:
         shell: bash
         run: |
           mkdir dist
-          binaries=(flyw8t-server flyw8t-agent flyw8t-mcp)
+          binaries=(flyw8t-server flyw8t-agent flyw8t-mcp flyw8t-sign)
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             binaries+=(flyw8t-technician)
           fi
@@ -63,6 +63,12 @@ jobs:
           account: ${{ vars.SIGNING_ACCOUNT }}
           profile: ${{ vars.SIGNING_PROFILE }}
           expected-subject: ${{ vars.SIGNING_EXPECTED_SUBJECT }}
+      - name: Verify the agent version matches the release tag
+        shell: bash
+        run: |
+          agent="dist/flyw8t-agent-${GITHUB_REF_NAME}-${{ matrix.target }}${{ matrix.ext }}"
+          got=$("$agent" --version | tr -d '\r')
+          test "$got" = "flyw8t-agent ${GITHUB_REF_NAME#v}" || { echo "Agent reports '$got', tag is ${GITHUB_REF_NAME}."; exit 1; }
       - uses: actions/upload-artifact@v5
         with:
           name: bin-${{ matrix.target }}
