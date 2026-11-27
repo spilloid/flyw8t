@@ -349,6 +349,12 @@ The browser confirmation's remaining lifetime now limits the registry's policy o
 
 The five registry tests and the terminal confirmation regression passed in an isolated Linux container on 10t7. Removing the under-lock expiry check made the regression detect a queued policy probe. Restoring the check made the regression pass again.
 
+## Offline release-stage verification, 2026-11-27
+
+The offline signer can verify a staged update against the exact intended release version. It checks the independently supplied release key, signed manifest, canonical artifact filename, embedded build version, byte count, and SHA-256. The installed-version check remains available for upgrade eligibility.
+
+The signer and protocol suites passed 56 tests, with one fixture generator ignored. The staged check also accepted the optimized Windows agent under a disposable fixture key. It rejected a different expected release version, a wrong filename, and modified bytes. Removing the exact-version comparison made the mismatch regression fail. Production Authenticode and verification of the final publication bytes remain open.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.

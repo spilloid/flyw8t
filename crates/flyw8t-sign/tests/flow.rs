@@ -154,20 +154,23 @@ fn only_the_release_key_can_authorize_the_exact_newer_windows_agent() {
     let manifest_source = std::fs::read(&manifest).unwrap();
     env.fails(&refs(&sign(&release_key)), "creating");
     assert_eq!(std::fs::read(&manifest).unwrap(), manifest_source);
-    let verify = |key: &str, version: &str| {
+    let check = |key: &str, version_flag: &str, version: &str, artifact: &str| {
         [
             "update".to_string(),
             "verify".into(),
             "--public-key".into(),
             key.into(),
-            "--current-version".into(),
+            version_flag.into(),
             version.into(),
             "--artifact".into(),
-            artifact.clone(),
+            artifact.into(),
             "--manifest".into(),
             manifest.clone(),
         ]
     };
+    let verify = |key: &str, version: &str| check(key, "--current-version", version, &artifact);
+    let verify_release =
+        |key: &str, version: &str, path: &str| check(key, "--release-version", version, path);
     env.ok(&refs(&verify(public_key, "0.9.0")));
     env.fails(&refs(&verify(public_key, "0.10.0")), "must be newer");
     env.fails(&refs(&verify(public_key, "0.11.0")), "must be newer");
@@ -175,12 +178,39 @@ fn only_the_release_key_can_authorize_the_exact_newer_windows_agent() {
         &refs(&verify(&"00".repeat(32), "0.9.0")),
         "trusted update key",
     );
+    let staged = env.ok(&refs(&verify_release(public_key, "0.10.0", &artifact)));
+    let digest = read::<Value>(Path::new(&manifest))["release"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(staged.contains(&digest));
+    env.fails(
+        &refs(&verify_release(public_key, "0.9.0", &artifact)),
+        "signed release version 0.10.0 does not match expected release version 0.9.0",
+    );
+    env.fails(
+        &refs(&verify_release(&"00".repeat(32), "0.10.0", &artifact)),
+        "trusted update key",
+    );
+    let wrong_name = env.s("flyw8t-agent-v0.9.0-x86_64-pc-windows-msvc.exe");
+    std::fs::copy(&artifact, &wrong_name).unwrap();
+    env.fails(
+        &refs(&verify_release(public_key, "0.10.0", &wrong_name)),
+        "expected the release artifact flyw8t-agent-v0.10.0-x86_64-pc-windows-msvc.exe",
+    );
+    let mut competing_versions = verify_release(public_key, "0.10.0", &artifact).to_vec();
+    competing_versions.extend(["--current-version".into(), "0.9.0".into()]);
+    env.fails(&refs(&competing_versions), "cannot be used with");
 
     let mut modified = original.to_vec();
     modified[3] ^= 1;
     std::fs::write(&artifact, modified).unwrap();
     env.fails(
         &refs(&verify(public_key, "0.9.0")),
+        "does not match the manifest",
+    );
+    env.fails(
+        &refs(&verify_release(public_key, "0.10.0", &artifact)),
         "does not match the manifest",
     );
     std::fs::write(&artifact, &original).unwrap();

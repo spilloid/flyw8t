@@ -12,6 +12,7 @@ All notable changes to flyw8t. Dates are UTC.
 - Verify a newer Windows x64 update candidate locally with `flyw8t-agent update-check`. It checks the signed release manifest and the timestamped Authenticode publisher.
 - Pin and inspect the Windows agent release public key with `flyw8t-agent update-trust`. Update preflight uses this pin by default.
 - Prepare and verify Windows x64 agent update manifests offline with `flyw8t-sign update` and a dedicated release key. The manifest version must match the version embedded in the candidate.
+- Check a staged update against the exact intended release version, canonical artifact filename and trusted release key with `flyw8t-sign update verify --release-version`.
 - Download a site-specific Intune bundle containing the Win32 app, matching detection script, and install and uninstall settings.
 - Download an Intune detection script from Windows enrollment. It checks the service registration, signed agent version, and organization and site recorded at enrollment.
 

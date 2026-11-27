@@ -27,6 +27,17 @@ For initial Azure setup, run `scripts/setup-signing.ps1` as the subscription own
 ./scripts/verify-signature.ps1 -Files (Get-ChildItem ./dist -Filter '*.exe').FullName -ExpectedSubject "CN=Joseph Spillers"
 ```
 
+## Staged Windows update manifest
+
+When preparing an update manifest for publication, use the final timestamped Authenticode executable. From the staging directory, verify the manifest and the exact same executable with the release key obtained through the independent trust channel. Supply the intended tag's numeric version.
+
+```sh
+flyw8t-sign update verify --public-key "$FLYW8T_RELEASE_PUBLIC_KEY" --release-version 0.3.0 \
+  --artifact flyw8t-agent-v0.3.0-x86_64-pc-windows-msvc.exe
+```
+
+The command prints the verified artifact name, byte count and SHA-256. Compare the digest with the upload bytes and retain Authenticode verification for that artifact. The tag workflow builds and signs its own executables. Generate a fresh manifest after any rebuild or change to the Authenticode signature.
+
 ## Windows browser launch check
 
 The signing rehearsal runs this acceptance check on a second fresh Windows runner.
