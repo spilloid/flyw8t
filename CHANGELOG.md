@@ -4,6 +4,7 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## 0.3.0 (in development)
 
+- Verify the complete release binary inventory before GitHub publication and check downloaded assets against it.
 - Device Activity distinguishes enabled and disabled background terminal policy observations.
 - Require an exact publisher match when verifying signed Windows release executables.
 - Show the background terminal policy check directly in a Windows device's Connect section, with an explanation when it is unavailable.

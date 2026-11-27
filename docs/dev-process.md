@@ -440,3 +440,7 @@ Update preflight takes shared row locks on the organization, device, and enrollm
 ## Intune LocalSystem fixture, 2026-11-27
 
 The Windows rehearsal runs installation, the packaged detector, uninstall, and retries as LocalSystem. The capture test checks the wrapper's child exit code, streams, identity and working directory. A clean Windows runner covers the complete package and identity checks. The managed Intune pilot remains separate.
+
+## Release asset inventory, 2026-11-27
+
+The publish job checks the exact nine-binary inventory before writing `SHA256SUMS`. The same script verifies downloads. A 0.3.0-format staging fixture used copies of the seven checksum-verified 0.2.0 binaries and two synthetic signer files. Manifest generation and independent SHA-256 verification passed. Removing a required file, adding an unexpected file, changing a file's bytes, using a symlink, and trying to overwrite the manifest all failed as expected. Exact 0.3.0 artifact and image verification remain on AnchorDesk ticket #10207.
