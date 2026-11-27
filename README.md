@@ -4,6 +4,8 @@ flyw8t (pronounced *flyweight*) is a self-hosted remote monitoring and managemen
 
 **Published pre-release 0.2.0.** Start in **Devices → Enroll a Windows device** or download an installer from a site. Open it on the PC you manage to enroll the signed **agent** and start its service. The signed **Technician** app opens from your device page on your Windows workstation. An end user can also share a screen with you in their browser. [Install and verify the Windows beta](docs/beta-trial.md) · [Product tour and screenshots](https://spilloid.github.io/flyw8t/)
 
+The 0.3.0 candidate is under validation. [Sprint acceptance checklist](docs/roadmap.md#030-sprint-acceptance)
+
 [![The Devices page shows the connection status of Windows PCs in a synthetic trial organization.](site/screenshots/devices.png)](https://spilloid.github.io/flyw8t/)
 
 You host the server and its PostgreSQL database. Administrators can enable directory sign-in alongside local accounts, two-step verification and passkeys. WAN interruption recovery and unattended physical-console access still need field verification. [Server deployment](docs/deployment.md) · [Directory integration](docs/directory-sso.md) · [Release gates](docs/threat-model.md#open-items-before-production)
