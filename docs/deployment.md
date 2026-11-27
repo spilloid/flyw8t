@@ -102,6 +102,8 @@ Flyw8t-Setup-x64.exe --quiet
 
 `/quiet` is equivalent. Setup enrolls the device, copies the original agent executable to Program Files, and starts the `flyw8t-agent` service. Quiet setup runs without dialogs, an elevation prompt, or a restart. It writes status to stdout and errors to stderr and waits for Windows to report that the service is running. Confirm check-in in the console. Retrying with the same package preserves the existing device identity and site. Setup can resume a stopped or missing service without consuming another enrollment use.
 
+If quiet setup finds a running service already enrolled with the same console, it returns success with the installed executable still in place. Check the agent version as well as check-in when applying a newer package to existing devices. Intune detection checks both the minimum version and the enrollment scope recorded locally. For an older enrollment without that record, verify detection separately after the signed upgrade.
+
 | Exit code | Meaning |
 |---|---|
 | `0` | Windows reports that the agent service is running, including an existing enrollment for the same console. |

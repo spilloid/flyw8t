@@ -33,8 +33,16 @@ pub(super) enum Cmd {
     Verify {
         #[arg(long)]
         public_key: String,
+        /// Require an update newer than this installed version.
+        #[arg(
+            long,
+            required_unless_present = "release_version",
+            conflicts_with = "release_version"
+        )]
+        current_version: Option<String>,
+        /// Require this exact version and its release filename before publication.
         #[arg(long)]
-        current_version: String,
+        release_version: Option<String>,
         #[arg(long)]
         artifact: PathBuf,
         #[arg(long, default_value = MANIFEST_NAME)]
@@ -60,15 +68,7 @@ pub(super) fn run(cmd: Cmd, yes: bool) -> Result<()> {
         } => {
             let bytes = read_bounded(&artifact, MAX_WINDOWS_AGENT_BYTES)?;
             let release = Release::from_artifact(version, &bytes)?;
-            let name = release.artifact_name()?;
-            ensure!(
-                artifact.file_name().and_then(|name| name.to_str()) == Some(name.as_str()),
-                "expected the release artifact {name}"
-            );
-            ensure!(
-                is_template(&bytes),
-                "expected a plain Windows agent release executable without an enrollment token"
-            );
+            let name = check_release_artifact(&release, &artifact, &bytes)?;
             release.check_build_version(&bytes)?;
             let key = keyfile::open(&key, &passphrase(false)?, AgentRelease)?;
             println!("Windows x64 agent {}", release.version);
@@ -86,6 +86,7 @@ pub(super) fn run(cmd: Cmd, yes: bool) -> Result<()> {
         Cmd::Verify {
             public_key,
             current_version,
+            release_version,
             artifact,
             manifest,
         } => {
@@ -94,14 +95,37 @@ pub(super) fn run(cmd: Cmd, yes: bool) -> Result<()> {
                 .context("the update public key must be 64 hex digits")?;
             let signed = SignedRelease::parse(&read_bounded(&manifest, MAX_MANIFEST_BYTES)?)?;
             let bytes = read_bounded(&artifact, MAX_WINDOWS_AGENT_BYTES)?;
-            signed.verify(&trusted_key, &current_version, &bytes)?;
-            println!(
-                "Verified manifest and artifact for Windows x64 agent {}",
-                signed.release.version
-            );
+            if let Some(expected) = release_version {
+                signed.verify_release(&trusted_key, &expected, &bytes)?;
+                let name = check_release_artifact(&signed.release, &artifact, &bytes)?;
+                println!(
+                    "Verified staged Windows x64 release {name} ({} bytes)\n{}",
+                    signed.release.size_bytes, signed.release.sha256
+                );
+            } else {
+                let current_version = current_version.context("expected an installed version")?;
+                signed.verify(&trusted_key, &current_version, &bytes)?;
+                println!(
+                    "Verified manifest and artifact for Windows x64 agent {}",
+                    signed.release.version
+                );
+            }
         }
     }
     Ok(())
+}
+
+fn check_release_artifact(release: &Release, path: &Path, bytes: &[u8]) -> Result<String> {
+    let name = release.artifact_name()?;
+    ensure!(
+        path.file_name().and_then(|name| name.to_str()) == Some(name.as_str()),
+        "expected the release artifact {name}"
+    );
+    ensure!(
+        is_template(bytes),
+        "expected a plain Windows agent release executable without an enrollment token"
+    );
+    Ok(name)
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {

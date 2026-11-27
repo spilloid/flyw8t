@@ -16,7 +16,8 @@ use flyw8t_web::{BackgroundTerminalPolicyCheck as Check, BackgroundTerminalStep}
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(30);
@@ -124,17 +125,13 @@ async fn observe_agent(
     admission: Option<&Admission>,
 ) -> Option<Result<(Uuid, BackgroundTerminalPolicy), ConsoleCheckError>> {
     let expected = admission.map(|grant| grant.connection);
-    let request = registry.check_background_terminal_policy(device, request_id, expected);
-    let Some(grant) = admission else {
-        return Some(request.await);
-    };
-    // Authorization and audit writes can outlast the remaining confirmation window.
-    if grant.expires <= Instant::now() {
-        return None;
-    }
-    tokio::time::timeout_at(grant.expires.into(), request)
-        .await
-        .ok()
+    let expires = admission.map(|grant| grant.expires);
+    let reply = registry
+        .check_background_terminal_policy(device, request_id, expected, expires)
+        .await;
+    expires
+        .is_none_or(|end| end > Instant::now())
+        .then_some(reply)
 }
 
 async fn observe(

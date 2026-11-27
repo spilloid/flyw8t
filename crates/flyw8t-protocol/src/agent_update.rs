@@ -34,6 +34,8 @@ pub enum Error {
     Signature,
     #[error("release version must be newer than the installed version")]
     NotNewer,
+    #[error("signed release version {actual} does not match expected release version {expected}")]
+    UnexpectedReleaseVersion { actual: Version, expected: Version },
     #[error("agent executable size or SHA-256 does not match the manifest")]
     Artifact,
     #[error("Windows x64 agent has no valid embedded build version")]
@@ -109,6 +111,29 @@ impl SignedRelease {
         installed_version: &str,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        let version = self.verify_metadata(trusted_key)?;
+        if version <= release_version(installed_version)? {
+            return Err(Error::NotNewer);
+        }
+        self.verify_artifact(bytes)
+    }
+
+    /// Check that the staged bytes belong to the exact release selected for publication.
+    pub fn verify_release(
+        &self,
+        trusted_key: &[u8],
+        expected_version: &str,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        let actual = self.verify_metadata(trusted_key)?;
+        let expected = release_version(expected_version)?;
+        if actual != expected {
+            return Err(Error::UnexpectedReleaseVersion { actual, expected });
+        }
+        self.verify_artifact(bytes)
+    }
+
+    fn verify_metadata(&self, trusted_key: &[u8]) -> Result<Version, Error> {
         let version = release_version(&self.release.version)?;
         if !(1..=MAX_WINDOWS_AGENT_BYTES as u64).contains(&self.release.size_bytes) {
             return Err(Error::Size);
@@ -120,9 +145,10 @@ impl SignedRelease {
         ) {
             return Err(Error::Signature);
         }
-        if version <= release_version(installed_version)? {
-            return Err(Error::NotNewer);
-        }
+        Ok(version)
+    }
+
+    fn verify_artifact(&self, bytes: &[u8]) -> Result<(), Error> {
         if self.release.size_bytes != bytes.len() as u64
             || self.release.sha256 != artifact_digest(bytes)
         {

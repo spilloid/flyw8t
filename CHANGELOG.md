@@ -4,12 +4,15 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## 0.3.0 (in development)
 
+- Record the participant's screenshot permission before enabling capture for the named MCP client. Revocation stops capture immediately.
 - Check local PowerShell input, output, interruption, and cleanup on Windows with `flyw8t-agent terminal-check --powershell`.
 - Verify background terminal access in the browser. The single-use confirmation rechecks the technician's sign-in and the original agent connection, and records the result in Device Activity.
+- Enforce the browser confirmation deadline when queuing a background terminal policy recheck and accepting its reply.
 - Set the automatic agent update policy per organization, or opt out an individual device. Changes appear in Audit and Device Activity.
 - Verify a newer Windows x64 update candidate locally with `flyw8t-agent update-check`. It checks the signed release manifest and the timestamped Authenticode publisher.
 - Pin and inspect the Windows agent release public key with `flyw8t-agent update-trust`. Update preflight uses this pin by default.
 - Prepare and verify Windows x64 agent update manifests offline with `flyw8t-sign update` and a dedicated release key. The manifest version must match the version embedded in the candidate.
+- Check a staged update against the exact intended release version, canonical artifact filename and trusted release key with `flyw8t-sign update verify --release-version`.
 - Download a site-specific Intune bundle containing the Win32 app, matching detection script, and install and uninstall settings.
 - Download an Intune detection script from Windows enrollment. It checks the service registration, signed agent version, and organization and site recorded at enrollment.
 

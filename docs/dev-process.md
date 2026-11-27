@@ -331,6 +331,30 @@ An administrator can pin and inspect an independent release public key in the pr
 
 Windows x64 target Clippy passed for the agent and its tests, using compile-only metadata for ring's native library. A local simulation forced two writers to observe a missing pin before one published it. Removing the final comparison let the second writer report success and failed the regression. The elevated NTFS test covers the real move, conflicting pins, hard links and corrupt state. It still needs to run on Windows.
 
+## Native candidate evidence, 2026-11-27
+
+Draft PR #70 at `8d1f2fe` passed all five CI jobs. The Windows job ran the local ConPTY test, the quiet LocalSystem site installer including the installed binary's PowerShell diagnostic, and the elevated NTFS release-key test. Linux ran the PostgreSQL suites and browser capture, and the container job verified sign-in and restore. [Candidate CI](https://github.com/spilloid/flyw8t/actions/runs/45937708514)
+
+On a Windows 11 VM, the same source built an optimized x64 executable that reported 0.3.0 and passed its PowerShell diagnostic when run through the guest agent. The debug PowerShell test timed out when run over noninteractive SSH. The offline signer used a temporary test key to verify a manifest for the optimized executable. It rejected the executable relabeled 0.3.1 and rejected a changed copy. Production signing, the browser-to-agent session, and real Intune and upgrade acceptance remain open.
+
+## Screenshot consent audit, 2026-11-27
+
+MCP screenshot permission stays pending while Audit records the participant's decision. The participant socket remains responsive during the bounded write. Only the same live participant connection and grant can enable capture after a successful write. Revocation takes effect immediately. The decision, capture request, and release authorization have separate audit evidence.
+
+Four screenshot unit tests and the PostgreSQL integration test passed in isolated Linux containers. The integration test holds the audit table lock, checks that access stays pending and the participant socket responds, then releases the lock and verifies the approved flow. Reporting the recording state as allowed made the regression fail.
+
+## Background terminal confirmation deadline, 2026-11-27
+
+The browser confirmation's remaining lifetime now limits the registry's policy observation as well as the console response. The registry checks its deadline under the connection lock before queuing a probe. The same deadline governs reply matching. Tokio's timeout polls the wrapped future before checking its timer, so wrapping the preflight alone could allow the registry to enqueue after waiting for its lock. The live terminal remains open.
+
+The five registry tests and the terminal confirmation regression passed in an isolated Linux container on 10t7. Removing the under-lock expiry check made the regression detect a queued policy probe. Restoring the check made the regression pass again.
+
+## Offline release-stage verification, 2026-11-27
+
+The offline signer can verify a staged update against the exact intended release version. It checks the independently supplied release key, signed manifest, canonical artifact filename, embedded build version, byte count, and SHA-256. The installed-version check remains available for upgrade eligibility.
+
+The signer and protocol suites passed 56 tests, with one fixture generator ignored. The staged check also accepted the optimized Windows agent under a disposable fixture key. It rejected a different expected release version, a wrong filename, and modified bytes. Removing the exact-version comparison made the mismatch regression fail. Production Authenticode and verification of the final publication bytes remain open.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
