@@ -331,6 +331,12 @@ An administrator can pin and inspect an independent release public key in the pr
 
 Windows x64 target Clippy passed for the agent and its tests, using compile-only metadata for ring's native library. A local simulation forced two writers to observe a missing pin before one published it. Removing the final comparison let the second writer report success and failed the regression. The elevated NTFS test covers the real move, conflicting pins, hard links and corrupt state. It still needs to run on Windows.
 
+## Native candidate evidence, 2026-11-27
+
+Draft PR #70 at `8d1f2fe` passed all five CI jobs. The Windows job ran the local ConPTY test, the quiet LocalSystem site installer including the installed binary's PowerShell diagnostic, and the elevated NTFS release-key test. Linux ran the PostgreSQL suites and browser capture, and the container job verified sign-in and restore. [Candidate CI](https://github.com/spilloid/flyw8t/actions/runs/45937708514)
+
+On a Windows 11 VM, the same source built an optimized x64 executable that reported 0.3.0 and passed its PowerShell diagnostic when run through the guest agent. The debug PowerShell test timed out when run over noninteractive SSH. The offline signer used a temporary test key to verify a manifest for the optimized executable. It rejected the executable relabeled 0.3.1 and rejected a changed copy. Production signing, the browser-to-agent session, and real Intune and upgrade acceptance remain open.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
