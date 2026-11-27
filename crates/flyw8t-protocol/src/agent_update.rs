@@ -38,6 +38,8 @@ pub enum Error {
     UnexpectedReleaseVersion { actual: Version, expected: Version },
     #[error("agent executable size or SHA-256 does not match the manifest")]
     Artifact,
+    #[error("expected a plain Windows x64 agent release executable without an enrollment token")]
+    EnrollmentArtifact,
     #[error("Windows x64 agent has no valid embedded build version")]
     MissingBuildVersion,
     #[error("Windows agent build version {actual} does not match release version {expected}")]
@@ -81,6 +83,15 @@ impl Release {
         Ok(format!(
             "flyw8t-agent-v{version}-x86_64-pc-windows-msvc.exe"
         ))
+    }
+
+    /// Validate a plain update image without running the executable.
+    pub fn check_update_image(&self, bytes: &[u8]) -> Result<(), Error> {
+        self.check_build_version(bytes)?;
+        if !crate::enrollment_package::is_template(bytes) {
+            return Err(Error::EnrollmentArtifact);
+        }
+        Ok(())
     }
 
     /// Read the version built into the Windows agent without running the executable.
@@ -160,7 +171,7 @@ impl SignedRelease {
         {
             return Err(Error::Artifact);
         }
-        self.release.check_build_version(bytes)
+        self.release.check_update_image(bytes)
     }
 }
 

@@ -1452,6 +1452,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "tempfile",
  "uuid",
  "windows-sys 0.61.2",
  "zeroize",

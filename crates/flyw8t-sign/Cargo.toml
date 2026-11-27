@@ -25,6 +25,7 @@ argon2.workspace = true
 ed25519-dalek.workspace = true
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 rpassword = "7"
+tempfile = "3"
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]

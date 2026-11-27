@@ -385,6 +385,12 @@ The native Windows installer test takes its installer, detector, and uninstall c
 
 Windows rehearsal and managed Intune assignment results remain open. The production signing environment stays on the existing signing job. The validation job uses the signed artifact from that job and runs with repository read access.
 
+## Update manifest publication, 2026-11-27
+
+The offline signer and Windows update checker use one validator for the agent image. The signer rejects a site enrollment package in both verification modes even when the manifest signature and digest are correct. The signer writes and flushes a temporary manifest beside the destination before publishing it without overwriting an existing file.
+
+On 10t7, 58 signer and protocol tests passed in an isolated Linux container. One fixture generator remained ignored. Workspace formatting and signer and protocol Clippy passed. Bypassing the image check failed the enrollment package regression. Allowing publication to replace the destination failed the concurrent writer regression. Both suites passed after restoring the checks. Native Windows publisher verification, service replacement, reconnect and rollback remain open.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
