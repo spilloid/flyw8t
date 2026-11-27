@@ -2,7 +2,7 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
-## Unreleased
+## 0.3.0 (in development)
 
 - Check local PowerShell input, output, interruption, and cleanup on Windows with `flyw8t-agent terminal-check --powershell`.
 - Verify background terminal access in the browser. The single-use confirmation rechecks the technician's sign-in and the original agent connection, and records the result in Device Activity.
