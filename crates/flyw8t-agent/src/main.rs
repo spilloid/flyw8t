@@ -392,7 +392,7 @@ fn main() -> Result<()> {
             #[cfg(windows)]
             if powershell {
                 flyw8t_agent::terminal::check_powershell(require_session_zero)?;
-                println!("Local PowerShell input, output, Ctrl+C, process exit, and Windows session isolation verified.");
+                println!("Local PowerShell input, output, Ctrl+C, normal exit, forced cleanup, and Windows session isolation verified.");
                 return Ok(());
             }
             use flyw8t_agent::terminal::{check, Readiness};

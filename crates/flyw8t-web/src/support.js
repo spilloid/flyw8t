@@ -232,37 +232,41 @@
 
   async function securityCheck(conn, mine0) {
     const transport = mediaTransport();
-    if (!transport) { refuseTopology(); return; }
+    if (!transport) { refuseTopology(); return false; }
     // The certificate can lag the "connected" event by a moment; wait briefly before saying
     // this browser cannot show a code.
     const certificates = () => (transport.getRemoteCertificates ? transport.getRemoteCertificates() : []);
     let remote = certificates();
     for (let i = 0; !remote.length && transport.getRemoteCertificates && i < 30; i++) {
       await new Promise((r) => setTimeout(r, 100));
-      if (stale(conn, mine0)) return;
+      if (stale(conn, mine0)) return false;
       remote = certificates();
     }
     if (!remote.length) {
       root.dataset.sas = 'unavailable';
       setText('sas', 'not available in this browser');
       show('sas-box', true);
-      return;
+      return true;
     }
     const theirs = await sha256(remote[0]);
-    if (stale(conn, mine0)) return;
+    if (stale(conn, mine0)) return false;
     const mine = localFingerprint();
-    if (role === 'participant' && (await commitTo(theirs)) !== commitment) {
-      // The certificate in use is not the one the technician committed to.
-      root.dataset.sas = 'mismatch';
-      endHere('connection_failed', 'Stopped: this connection is not the one your technician set up. Someone may be in the middle.');
-      return;
+    if (role === 'participant') {
+      const actualCommitment = await commitTo(theirs);
+      if (stale(conn, mine0)) return false;
+      if (actualCommitment !== commitment) {
+        root.dataset.sas = 'mismatch';
+        endHere('connection_failed', 'Stopped: this connection is not the one your technician set up. Someone may be in the middle.');
+        return false;
+      }
     }
     const [tech, part] = role === 'technician' ? [mine, theirs] : [theirs, mine];
     const code = await securityCode(sessionId, tech, part);
-    if (stale(conn, mine0)) return;
+    if (stale(conn, mine0)) return false;
     root.dataset.sas = 'shown';
     setText('sas', `${code.slice(0, 3)} ${code.slice(3)}`);
     show('sas-box', true);
+    return true;
   }
 
   async function securityCode(session, techFp, partFp) {
@@ -301,15 +305,30 @@
     const mine = epoch;
     let shown = false;
     let reported = false;
+    let securityCheckStarted = false;
+    let securityReady = false;
     let frameGeneration = 0;
     // Once interrupted, an already decoded frame may still be visible in the element.
     // A fresh frame confirms recovery even if the server still has both original reports.
     let framesAtInterruption = null;
     const video = $('remote');
     function reportReady() {
-      if (!reported && conn.connectionState === 'connected' && (role === 'participant' || frameReady)) {
+      if (!reported && securityReady && conn.connectionState === 'connected'
+          && (role === 'participant' || frameReady)) {
         reported = true;
         send({ type: 'media', state: 'connected' });
+      }
+    }
+    async function checkBeforeReporting() {
+      if (securityCheckStarted) return;
+      securityCheckStarted = true;
+      try {
+        securityReady = await securityCheck(conn, mine);
+        if (!stale(conn, mine)) reportReady();
+      } catch (_) {
+        if (!stale(conn, mine)) {
+          endHere('connection_failed', 'The screen connection stopped because its security check could not finish.');
+        }
       }
     }
     function watchFrame() {
@@ -340,7 +359,7 @@
       if (conn.connectionState === 'connected') {
         watchFrame();
         reportReady();
-        securityCheck(conn, mine);
+        void checkBeforeReporting();
       } else if (conn.connectionState === 'disconnected' || conn.connectionState === 'failed') {
         screenshots.clear(true);
         frameGeneration += 1;

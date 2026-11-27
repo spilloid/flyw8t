@@ -27,7 +27,9 @@ flyw8t-sign update verify --public-key "$FLYW8T_RELEASE_PUBLIC_KEY" --release-ve
   --artifact flyw8t-agent-v0.3.0-x86_64-pc-windows-msvc.exe
 ```
 
-Both signing and verification use `flyw8t-agent-windows-x64-update.json` by default. Use `--release-version` to verify a staged pair before publication. The release version should come from the intended tag and the public key from the trusted channel used to distribute it. This mode checks the exact signed version, filename, embedded build version and artifact bytes. Use `--current-version` to check that a candidate is newer than an installed version. Authenticode verification remains part of release qualification.
+Both signing and verification use `flyw8t-agent-windows-x64-update.json` by default. The signer flushes a temporary file in the destination folder before publishing the manifest at its final path. An existing manifest keeps its contents, including when two signing processes target the same file.
+
+Use `--release-version` to verify a staged pair before publication. The release version should come from the intended tag and the public key from the trusted channel used to distribute it. This mode checks the exact signed version, filename, embedded build version and artifact bytes. Use `--current-version` to check that a candidate is newer than an installed version. Both modes require the same plain Windows x64 agent image that the endpoint accepts and refuse a site enrollment installer. Authenticode verification remains part of release qualification.
 
 Published 0.2.0 Windows binaries remain usable as manual installers. Update candidates need the embedded build version, which those binaries predate. The offline verifier accepts `--current-version 0.2.0` when evaluating a newer compatible candidate. Endpoints on 0.2.0 need a managed bootstrap before they can receive automatic updates.
 

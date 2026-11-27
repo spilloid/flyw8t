@@ -83,6 +83,8 @@ mod release_fixture;
 
 #[test]
 fn only_the_release_key_can_authorize_the_exact_newer_windows_agent() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use flyw8t_protocol::agent_update::{Release, SignedRelease};
     use flyw8t_protocol::enrollment_package::EnrollmentPackage;
     use serde_json::Value;
 
@@ -132,7 +134,7 @@ fn only_the_release_key_can_authorize_the_exact_newer_windows_agent() {
     }
     .append(&mut packaged)
     .unwrap();
-    std::fs::write(&artifact, packaged).unwrap();
+    std::fs::write(&artifact, &packaged).unwrap();
     env.fails(&refs(&sign(&release_key)), "without an enrollment token");
     assert!(!Path::new(&manifest).exists());
 
@@ -218,6 +220,21 @@ fn only_the_release_key_can_authorize_the_exact_newer_windows_agent() {
     changed["release"]["version"] = "0.10.1".into();
     std::fs::write(&manifest, serde_json::to_vec(&changed).unwrap()).unwrap();
     env.fails(&refs(&verify(public_key, "0.9.0")), "trusted update key");
+
+    // Produce the fixture manifest independently so this exercises verification after signature and digest checks.
+    let key = SigningKey::from_bytes(&[32; 32]);
+    let release = Release::from_artifact("0.10.0".into(), &packaged).unwrap();
+    let signature = Bytes(key.sign(&release.signing_bytes()).to_bytes().to_vec());
+    let signed = SignedRelease { release, signature };
+    std::fs::write(&manifest, serde_json::to_vec(&signed).unwrap()).unwrap();
+    std::fs::write(&artifact, &packaged).unwrap();
+    let public_key = hex::encode(key.verifying_key().to_bytes());
+    for check in [
+        verify(&public_key, "0.9.0"),
+        verify_release(&public_key, "0.10.0", &artifact),
+    ] {
+        env.fails(&refs(&check), "without an enrollment token");
+    }
 }
 
 #[test]

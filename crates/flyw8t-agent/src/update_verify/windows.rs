@@ -1,4 +1,3 @@
-use super::verify_release;
 use anyhow::{anyhow, ensure, Context, Result};
 use flyw8t_protocol::agent_update::{
     Release, SignedRelease, MAX_MANIFEST_BYTES, MAX_WINDOWS_AGENT_BYTES,
@@ -43,7 +42,7 @@ fn check_with_version(
         .open(candidate)
         .context("opening the Windows update candidate for verification")?;
     let bytes = read_bounded(&file, MAX_WINDOWS_AGENT_BYTES)?;
-    verify_release(&signed, &bytes, key, installed_version)?;
+    signed.verify(key, installed_version, &bytes)?;
     file.rewind()?;
     verify_publisher(&file)?;
     Ok(signed.release)

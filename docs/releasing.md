@@ -15,6 +15,19 @@
 
 Every release is a pre-release while `docs/threat-model.md` lists blocking open items. Do not describe a release as production-ready.
 
+## Compose upgrade rehearsal
+
+The container CI job tests fresh deployment, MFA sign-in and database recovery. It also upgrades the published 0.2.0 container to the candidate on the same disposable PostgreSQL database. The upgrade checks the migration history, signs in through MFA and opens an organization created before the upgrade. It then restores the original snapshot and boots the published 0.2.0 image. Recovery checks the original account and organization and confirms that a record created after the snapshot is absent.
+
+Run the rehearsal on a Linux x64 Docker host from the candidate checkout.
+
+```sh
+docker build -f deploy/compose/Dockerfile -t flyw8t-server:ci .
+node scripts/compose-smoke.mjs --upgrade-from-0.2.0
+```
+
+The script uses the digest in the 0.2.0 release notes. It creates a unique Compose project with disposable credentials and a loopback-only server port. PostgreSQL is reachable only within the project network. [Flyw8t 0.2.0 release](https://github.com/spilloid/flyw8t/releases/tag/v0.2.0)
+
 ## Code signing
 
 Both the signing check and the release workflow use `.github/actions/sign-release` and the company's Azure Artifact Signing account (corporate-strategy D-0047). The action Authenticode-signs all Windows executables, adds an RFC 3161 timestamp and checks each signature. Timestamping keeps signatures verifiable after the three-day signing certificate expires. Configure `SIGNING_EXPECTED_SUBJECT` to verify the publisher as well. Linux binaries are covered by `SHA256SUMS` only.
@@ -60,3 +73,9 @@ rehearsal uses disposable Windows runners.
 3. Remove the registration from **Browser links**, close the app, and repeat the browser launch. Confirm that Windows no longer opens that copy of the technician app. Record the candidate SHA, Windows and browser versions, and result.
 
 The executable also accepts `--register-protocol` and `--unregister-protocol` for per-user setup from a deployment script.
+
+## Signed Intune bundle rehearsal
+
+The signing check downloads the signed agent onto a clean Windows runner and verifies its publisher. A loopback console generates a site-specific Intune bundle using that exact executable. The test unpacks the bundle, installs as LocalSystem, runs the bundled detector and uninstall command, and retries with the spent one-use package. It checks the installed bytes, site, device ID, key, and token use count.
+
+Complete the Intune pilot in an authorized tenant with the published candidate. Record the app upload, the assignment to a pilot device, and the managed results for installation, detection, and uninstall. Keep enrollment bundles out of the evidence archive because they contain a credential.

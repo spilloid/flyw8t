@@ -1,8 +1,5 @@
 //! Verify the bytes and publisher of a Windows x64 update candidate.
 
-use anyhow::{ensure, Result};
-use flyw8t_protocol::{agent_update::SignedRelease, enrollment_package::is_template};
-
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod windows;
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -14,31 +11,14 @@ pub mod key_pin;
 #[path = "../../flyw8t-protocol/tests/support/agent_update.rs"]
 mod release_fixture;
 
-fn verify_release(
-    signed: &SignedRelease,
-    bytes: &[u8],
-    key: &[u8; 32],
-    installed_version: &str,
-) -> Result<()> {
-    signed.verify(key, installed_version, bytes)?;
-    let is_x64 = bytes.get(0x3c..0x40).is_some_and(|offset| {
-        let offset = u32::from_le_bytes(offset.try_into().expect("four-byte PE header offset"));
-        bytes
-            .get(offset as usize..)
-            .is_some_and(|header| header.starts_with(b"PE\0\0\x64\x86"))
-    });
-    ensure!(
-        is_x64 && is_template(bytes),
-        "expected a plain Windows x64 agent executable without enrollment data"
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use flyw8t_protocol::{agent_update::Release, trust::Bytes};
+    use flyw8t_protocol::{
+        agent_update::{Release, SignedRelease},
+        trust::Bytes,
+    };
 
     fn sign(key: &SigningKey, image: &[u8]) -> SignedRelease {
         let release = Release::from_artifact("0.3.0".into(), image).unwrap();
@@ -51,7 +31,7 @@ mod tests {
         let key = SigningKey::from_bytes(&[18; 32]);
         let public = key.verifying_key().to_bytes();
         let image = release_fixture::versioned_image("0.3.0");
-        verify_release(&sign(&key, &image), &image, &public, "0.2.0").unwrap();
+        sign(&key, &image).verify(&public, "0.2.0", &image).unwrap();
 
         let mut wrong_machine = image.clone();
         wrong_machine[68..70].copy_from_slice(b"\x4c\x01");
@@ -76,12 +56,11 @@ mod tests {
                 "Windows agent build version 0.2.0 does not match release version 0.3.0",
             ),
         ] {
-            assert!(
-                verify_release(&sign(&key, &malformed), &malformed, &public, "0.2.0")
-                    .unwrap_err()
-                    .to_string()
-                    .contains(expected)
-            );
+            assert!(sign(&key, &malformed)
+                .verify(&public, "0.2.0", &malformed)
+                .unwrap_err()
+                .to_string()
+                .contains(expected));
         }
     }
 }
