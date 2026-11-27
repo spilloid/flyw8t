@@ -444,3 +444,9 @@ The Windows rehearsal runs installation, the packaged detector, uninstall, and r
 ## Release asset inventory, 2026-11-27
 
 The publish job checks the exact nine-binary inventory before writing `SHA256SUMS`. The same script verifies downloads. A 0.3.0-format staging fixture used copies of the seven checksum-verified 0.2.0 binaries and two synthetic signer files. Manifest generation and independent SHA-256 verification passed. Removing a required file, adding an unexpected file, changing a file's bytes, using a symlink, and trying to overwrite the manifest all failed as expected. Exact 0.3.0 artifact and image verification remain on AnchorDesk ticket #10207.
+
+## Current authorization for Network handoff, 2026-11-27
+
+The PortGlass handoff rechecks the technician's browser sign-in and holds shared locks on the active collector and site through the access audit. A fresh inventory read uses the same lock order as ingestion. The response reflects the collector and site evidence that agreed with the access record.
+
+On 10t7, the PostgreSQL regression failed on the old handler while a collector revocation was in flight. The fixed handler waited, refused after revocation committed, and emitted neither a link nor an access request record. The nine Network tests passed. Enrolled node selection remains open on AnchorDesk #10211.
