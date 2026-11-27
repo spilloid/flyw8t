@@ -208,8 +208,11 @@ mod tests {
         let result = check_listener(address, Duration::from_millis(50)).await;
         assert_eq!(result, Readiness::TimedOut);
         drop(listener);
+        // Use a fresh port without a pending connection and allow the OS to report refusal.
+        let (closed_listener, closed_address) = fake_listener().await;
+        drop(closed_listener);
         assert_eq!(
-            check_listener(address, DEADLINE).await,
+            check_listener(closed_address, Duration::from_secs(10)).await,
             Readiness::ListenerUnavailable
         );
     }

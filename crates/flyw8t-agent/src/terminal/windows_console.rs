@@ -21,7 +21,8 @@ use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
     EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW,
 };
 
 fn pipe() -> Result<(OwnedHandle, OwnedHandle)> {
@@ -159,6 +160,9 @@ fn spawn(shell: &Pseudoconsole, job: &OwnedHandle) -> Result<OwnedHandle> {
     let startup = STARTUPINFOEXW {
         StartupInfo: windows_sys::Win32::System::Threading::STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+            // Explicit null handles prevent Windows from copying redirected streams
+            // from the agent or its caller into the pseudoconsole client.
+            dwFlags: STARTF_USESTDHANDLES,
             ..Default::default()
         },
         lpAttributeList: attrs.0,

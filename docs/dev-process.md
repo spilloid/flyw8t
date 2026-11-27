@@ -323,6 +323,8 @@ The candidate uses workspace version 0.3.0 so enrollment downloads name the matc
 
 The agent's local `terminal-check --powershell` command exercises fixed PowerShell inputs through ConPTY, checks persistent state and prompt replies, interrupts a running command, and verifies process exit. The child enters a kill-on-close Job Object at creation. The agent resolves ConPTY when the diagnostic runs so platforms without it can still load the executable. The Windows installer fixture runs the installed binary's check as LocalSystem. Windows-targeted linting of the diagnostic passed in isolation. The live terminal, native LocalSystem result, and an employee-session acceptance run remain open.
 
+In the first native run, PowerShell printed its prompt on the runner's redirected output and the diagnostic timed out waiting on ConPTY. The child now has explicit null standard handles so Windows can attach them to the pseudoconsole. The SSH readiness test now uses a separate closed port for the absence case and allows time for the OS to report refusal. The native rerun is required. [Microsoft's ConPTY issue and workaround](https://github.com/microsoft/terminal/issues/11276)
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
