@@ -234,7 +234,7 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
     .await;
     let terminal = run_as_system(
         &installed,
-        "terminal-check --powershell",
+        "terminal-check --powershell --require-session-zero",
         "LocalSystem PowerShell check",
     )
     .await;

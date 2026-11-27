@@ -60,6 +60,10 @@ enum Command {
         #[cfg(windows)]
         #[arg(long)]
         powershell: bool,
+        /// Require both the diagnostic and PowerShell to run in the Windows service session.
+        #[cfg(windows)]
+        #[arg(long, requires = "powershell")]
+        require_session_zero: bool,
     },
     /// Verify a newer Windows agent candidate's signed manifest and Authenticode publisher.
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -356,11 +360,13 @@ fn main() -> Result<()> {
         Command::TerminalCheck {
             #[cfg(windows)]
             powershell,
+            #[cfg(windows)]
+            require_session_zero,
         } => {
             #[cfg(windows)]
             if powershell {
-                flyw8t_agent::terminal::check_powershell()?;
-                println!("Local PowerShell input, output, Ctrl+C, and process exit verified.");
+                flyw8t_agent::terminal::check_powershell(require_session_zero)?;
+                println!("Local PowerShell input, output, Ctrl+C, process exit, and Windows session isolation verified.");
                 return Ok(());
             }
             use flyw8t_agent::terminal::{check, Readiness};
