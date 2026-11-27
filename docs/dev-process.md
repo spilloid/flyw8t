@@ -371,6 +371,10 @@ Legacy scope recovery passed the Linux fleet-health tests against PostgreSQL 18.
 
 The technician workspace labels the invitation, physical desktop, RDP, and direct SSH actions separately. Ten web unit tests, 17 web fleet tests, and 31 browser support tests passed. The headless Chrome captures at draft revision `2f48eb8` showed the three main actions on desktop and phone. The UX work used Terra and the integration review used the same model family. [Candidate CI and captures](https://github.com/spilloid/flyw8t/actions/runs/46060321016)
 
+## Screen-share connection evidence, 2026-11-27
+
+The attended browser peers finish the transport and security-code checks before reporting connected media. The viewer also requires a frame. The unsupported certificate API still produces the existing browser notice. All 32 Node support tests passed. Removing the reporting gate in an isolated copy failed both the certificate mismatch and delayed certificate tests. Full browser integration and a two-device session with a participant-selected Windows surface remain open.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
