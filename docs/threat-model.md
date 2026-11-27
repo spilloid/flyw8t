@@ -68,7 +68,7 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 
 ### T9: Compromised software updates
 - **Control:** there is no automatic update mechanism. Agents are installed and upgraded by an administrator.
-- **Update preflight:** the offline signer can produce a manifest signed by a separate Ed25519 release key. The Windows x64 agent's local `update-check` validates that manifest against a separately supplied public key and checks the expected Authenticode publisher and timestamp. The signed-artifact runtime test is part of the Windows signing rehearsal.
+- **Update preflight:** the offline signer can produce a manifest signed by a separate Ed25519 release key. A Windows administrator can pin its public key in the protected default agent state directory. The Windows x64 agent's local `update-check` validates against that pin by default and checks the expected Authenticode publisher and timestamp. An explicitly supplied key applies to one diagnostic invocation. The signed-artifact runtime test is part of the Windows signing rehearsal.
 - **Residual:** automatic updates still need release-key pinning on the endpoint, delivery policy, and verified replacement and rollback.
 
 ### T10: Compromised server or database

@@ -4,6 +4,7 @@
 //! <state_dir>/
 //!   agent.json      server URL, optional pinned CA, device id once enrolled
 //!   device.key      Ed25519 private key (PKCS#8). Never leaves the device.
+//!   release-public-key.bin   local Windows x64 release verification pin, when configured
 //!   journal/        one file per job; see journal.rs
 //! ```
 

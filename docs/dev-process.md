@@ -325,6 +325,12 @@ The agent's local `terminal-check --powershell` command exercises fixed PowerShe
 
 In the first native run, PowerShell printed its prompt on the runner's redirected output and the diagnostic timed out waiting on ConPTY. The child now has explicit null standard handles so Windows can attach them to the pseudoconsole. The SSH readiness test now uses a separate closed port for the absence case and allows time for the OS to report refusal. The native rerun is required. [Microsoft's ConPTY issue and workaround](https://github.com/microsoft/terminal/issues/11276)
 
+## Local Windows release key pin, 2026-11-26
+
+An administrator can pin and inspect an independent release public key in the protected default Windows agent state folder. The first pin publishes a flushed, ACL-protected file using a same-directory rename that refuses replacement. Repeating the same key succeeds. `update-check` uses the pin by default and reports when its explicit diagnostic key is used.
+
+Windows x64 target Clippy passed for the agent and its tests, using compile-only metadata for ring's native library. A local simulation forced two writers to observe a missing pin before one published it. Removing the final comparison let the second writer report success and failed the regression. The elevated NTFS test covers the real move, conflicting pins, hard links and corrupt state. It still needs to run on Windows.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.

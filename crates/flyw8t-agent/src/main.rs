@@ -64,13 +64,19 @@ enum Command {
     /// Verify a newer Windows agent candidate's signed manifest and Authenticode publisher.
     #[cfg(all(windows, target_arch = "x86_64"))]
     UpdateCheck {
-        /// The release verification key from an independent trusted source, in hex.
+        /// Use this independently supplied hex key for this check. Defaults to the local pin.
         #[arg(long)]
-        public_key: String,
+        public_key: Option<String>,
         #[arg(long)]
         manifest: PathBuf,
         #[arg(long)]
         artifact: PathBuf,
+    },
+    /// Pin or inspect the local Windows agent release verification key.
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    UpdateTrust {
+        #[command(subcommand)]
+        action: UpdateTrustCmd,
     },
     /// Inspect or change the administrator's local background terminal opt-in.
     #[cfg(windows)]
@@ -97,6 +103,19 @@ enum TrustCmd {
         org: uuid::Uuid,
     },
     /// Show the fingerprint, version, head hash and organization this agent holds.
+    Status,
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[derive(Subcommand)]
+enum UpdateTrustCmd {
+    /// Pin the key from a trusted source. Run as Administrator after enrollment.
+    Pin {
+        /// The 64 hex digits printed by the offline release signer.
+        #[arg(long)]
+        public_key: String,
+    },
+    /// Show the release verification key pinned on this machine.
     Status,
 }
 
@@ -297,11 +316,41 @@ fn main() -> Result<()> {
             manifest,
             artifact,
         } => {
-            let mut key = [0u8; 32];
-            hex::decode_to_slice(public_key, &mut key)
-                .context("the update public key must be 64 hex digits")?;
+            use flyw8t_agent::update_verify::key_pin;
+            let (key, source) = match public_key {
+                Some(key) => (key_pin::parse(&key)?, "explicit"),
+                None => (
+                    key_pin::load(&state_dir)?.context(
+                        "pin the release public key with update-trust pin or supply --public-key",
+                    )?,
+                    "pinned",
+                ),
+            };
             let release = flyw8t_agent::update_verify::check(&manifest, &artifact, &key)?;
-            println!("Verified Windows x64 agent candidate {}.", release.version);
+            println!(
+                "Verified Windows x64 agent candidate {} using the {source} release key.",
+                release.version
+            );
+            Ok(())
+        }
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        Command::UpdateTrust { action } => {
+            use flyw8t_agent::update_verify::key_pin;
+            match action {
+                UpdateTrustCmd::Pin { public_key } => {
+                    let key = key_pin::parse(&public_key)?;
+                    let created = key_pin::pin(&state_dir, &key)?;
+                    println!(
+                        "{} release public key {}.",
+                        if created { "Pinned" } else { "Already pinned" },
+                        hex::encode(key)
+                    );
+                }
+                UpdateTrustCmd::Status => match key_pin::load(&state_dir)? {
+                    Some(key) => println!("Pinned release public key {}.", hex::encode(key)),
+                    None => println!("Release public key is unpinned."),
+                },
+            }
             Ok(())
         }
         Command::TerminalCheck {

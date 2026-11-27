@@ -48,6 +48,8 @@ jobs:
         run: |
           $env:FLYW8T_TEST_AGENT_BINARY = (Resolve-Path './target/x86_64-pc-windows-msvc/debug/flyw8t-agent.exe').Path
           cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-server --test windows_installer -- --ignored
+      - name: Check the Windows release key pin on NTFS
+        run: cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-agent --lib update_verify::key_pin::tests::first_pin_wins_and_insecure_or_damaged_files_fail_closed -- --exact --ignored
       - name: Diagnose cold Windows PowerShell startup (observations only)
         if: always()
         run: ./scripts/diagnose-powershell-startup.ps1
