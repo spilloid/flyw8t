@@ -41,6 +41,7 @@ fn pipe() -> Result<(OwnedHandle, OwnedHandle)> {
 
 type CreateConsole = unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> i32;
 type CloseConsole = unsafe extern "system" fn(HPCON);
+type KernelSymbol = unsafe extern "system" fn() -> isize;
 
 fn load_pseudoconsole_api() -> Result<(CreateConsole, CloseConsole)> {
     let module: Vec<u16> = "kernel32.dll".encode_utf16().chain([0]).collect();
@@ -59,8 +60,8 @@ fn load_pseudoconsole_api() -> Result<(CreateConsole, CloseConsole)> {
     // SAFETY: the symbols above are looked up by their exact names and use these Win32 signatures.
     Ok(unsafe {
         (
-            std::mem::transmute::<_, CreateConsole>(create),
-            std::mem::transmute::<_, CloseConsole>(close),
+            std::mem::transmute::<KernelSymbol, CreateConsole>(create),
+            std::mem::transmute::<KernelSymbol, CloseConsole>(close),
         )
     })
 }
