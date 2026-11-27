@@ -753,6 +753,9 @@ async fn device_activity_records_only_a_connected_linked_screen_share() {
     assert_eq!(activity.status, StatusCode::OK);
     assert_eq!(activity.body.matches(tech_email).count(), 2);
     assert!(activity.body.contains("Linked screen share connected"));
+    assert!(activity
+        .body
+        .contains("Windows Technician session evidence is still in development"));
     assert!(activity.body.contains("Linked screen share ended"));
     assert_eq!(
         activity

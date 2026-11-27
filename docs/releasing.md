@@ -56,7 +56,7 @@ matching site and for another site before removing the trial service. The
 rehearsal uses disposable Windows runners.
 
 1. Sign in with a clean Windows user account. Place the signed technician executable in the directory where it will stay. Launch it and select **Browser links → Enable for this Windows user**. Close the app.
-2. Sign in to the candidate web console and open a Windows device. Under **Connect**, try **Remote control** and **Sign in with RDP**. Expand **Technician and connection options** to try **Help a Windows session through Technician** and **Direct SSH**. Accept the browser's external-app prompt if shown. For each link, confirm that the app shows the intended computer and mode and waits for the technician to continue. Close the app between checks.
+2. Sign in to the candidate web console and open a Windows device. Under **Connect**, try **Open physical desktop** and **Sign in with RDP**. Expand **Technician and connection options** to try **Help a Windows session through Technician** and **Open direct SSH**. Accept the browser's external-app prompt if shown. For each link, confirm that the app shows the intended computer and mode and waits for the technician to continue. Close the app between checks.
 3. Remove the registration from **Browser links**, close the app, and repeat the browser launch. Confirm that Windows no longer opens that copy of the technician app. Record the candidate SHA, Windows and browser versions, and result.
 
 The executable also accepts `--register-protocol` and `--unregister-protocol` for per-user setup from a deployment script.

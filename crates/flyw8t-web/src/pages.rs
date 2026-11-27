@@ -1159,17 +1159,17 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
             <h2 id="desktop-launch-title">"Connect"</h2>
             <div class="device-session-actions">
                 <div>
-                    <a class="device-button" href=help aria-describedby="desktop-help-hint">"Help someone"</a>
-                    <p class="muted small" id="desktop-help-hint">"Ask the person to share their screen."</p>
+                    <a class="device-button" href=help aria-describedby="desktop-help-hint">"Start a screen share"</a>
+                    <p class="muted small" id="desktop-help-hint">"Send an invitation. The person chooses what to share and grants control separately."</p>
                 </div>
                 {windows.then(|| view! {
                     <div>
-                        <a class="device-button" href=format!("flyw8t://open/console{query}") aria-describedby="desktop-control-hint">"Remote control"</a>
-                        <p class="muted small" id="desktop-control-hint">"Open the signed-in physical desktop when Windows policy allows it."</p>
+                        <a class="device-button" href=format!("flyw8t://open/console{query}") aria-describedby="desktop-control-hint">"Open physical desktop"</a>
+                        <p class="muted small" id="desktop-control-hint">"Open Technician to connect to the signed-in physical desktop when Windows policy allows it."</p>
                     </div>
                     <div>
                         <a class="device-button" href=format!("flyw8t://open/sign-in{query}") aria-describedby="desktop-rdp-hint">"Sign in with RDP"</a>
-                        <p class="muted small" id="desktop-rdp-hint">"Start or resume a Windows session. The physical screen may lock."</p>
+                        <p class="muted small" id="desktop-rdp-hint">"Open Technician to start or resume a Windows session. The physical screen may lock."</p>
                     </div>
                 })}
             </div>
@@ -1178,10 +1178,10 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
                     <summary>"Technician and connection options"</summary>
                     <p class="muted small">{target}" Direct connections require a LAN or VPN route."</p>
                     <p><a href=format!("flyw8t://open/assist{query}")>"Help a Windows session through Technician"</a></p>
-                    <p><a href=format!("flyw8t://open/terminal{query}")>"Direct SSH"</a>" · Requires a separate SSH service on the device."</p>
+                    <p><a href=format!("flyw8t://open/terminal{query}")>"Open direct SSH"</a>" · Opens Technician and requires a separate SSH service on the device."</p>
                     {(ctx.can_control && matches!(d.row.connection, Connection::Connected { .. })).then(|| view! {
                         <form method="post" action=format!("/devices/{}/background-terminal/check", d.row.id)>
-                            <p class="muted small" id="background-terminal-hint">"Reports the device’s local opt-in setting for background PowerShell."</p>
+                            <p class="muted small" id="background-terminal-hint">"Reports the device’s local opt-in for the planned background PowerShell terminal."</p>
                             <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                             <button type="submit" aria-describedby="background-terminal-hint">"Check background terminal policy"</button>
                         </form>
@@ -1531,6 +1531,7 @@ pub fn device_activity_page(
     let body = view! {
         <p class="crumbs"><a href="/devices">"Devices"</a>" / "<a href=device_href.clone()>{device.name().to_owned()}</a></p>
         <h1>"Device activity"</h1>
+        <p class="muted">"Linked screen shares record actual connections and end times here. Windows Technician session evidence is still in development."</p>
         <section class="card">
             {content}
             {older.map(|cursor| view! {
