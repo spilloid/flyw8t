@@ -293,6 +293,9 @@ pub async fn device_activity(
                     CASE a.action
                          WHEN 'device.agent_update_policy' THEN a.action || '.' || (a.detail->>'to_opted_out')
                          WHEN 'device.agent_update_preflight' THEN a.action || '.' || (a.detail->>'policy')
+                         WHEN 'device.background_terminal_policy.result' THEN
+                             CASE WHEN a.detail->>'status' IN ('enabled', 'disabled') AND a.outcome = 'success'
+                                  THEN a.action || '.' || (a.detail->>'status') ELSE a.action END
                          ELSE a.action END AS action,
                     a.outcome, NULL::uuid AS job, NULL::text AS job_action,
                     CASE WHEN a.action IN ('device.support.connected', 'device.support.ended')
@@ -377,6 +380,12 @@ pub async fn device_activity(
                     "device.physical_console.result" => "Physical console check recorded",
                     "device.background_terminal_policy.requested" => {
                         "Background terminal policy check requested"
+                    }
+                    "device.background_terminal_policy.result.enabled" => {
+                        "Agent reported background terminal policy enabled"
+                    }
+                    "device.background_terminal_policy.result.disabled" => {
+                        "Agent reported background terminal policy disabled"
                     }
                     "device.background_terminal_policy.result" => {
                         "Background terminal policy check recorded"

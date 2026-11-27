@@ -4,6 +4,7 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## 0.3.0 (in development)
 
+- Device Activity distinguishes enabled and disabled background terminal policy observations.
 - Require an exact publisher match when verifying signed Windows release executables.
 - Show the background terminal policy check directly in a Windows device's Connect section, with an explanation when it is unavailable.
 - Return a device-scoped browser link to the connection options with the `device_terminal_handoff` MCP tool.

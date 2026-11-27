@@ -428,3 +428,15 @@ Independent review found that the release verification script accepted a publish
 - Verify before trusting, in both directions. A green suite is evidence about the tests: prove a new check can fail.
 - A dispatcher's report is a claim, not proof: check exit codes and output files.
 - Look at the screenshots. (Row 8 is why.)
+
+## Background terminal policy observations in Activity, 2026-11-27
+
+Astra reviewed the browser policy check, confirmation and scoped Device Activity query. Both enabled and disabled observations have successful audit outcomes, and the previous Activity label discarded their recorded policy status. Activity now shows the observed state for these two successful results and preserves the generic label for older records without a recognized status. The PostgreSQL protocol integration test on 10t7 checks both labels and the absence of a confirmation button for a disabled observation. Live Windows terminal acceptance remains open.
+
+## Update policy changes in flight, 2026-11-27
+
+Update preflight takes shared row locks on the organization, device, and enrollment credential while observing eligibility and appending the audit event. On 10t7, the WebSocket regression reproduced an in-flight device opt-out on an isolated PostgreSQL database. The regression failed without the row locks and passed after restoring them. All 16 protocol integration tests passed together.
+
+## Intune LocalSystem fixture, 2026-11-27
+
+The Windows rehearsal runs installation, the packaged detector, uninstall, and retries as LocalSystem. The capture test checks the wrapper's child exit code, streams, identity and working directory. A clean Windows runner covers the complete package and identity checks. The managed Intune pilot remains separate.

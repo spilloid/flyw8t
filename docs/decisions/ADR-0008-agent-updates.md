@@ -51,7 +51,7 @@ After the enrolled server supports update preflight, add `--fleet-policy` to che
 flyw8t-agent update-check --fleet-policy --manifest flyw8t-agent-windows-x64-update.json --artifact flyw8t-agent-v0.3.1-x86_64-pc-windows-msvc.exe
 ```
 
-Audit records the effective policy and the candidate version, size and digest reported by the agent. Its result is a point-in-time preflight. Automated rollout still needs an approved release, delivery, policy rechecks, service replacement, and rollback after a failed reconnect.
+Audit records the effective policy and the candidate version, size and digest reported by the agent. The preflight and audit entry serialize with changes to the organization policy, device opt-out, and enrollment credential. The result captures the policy at that point in time. Automated rollout still needs an approved release, delivery, policy rechecks, service replacement, and rollback after a failed reconnect.
 
 For rollback readiness, run the installed agent's `update-check` with `--rollback-manifest` and `--rollback-artifact` together. The saved release key must verify both pairs. The fallback must match the running version exactly and pass the same executable, digest, publisher and timestamp checks as the upgrade candidate. Supply the original signed fallback executable and its own manifest. The command reports verification of the local files at the time of the check.
 
