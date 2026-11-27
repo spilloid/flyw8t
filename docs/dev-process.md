@@ -415,8 +415,6 @@ Independent review found that the release verification script accepted a publish
 
 ## Substitutions and gaps
 
-The 2026-11-27 Intune fixture change runs the packaged detector and uninstall as LocalSystem through a scheduled capture wrapper. A harmless Windows-only probe checks the wrapper's exit code, streams, identity and working directory. The wrapper and installer test require a clean elevated Windows runner; neither has been run for this change, and independent review remains open.
-
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
 - Rows 1 to 5 and 7 to 8 had no second-model implementer; the orchestrator wrote the code directly. Review independence came from tests, mutation checks, proptest, and row 6.
 - **The attended-support code (`support.rs`, `support.js`) has had no cross-family review.** It must have one before anyone relies on it.
@@ -433,4 +431,12 @@ The 2026-11-27 Intune fixture change runs the packaged detector and uninstall as
 
 ## Background terminal policy observations in Activity, 2026-11-27
 
-Astra reviewed the browser policy check, confirmation and scoped Device Activity query. Both enabled and disabled observations have successful audit outcomes, and the previous Activity label discarded their recorded policy status. Activity now shows the observed state for these two successful results and preserves the generic label for older records without a recognized status. The protocol integration test checks both labels and the absence of a confirmation button for a disabled observation. Source and formatting were checked locally. The PostgreSQL integration run and live Windows terminal acceptance are separate.
+Astra reviewed the browser policy check, confirmation and scoped Device Activity query. Both enabled and disabled observations have successful audit outcomes, and the previous Activity label discarded their recorded policy status. Activity now shows the observed state for these two successful results and preserves the generic label for older records without a recognized status. The PostgreSQL protocol integration test on 10t7 checks both labels and the absence of a confirmation button for a disabled observation. Live Windows terminal acceptance remains open.
+
+## Update policy changes in flight, 2026-11-27
+
+Update preflight takes shared row locks on the organization, device, and enrollment credential while observing eligibility and appending the audit event. On 10t7, the WebSocket regression reproduced an in-flight device opt-out on an isolated PostgreSQL database. The regression failed without the row locks and passed after restoring them. All 16 protocol integration tests passed together.
+
+## Intune LocalSystem fixture, 2026-11-27
+
+The Windows rehearsal runs installation, the packaged detector, uninstall, and retries as LocalSystem. The capture test checks the wrapper's child exit code, streams, identity and working directory. A clean Windows runner covers the complete package and identity checks. The managed Intune pilot remains separate.

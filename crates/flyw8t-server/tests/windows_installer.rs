@@ -224,9 +224,10 @@ async fn assert_intune_detection(detector: &Path, expect_detected: bool) {
 async fn system_capture_preserves_exit_output_and_working_directory() {
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("probe.ps1");
+    std::fs::write(temp.path().join("marker.txt"), "probe directory").unwrap();
     std::fs::write(
         &script,
-        "[Console]::Out.Write((Get-Location).Path); [Console]::Error.Write('probe error'); exit 1",
+        "[Console]::Out.Write((Get-Content -Raw -ErrorAction Stop -LiteralPath 'marker.txt')); [Console]::Error.Write('probe error'); exit 1",
     )
     .unwrap();
     let args = format!(
@@ -235,10 +236,7 @@ async fn system_capture_preserves_exit_output_and_working_directory() {
     );
     let output = capture_as_system("powershell.exe", &args, temp.path(), "SYSTEM probe").await;
     assert_eq!(output.code, 1);
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        temp.path().to_str().unwrap()
-    );
+    assert_eq!(output.stdout, b"probe directory");
     assert_eq!(output.stderr, b"probe error");
 }
 
@@ -385,8 +383,19 @@ async fn intune_package_enrolls_quietly_and_preserves_its_identity_on_retry() {
     assert_success(&terminal, "LocalSystem PowerShell check");
     verify_local_terminal_policy(&server, &admin, &installed, device).await;
 
-    let repeated = setup(&package, "/quiet").await;
-    assert_success(&repeated, "quiet retry");
+    let repeated = capture_as_system(
+        package.to_str().unwrap(),
+        "/quiet",
+        temp.path(),
+        "LocalSystem quiet retry",
+    )
+    .await;
+    assert_eq!(
+        repeated.code,
+        0,
+        "quiet retry stderr: {}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
     assert!(String::from_utf8_lossy(&repeated.stdout).contains("already installed and running"));
 
     let stop = powershell("Stop-Service -Name 'flyw8t-agent' -ErrorAction Stop");
@@ -398,7 +407,12 @@ async fn intune_package_enrolls_quietly_and_preserves_its_identity_on_retry() {
         || async { server.state.registry.connected_since(device).is_none() },
     )
     .await;
-    let resumed = setup(&package, "--quiet").await;
+    let resumed = run_as_system(
+        &package,
+        "--quiet",
+        "LocalSystem quiet retry with stopped service",
+    )
+    .await;
     assert_success(&resumed, "quiet retry with a stopped service");
     wait_for(
         "restarted service to reconnect under the same device",
@@ -439,7 +453,12 @@ async fn intune_package_enrolls_quietly_and_preserves_its_identity_on_retry() {
         std::fs::read(saved.key_path()).unwrap() == key,
         "uninstall changed the device key"
     );
-    let resumed = setup(&package, "--quiet").await;
+    let resumed = run_as_system(
+        &package,
+        "--quiet",
+        "LocalSystem quiet retry after service removal",
+    )
+    .await;
     assert_success(&resumed, "quiet retry after service removal");
     wait_for(
         "reinstalled service to reconnect under the same device",
