@@ -1176,8 +1176,8 @@ fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoVi
             {windows.then(|| view! {
                 <div class="device-session-actions">
                     <div>
-                        <h3>"Background terminal"</h3>
-                        <p class="muted small" id="background-terminal-hint">"Check the device’s local opt-in for the planned background PowerShell terminal. This check does not open a terminal."</p>
+                        <h3>"Background terminal policy"</h3>
+                        <p class="muted small" id="background-terminal-hint">"Shows whether the device has opted in to background PowerShell."</p>
                         {if !ctx.can_control {
                             view! { <p class="muted small">"Control permission is required to check background terminal policy."</p> }.into_any()
                         } else if !matches!(d.row.connection, Connection::Connected { .. }) {

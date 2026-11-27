@@ -401,9 +401,13 @@ The MCP adapter checks an explicit device through the existing scoped read API a
 
 All 15 adapter tests, the PostgreSQL device-page scope test, and adapter Clippy passed on 10t7. Removing the returned-device ID check made the handoff regression fail with a mismatched device. The restored test passed. The live session, five-minute reconnect, and lifecycle status are tracked in the background terminal checklist.
 
-## Substitutions and gaps
+The browser handoff puts the policy check directly in Connect and explains offline and permission restrictions. Independent review checked device scope and the authenticated POST, including CSRF protection. On 10t7, both PostgreSQL policy tests and the device role and organization scope test passed.
 
-The 2026-11-27 browser terminal handoff presentation change moves the policy check into the visible Connect section and explains offline and permission restrictions. Implementation is awaiting independent review. The Mac worktree has no Cargo, test database, or Chrome; formatting, compilation, PostgreSQL tests, mutation checks, and visual capture remain open.
+## Windows release publisher verification, 2026-11-27
+
+Independent review found that the release verification script accepted a publisher prefix. On Kubert, we verified the published 0.2.0 binary against its release checksum. The old verifier accepted the prefix. The new verifier accepted the exact configured publisher, the complete subject, and the built-in publisher default. It rejected the prefix, wildcard, different case, and empty setting.
+
+## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
 - Rows 1 to 5 and 7 to 8 had no second-model implementer; the orchestrator wrote the code directly. Review independence came from tests, mutation checks, proptest, and row 6.

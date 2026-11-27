@@ -297,13 +297,6 @@ async fn physical_console_check_uses_the_enrolled_connection_and_audits_the_repl
 
     let legacy = RawAgent::authenticate(&server, &agent).await;
     wait_connected(&server, device).await;
-    let page = admin.get(&server, &format!("/devices/{device}")).await;
-    let section = page.body.find("id=\"device-connection-options\"").unwrap();
-    let button = page.body.find("Check background terminal policy</button>").unwrap();
-    let details = page.body.find("class=\"desktop-link-help\"").unwrap();
-    assert!(section < button && button < details);
-    assert!(page.body.contains("This check does not open a terminal."));
-    assert!(page.body.contains(&format!("action=\"{path}\"")));
     let legacy_connection = server.state.registry.current_conn(device).unwrap();
     let response = admin.post(&server, &path, &[]).await;
     assert_eq!(response.status, StatusCode::OK);
@@ -445,6 +438,16 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
     })
     .await;
     drop(legacy);
+
+    let page = admin.get(&server, &format!("/devices/{device}")).await;
+    let section = page.body.find("id=\"device-connection-options\"").unwrap();
+    let button = page
+        .body
+        .find("Check background terminal policy</button>")
+        .unwrap();
+    let details = page.body.find("class=\"desktop-link-help\"").unwrap();
+    assert!(section < button && button < details);
+    assert!(page.body.contains(&format!("action=\"{path}\"")));
 
     let (request, served) = tokio::join!(
         async {

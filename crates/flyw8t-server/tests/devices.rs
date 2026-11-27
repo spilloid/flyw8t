@@ -200,8 +200,12 @@ async fn device_changes_respect_organization_scope_and_role() {
     assert_eq!(allowed.status, StatusCode::OK);
     assert!(allowed.body.contains("flyw8t://open/assist?host=WS-01"));
     assert!(allowed.body.contains("id=\"device-connection-options\""));
-    assert!(allowed.body.contains("The device is offline. The agent must be connected"));
-    assert!(!allowed.body.contains("Check background terminal policy</button>"));
+    assert!(allowed
+        .body
+        .contains("The device is offline. The agent must be connected"));
+    assert!(!allowed
+        .body
+        .contains("Check background terminal policy</button>"));
     for text in [
         "Start a screen share",
         "grants control separately",
