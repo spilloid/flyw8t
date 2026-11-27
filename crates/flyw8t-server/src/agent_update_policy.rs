@@ -24,12 +24,14 @@ pub(crate) async fn observe(
     client_ip: &str,
 ) -> sqlx::Result<Option<AgentUpdatePolicy>> {
     let mut tx = db.begin().await?;
+    // Serialize the policy observation and its audit entry with fleet policy and credential changes.
     let observed: Option<(bool, bool, String)> = sqlx::query_as(
         "SELECT o.automatic_agent_updates, d.agent_updates_opt_out, d.hostname
            FROM devices d JOIN organizations o ON o.id = d.organization_id
            JOIN device_credentials c ON c.device_id = d.id
           WHERE d.id = $1 AND o.id = $2 AND c.public_key = $3
-            AND d.retired_at IS NULL AND c.revoked_at IS NULL",
+            AND d.retired_at IS NULL AND c.revoked_at IS NULL
+          FOR SHARE OF d, o, c",
     )
     .bind(device)
     .bind(org)

@@ -122,17 +122,38 @@ async fn update_preflight_observes_current_fleet_policy_without_replacing_the_li
             .unwrap(),
         AgentUpdatePolicy::Enabled,
     );
+    let mut opt_out = server.state.db.begin().await.unwrap();
     sqlx::query("UPDATE devices SET agent_updates_opt_out = true WHERE id = $1")
         .bind(agent.device_id)
-        .execute(&server.state.db)
+        .execute(&mut *opt_out)
         .await
         .unwrap();
-    assert_eq!(
-        observe_update_policy(&cfg, candidate.clone())
-            .await
-            .unwrap(),
-        AgentUpdatePolicy::DeviceOptedOut,
-    );
+    let writer: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *opt_out)
+        .await
+        .unwrap();
+    let (observed, ()) = tokio::join!(observe_update_policy(&cfg, candidate.clone()), async {
+        wait_for(
+            "update preflight waiting for the device opt-out",
+            Duration::from_secs(5),
+            || async {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM pg_stat_activity
+                         WHERE datname = current_database()
+                           AND $1 = ANY(pg_blocking_pids(pid))
+                    )",
+                )
+                .bind(writer)
+                .fetch_one(&server.state.db)
+                .await
+                .unwrap()
+            },
+        )
+        .await;
+        opt_out.commit().await.unwrap();
+    });
+    assert_eq!(observed.unwrap(), AgentUpdatePolicy::DeviceOptedOut);
     sqlx::query("UPDATE organizations SET automatic_agent_updates = false WHERE id = $1")
         .bind(org)
         .execute(&server.state.db)
