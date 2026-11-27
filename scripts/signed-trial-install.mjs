@@ -197,6 +197,16 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
     await waitFor(() => evaluate('!!document.querySelector(' + JSON.stringify(detectorButton) + ')'),
       'Intune detection download is missing');
     const detectorTemplate = await fs.readFile('crates/flyw8t-server/src/intune-detection.ps1', 'utf8');
+    function assertDetection(selectedSite, expectedExit) {
+      const detectorPath = path.join(dir, selectedSite, 'Detect-Flyw8t.ps1');
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', detectorPath], {
+        cwd: dir, encoding: 'utf8', timeout: 30000, windowsHide: true
+      });
+      assert.ok(!result.error && result.status === expectedExit,
+        'Intune detector did not return the expected exit code for the selected site');
+      assert.equal(result.stdout.trim(), expectedExit === 0 ? 'Flyw8t enrollment detected' : '');
+      assert.equal(result.stderr.trim(), '');
+    }
     for (const [selectedSite, expectedExit] of [[site, 0], [otherSite, 1]]) {
       const detectorDir = path.join(dir, selectedSite);
       await fs.mkdir(detectorDir);
@@ -218,15 +228,37 @@ export async function exerciseSignedTrial({ origin, binaries, shell, call, evalu
         .replaceAll('__VERSION__', "'" + version + "'"));
       assert.ok(lines(await fs.readFile(detectorPath, 'utf8')) === expectedDetector,
         'Downloaded detector differs from the reviewed site-specific template');
-      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', detectorPath], {
-        cwd: dir, encoding: 'utf8', timeout: 30000, windowsHide: true
-      });
-      assert.ok(!result.error && result.status === expectedExit,
-        'Intune detector did not return the expected exit code for the selected site');
-      assert.equal(result.stdout.trim(), expectedExit === 0 ? 'Flyw8t enrollment detected' : '');
-      assert.equal(result.stderr.trim(), '');
+      assertDetection(selectedSite, expectedExit);
     }
     console.log('Verified the generated Intune detector against the installed signed agent for the matching and wrong site.');
+
+    const state = powershell('Locate the trial agent state directory',
+      "Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'flyw8t\\agent'");
+    const configPath = path.join(state, 'agent.json');
+    const keyPath = path.join(state, 'device.key');
+    powershell('Stop the enrolled trial service', [
+      'Stop-Service flyw8t-agent',
+      "(Get-Service flyw8t-agent).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))"
+    ].join('\n'));
+    const legacy = JSON.parse(await fs.readFile(configPath, 'utf8'));
+    assert.equal(legacy.device_id, id);
+    assert.deepEqual(legacy.enrollment_scope, { organization_id: organization, site_id: site });
+    const keyHash = createHash('sha256').update(await fs.readFile(keyPath)).digest('hex');
+    delete legacy.enrollment_scope;
+    await fs.writeFile(configPath, JSON.stringify(legacy));
+    assertDetection(site, 1);
+    powershell('Restart the enrolled trial service', 'Start-Service flyw8t-agent');
+    await waitFor(async () => {
+      const current = JSON.parse(await fs.readFile(configPath, 'utf8'));
+      return current.enrollment_scope?.organization_id === organization && current.enrollment_scope?.site_id === site;
+    }, 'The signed trial agent did not recover the original enrollment at check-in');
+    const recovered = JSON.parse(await fs.readFile(configPath, 'utf8'));
+    assert.equal(recovered.device_id, id);
+    assert.ok(createHash('sha256').update(await fs.readFile(keyPath)).digest('hex') === keyHash,
+      'Scope recovery changed the enrolled device key');
+    assertDetection(site, 0);
+    assertDetection(otherSite, 1);
+    console.log('Verified signed native detection after recovery from the older configuration format.');
   } finally {
     // The preflight required an empty service, program and state location. Check the registered
     // executable and its digest again before uninstalling the service created by this trial.

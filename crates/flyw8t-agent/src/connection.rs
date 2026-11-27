@@ -16,7 +16,7 @@ use flyw8t_protocol::messages::{
     AgentMsg, DeviceFacts, ExecOutcome, Finished, JobPhase, JobReport, NotAccepted, RefusalCode,
     ServerMsg,
 };
-use flyw8t_protocol::messages::{BackgroundTerminalPolicy, ScriptOffer};
+use flyw8t_protocol::messages::{BackgroundTerminalPolicy, EnrollmentScope, ScriptOffer};
 use flyw8t_protocol::trust::{key_id, Hash, KeyKind};
 use flyw8t_protocol::{auth, Action, PhysicalConsoleState, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
 use futures_util::{stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
@@ -127,6 +127,31 @@ impl Agent {
         &self.trust
     }
 
+    fn recover_enrollment_scope(&self, scope: EnrollmentScope) -> Result<()> {
+        if self.cfg.enrollment_scope.is_some() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.trust
+                .lock()
+                .as_ref()
+                .is_none_or(|pinned| pinned.organization_id == scope.organization_id),
+            "the original enrollment scope conflicts with the locally pinned organization"
+        );
+        // The agent holds the state directory lock. Read back the file so reconnects leave a
+        // scope already recovered by this process untouched.
+        let mut cfg = AgentConfig::load(&self.cfg.state_dir)?;
+        anyhow::ensure!(
+            cfg.device_id == Some(self.device_id) && cfg.server_url == self.cfg.server_url,
+            "agent configuration changed since the service started"
+        );
+        if cfg.enrollment_scope.is_none() {
+            cfg.enrollment_scope = Some(scope);
+            cfg.save()?;
+        }
+        Ok(())
+    }
+
     /// Stay connected until `shutdown`, reconnecting with capped, jittered backoff.
     pub async fn run(self: &Arc<Self>, shutdown: CancellationToken) -> Result<(), Fatal> {
         let mut backoff = Duration::from_secs(1);
@@ -184,16 +209,35 @@ impl Agent {
             },
         )
         .await?;
-        let heartbeat_secs = match recv(&mut ws, HANDSHAKE_TIMEOUT).await? {
-            ServerMsg::Welcome { heartbeat_secs, .. } => heartbeat_secs.clamp(5, 300),
-            ServerMsg::Refused { code, message } => return Err(refusal(code, message)),
-            other => return Err(anyhow::anyhow!("unexpected handshake reply: {other:?}").into()),
-        };
+        let (heartbeat_secs, organization_id, enrollment_scope) =
+            match recv(&mut ws, HANDSHAKE_TIMEOUT).await? {
+                ServerMsg::Welcome {
+                    device_id,
+                    heartbeat_secs,
+                    organization_id,
+                    enrollment_scope,
+                } if device_id == self.device_id => (
+                    heartbeat_secs.clamp(5, 300),
+                    organization_id,
+                    enrollment_scope,
+                ),
+                ServerMsg::Refused { code, message } => return Err(refusal(code, message)),
+                other => {
+                    return Err(anyhow::anyhow!("unexpected handshake reply: {other:?}").into())
+                }
+            };
         tracing::info!(device_id = %self.device_id, "connected");
 
         // Exclusive use of the event stream for this session. Anything buffered while
         // disconnected is stale; the journal snapshot below supersedes it.
         let mut events = self.events_rx.lock().await;
+        if let Some(scope) = enrollment_scope {
+            if Some(scope.organization_id) != organization_id {
+                tracing::warn!("the server returned inconsistent enrollment organization IDs");
+            } else if let Err(error) = self.recover_enrollment_scope(scope) {
+                tracing::warn!(%error, "could not record the original enrollment scope");
+            }
+        }
         while events.try_recv().is_ok() {}
 
         // A pinned agent asks for any trust-list versions after the one it holds.

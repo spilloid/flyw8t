@@ -467,6 +467,137 @@ async fn a_windows_installer_only_enrolls_into_its_selected_site() {
     server.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn a_legacy_agent_recovers_its_original_enrollment_scope() {
+    use flyw8t_agent::AgentConfig;
+    use flyw8t_protocol::messages::EnrollmentScope;
+    use std::time::Duration;
+
+    let server = start_fresh().await;
+    let admin = server.admin_sudo().await;
+    let org = admin.create_org(&server, "Contoso").await;
+    let other_org = admin.create_org(&server, "Fabrikam").await;
+    let (site, moved_to): (Uuid, Uuid) = sqlx::query_as(
+        "WITH original AS (INSERT INTO sites (organization_id, name) VALUES ($1, 'Original') RETURNING id),
+              reassigned AS (INSERT INTO sites (organization_id, name) VALUES ($1, 'Reassigned') RETURNING id)
+         SELECT original.id, reassigned.id FROM original, reassigned",
+    )
+    .bind(org)
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    let foreign_token = admin.enrollment_token(&server, other_org, "60", "1").await;
+    let foreign_device = TestAgent::enroll(&server.url(), &foreign_token)
+        .await
+        .unwrap();
+    let foreign_enrolled_via: Uuid =
+        sqlx::query_scalar("SELECT enrolled_via FROM devices WHERE id = $1")
+            .bind(foreign_device.device_id)
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+
+    for (original_site, has_foreign_token, expected_scope) in [
+        (
+            Some(site),
+            false,
+            Some(EnrollmentScope {
+                organization_id: org,
+                site_id: Some(site),
+            }),
+        ),
+        (
+            None,
+            false,
+            Some(EnrollmentScope {
+                organization_id: org,
+                site_id: None,
+            }),
+        ),
+        (Some(site), true, None),
+    ] {
+        let reply = admin
+            .post(
+                &server,
+                &format!("/organizations/{org}/enrollment-tokens"),
+                &[
+                    ("ttl_minutes", "60"),
+                    ("max_uses", "1"),
+                    (
+                        "site",
+                        &original_site.map_or_else(String::new, |id| id.to_string()),
+                    ),
+                ],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let token = extract(&reply.body, r"(fw8e_[A-Za-z0-9_-]{43})").unwrap();
+        let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
+        let device_id = agent.device_id;
+        let mut cfg = AgentConfig::load(agent.dir.path()).unwrap();
+        let key = std::fs::read(cfg.key_path()).unwrap();
+
+        // Versions before Intune detection stored the identity without the original scope.
+        cfg.enrollment_scope = None;
+        cfg.save().unwrap();
+        let token_id: Uuid = sqlx::query_scalar(
+            "UPDATE devices SET site_id = $2 WHERE id = $1 RETURNING enrolled_via",
+        )
+        .bind(device_id)
+        .bind(moved_to)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+        // Revocation stops new enrollments with the token, but preserves its historical scope.
+        sqlx::query("UPDATE enrollment_tokens SET revoked_at = now() WHERE id = $1")
+            .bind(token_id)
+            .execute(&server.state.db)
+            .await
+            .unwrap();
+        if has_foreign_token {
+            sqlx::query("UPDATE devices SET enrolled_via = $2 WHERE id = $1")
+                .bind(device_id)
+                .bind(foreign_enrolled_via)
+                .execute(&server.state.db)
+                .await
+                .unwrap();
+        }
+
+        let (stop, task) = agent.connect(&server.url());
+        wait_for(
+            "inventory after legacy authentication",
+            Duration::from_secs(15),
+            || async {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT FROM inventory_snapshots WHERE device_id = $1)",
+                )
+                .bind(device_id)
+                .fetch_one(&server.state.db)
+                .await
+                .unwrap()
+            },
+        )
+        .await;
+        let recovered = AgentConfig::load(agent.dir.path()).unwrap();
+        assert_eq!(recovered.enrollment_scope, expected_scope);
+        assert_eq!(recovered.device_id, Some(device_id));
+        assert_eq!(std::fs::read(recovered.key_path()).unwrap(), key);
+        let (current_site, uses): (Uuid, i32) = sqlx::query_as(
+            "SELECT d.site_id, t.uses FROM devices d JOIN enrollment_tokens t ON t.id = $2 WHERE d.id = $1",
+        )
+        .bind(device_id)
+        .bind(token_id)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+        assert_eq!((current_site, uses), (moved_to, 1));
+        stop.cancel();
+        task.await.unwrap().unwrap();
+    }
+    server.stop().await;
+}
+
 fn unpack_intune_installer(bundle: &[u8], expected_detector: &str) -> Vec<u8> {
     use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
     use base64::{engine::general_purpose::STANDARD, Engine};

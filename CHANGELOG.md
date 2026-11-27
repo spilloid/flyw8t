@@ -19,6 +19,7 @@ All notable changes to flyw8t. Dates are UTC.
 - Download an Intune detection script from Windows enrollment. It checks the service registration, signed agent version, and organization and site recorded at enrollment.
 
 - Report the organization and site recorded at enrollment through `flyw8t-agent status --json` for managed deployment checks.
+- Recover an older agent's original enrollment scope at authenticated check-in when the console retains its enrollment token record.
 
 - Verify an enrolled Windows device's local background-terminal policy from connection options. Device Activity records the technician who requested the check and the result.
 - Check an enrolled Windows agent's opt-in with `flyw8t-agent terminal-policy status`. A console policy check denied after an access change records the denial against the original request.

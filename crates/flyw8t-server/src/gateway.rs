@@ -228,6 +228,7 @@ async fn handle(
                     hostname,
                     key,
                     organization_id,
+                    enrollment_scope,
                 } => {
                     connected(
                         state,
@@ -235,6 +236,7 @@ async fn handle(
                         stream,
                         device_id,
                         organization_id,
+                        enrollment_scope,
                         hostname,
                         key,
                         agent_version,
@@ -399,9 +401,20 @@ enum AuthResult {
         hostname: String,
         key: Vec<u8>,
         organization_id: Uuid,
+        enrollment_scope: Option<EnrollmentScope>,
     },
     Revoked,
     Failed,
+}
+
+#[derive(sqlx::FromRow)]
+struct DeviceCredential {
+    public_key: Vec<u8>,
+    active: bool,
+    hostname: String,
+    organization_id: Uuid,
+    enrollment_org: Option<Uuid>,
+    enrollment_site: Option<Uuid>,
 }
 
 async fn authenticate(
@@ -413,9 +426,12 @@ async fn authenticate(
     let Ok(signature) = base64::engine::general_purpose::STANDARD.decode(signature_b64) else {
         return Ok(AuthResult::Failed);
     };
-    let creds: Vec<(Vec<u8>, bool, String, Uuid)> = sqlx::query_as(
-        "SELECT c.public_key, c.revoked_at IS NULL AND d.retired_at IS NULL, d.hostname, d.organization_id
+    // A device can move sites. Only the original enrollment token identifies its enrollment scope.
+    let creds = sqlx::query_as::<_, DeviceCredential>(
+        "SELECT c.public_key, (c.revoked_at IS NULL AND d.retired_at IS NULL) AS active, d.hostname,
+                d.organization_id, t.organization_id AS enrollment_org, t.site_id AS enrollment_site
            FROM device_credentials c JOIN devices d ON d.id = c.device_id
+           LEFT JOIN enrollment_tokens t ON t.id = d.enrolled_via AND t.organization_id = d.organization_id
           WHERE c.device_id = $1",
     )
     .bind(device_id)
@@ -424,16 +440,20 @@ async fn authenticate(
     let message = auth::auth_message(nonce, device_id);
     // Only a key that actually signed this nonce decides the answer, so "revoked" is never
     // disclosed to someone who cannot prove possession of that key.
-    for (key, active, hostname, organization_id) in creds {
-        if UnparsedPublicKey::new(&ED25519, &key)
+    for cred in creds {
+        if UnparsedPublicKey::new(&ED25519, &cred.public_key)
             .verify(&message, &signature)
             .is_ok()
         {
-            return Ok(if active {
+            return Ok(if cred.active {
                 AuthResult::Ok {
-                    hostname,
-                    key,
-                    organization_id,
+                    hostname: cred.hostname,
+                    key: cred.public_key,
+                    organization_id: cred.organization_id,
+                    enrollment_scope: cred.enrollment_org.map(|organization_id| EnrollmentScope {
+                        organization_id,
+                        site_id: cred.enrollment_site,
+                    }),
                 }
             } else {
                 AuthResult::Revoked
@@ -450,6 +470,7 @@ async fn connected(
     stream: &mut Stream,
     device_id: Uuid,
     organization_id: Uuid,
+    enrollment_scope: Option<EnrollmentScope>,
     hostname: String,
     key: Vec<u8>,
     agent_version: String,
@@ -472,6 +493,7 @@ async fn connected(
             device_id,
             heartbeat_secs: state.config.heartbeat_secs,
             organization_id: Some(organization_id),
+            enrollment_scope,
         },
     )
     .await?;

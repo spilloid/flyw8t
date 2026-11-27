@@ -24,6 +24,9 @@ pub enum ServerMsg {
         /// (ADR-0015 section 3). Absent from servers before ADR-0015.
         #[serde(default)]
         organization_id: Option<Uuid>,
+        /// The original token's scope, when the server still has the enrollment record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enrollment_scope: Option<EnrollmentScope>,
     },
     /// Enrollment succeeded. The agent persists `device_id` and its key, then reconnects
     /// and authenticates normally. The organization is decided by the token, never the agent.

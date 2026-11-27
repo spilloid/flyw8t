@@ -48,6 +48,8 @@ agent                                   server
 
 **Authentication signature.** Ed25519 over `"flyw8t/agent-auth/v1\0" ‖ nonce ‖ device_id (16 bytes)`. The nonce is fresh per connection, so a captured signature is useless on any other connection (`replayed_authentication_is_refused`). The server tries every credential on record for that device. A match on an active credential succeeds. A match on a revoked one returns `Refused{Revoked}`, which stops the agent permanently. No match returns `Refused{AuthFailed}`. "Revoked" is never disclosed to someone who cannot sign with that key.
 
+`Welcome` can carry `enrollment_scope` when the device's original enrollment token is still recorded in the same organization. This gives upgraded agents with older configurations the original organization and site without changing their device ID or key. The token's historical scope is available even after it expires, runs out of uses, or is revoked. Current site assignments can change independently. Agents keep any scope already recorded locally.
+
 **Enrollment signature.** Ed25519 by the *new* key over `"flyw8t/agent-enroll/v1\0" ‖ nonce ‖ public_key ‖ SHA-256(token)`. It proves possession of the private key being registered and binds it to one token without signing the secret itself. The server:
 
 1. hashes the token and locks its row;
