@@ -458,3 +458,9 @@ Device Activity shows the reported candidate version for update preflight decisi
 The 10t7 workspace suite, formatting, and Clippy passed. The desktop and phone Device Activity captures show the reported version beneath its authenticated connection event.
 
 The version history supports the signed rollout and rollback drill on AnchorDesk #10212. Service replacement and production-signed reconnect acceptance remain open.
+
+## Draft CI synchronization, 2026-11-27
+
+Draft CI run 46088376168 found two timing assumptions. On Linux, the protocol fixture counted Activity after Welcome but before the third connection audit committed. A PostgreSQL lock reproduced the old two-versus-three result on 10t7. The fixture now waits for the previous socket's supersession, which follows the new connection's audit insert. The fixed test passed with the exact count, order, and malformed-label assertions.
+
+On Windows, the first-use browser test failed while selecting the removal menu. The fixture could see the window before the application attached its menu. The harness now waits for the exact menu and command ID, then posts the command once and verifies the registry outcome. Kubert passed a synthetic native-window probe for both delayed menu attachment and an absent menu. Astra independently reviewed both test changes using the same model family. Track the draft CI result on AnchorDesk #10213.

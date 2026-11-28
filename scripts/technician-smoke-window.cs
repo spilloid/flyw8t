@@ -11,15 +11,25 @@ public static class TechnicianSmoke {
         GetMenuString(menu, position, text, text.Capacity, 0x400); // MF_BYPOSITION
         return text.ToString().Replace("&", "");
     }
-    public static bool ChooseBrowserMenu(IntPtr hwnd, bool enable) {
+    public static int BrowserMenuCommand(IntPtr hwnd, bool enable) {
         IntPtr menu = GetMenu(hwnd);
-        if (MenuLabel(menu, 0) != "Browser links") return false;
+        if (menu == IntPtr.Zero || MenuLabel(menu, 0) != "Browser links") return 0;
         IntPtr links = GetSubMenu(menu, 0);
+        if (links == IntPtr.Zero) return 0;
         int position = enable ? 0 : 1;
         string expected = enable ? "Enable for this Windows user" : "Remove for this Windows user";
-        if (MenuLabel(links, (uint)position) != expected) return false;
+        if (MenuLabel(links, (uint)position) != expected) return 0;
         int command = GetMenuItemID(links, position);
-        return command > 0 && PostMessage(hwnd, 0x111, (IntPtr)command, IntPtr.Zero);
+        return command > 0 ? command : 0;
+    }
+    public static string BrowserMenuState(IntPtr hwnd, bool enable) {
+        IntPtr menu = GetMenu(hwnd);
+        if (menu == IntPtr.Zero) return "no menu";
+        IntPtr links = GetSubMenu(menu, 0);
+        if (links == IntPtr.Zero) return "top-level=" + MenuLabel(menu, 0) + "; no submenu";
+        int position = enable ? 0 : 1;
+        return "top-level=" + MenuLabel(menu, 0) + "; entry=" + MenuLabel(links, (uint)position) +
+            "; command=" + GetMenuItemID(links, position);
     }
     private delegate bool Callback(IntPtr hwnd, IntPtr data);
     [DllImport("user32")] private static extern bool EnumWindows(Callback cb, IntPtr data);
