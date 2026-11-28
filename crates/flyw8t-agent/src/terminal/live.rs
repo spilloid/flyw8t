@@ -358,7 +358,7 @@ impl Worker {
             TerminalCommand::Open { attachment, .. }
             | TerminalCommand::Resume { attachment, .. }
             | TerminalCommand::Input { attachment, .. }
-            | TerminalCommand::Renew { attachment }
+            | TerminalCommand::Renew { attachment, .. }
             | TerminalCommand::Detach { attachment }
             | TerminalCommand::Close { attachment, .. } => *attachment,
         };
@@ -444,9 +444,12 @@ impl Worker {
                 }
                 live.attached_to(&endpoint).unwrap().enqueued = sequence;
             }
-            TerminalCommand::Renew { .. } => {
-                if let Some(attached) = live.attached_to(&endpoint) {
+            TerminalCommand::Renew { check, .. } => {
+                if let Some(attached) = live.attached_to(&endpoint).filter(|_| !check.is_nil()) {
                     attached.lease = now + TERMINAL_LEASE;
+                    attached
+                        .endpoint
+                        .send(id, TerminalEvent::LeaseRenewed { attachment, check });
                 }
             }
             TerminalCommand::Detach { .. } => {
