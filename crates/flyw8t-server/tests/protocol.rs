@@ -1152,7 +1152,8 @@ async fn newer_connection_supersedes_older() {
     let server = start_fresh().await;
     let (admin, _org, agent) = enrolled(&server).await;
     let mut old = RawAgent::authenticate_as(&server, &agent, "0.3.0", false, &[]).await;
-    let _new = RawAgent::authenticate_as(&server, &agent, "0.3.1", false, &[]).await;
+    wait_connected(&server, agent.device_id).await;
+    let mut new = RawAgent::authenticate_as(&server, &agent, "0.3.1", false, &[]).await;
     assert!(matches!(
         next(&mut old.ws).await,
         ServerMsg::Refused {
@@ -1179,6 +1180,14 @@ async fn newer_connection_supersedes_older() {
 
     let _invalid =
         RawAgent::authenticate_as(&server, &agent, "0.3.1\nforged display", false, &[]).await;
+    // Welcome precedes the audit insert. Supersession confirms the replacement registered after it.
+    assert!(matches!(
+        next(&mut new.ws).await,
+        ServerMsg::Refused {
+            code: RefusalCode::Superseded,
+            ..
+        }
+    ));
     let activity = admin.get(&server, &activity_path).await;
     assert_eq!(activity.body.matches("Agent authenticated").count(), 3);
     assert!(!activity.body.contains("forged display"));
