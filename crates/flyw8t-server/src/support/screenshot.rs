@@ -275,7 +275,11 @@ fn permitted(p: &Principal) -> bool {
 
 pub(crate) async fn capabilities(ApiUser(p): ApiUser) -> Json<Value> {
     let allowed = permitted(&p);
-    Json(json!({ "support_screenshot": allowed, "support_session_status": allowed }))
+    Json(json!({
+        "support_screenshot": allowed,
+        "support_session_status": allowed,
+        "background_terminal_status": crate::terminal_status::api_permitted(&p),
+    }))
 }
 
 async fn owner_session(state: &Shared, p: &Principal, id: Uuid) -> AppResult<(Uuid, String, bool)> {

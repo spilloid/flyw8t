@@ -15,6 +15,7 @@ pub mod inventory;
 pub mod messages;
 pub mod physical_console;
 pub mod script;
+pub mod terminal;
 pub mod trust;
 pub mod webauthn;
 

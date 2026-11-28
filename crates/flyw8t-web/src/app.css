@@ -140,6 +140,22 @@ fieldset { border: 1px solid var(--line); border-radius: 6px; display: flex; fle
 .badge.unknown { background: var(--unk-bg); color: var(--unk-fg); }
 .badge.busy { background: var(--busy-bg); color: var(--busy-fg); }
 .badge.neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+
+.terminal-toolbar, .terminal-controls, .terminal-notices {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem;
+}
+.terminal-toolbar { justify-content: space-between; gap: 0.75rem 1rem; }
+.terminal-toolbar h2, .terminal-toolbar p, .terminal-notices p { margin: 0; }
+.terminal-notices { min-height: 2.5rem; padding-block: 0.4rem; }
+.terminal-notices p { white-space: normal; }
+.terminal-notices [role="alert"] { color: var(--unk-fg); }
+.terminal-controls button { border-radius: 0.5rem; }
+.terminal-viewport {
+  overflow: auto; max-width: 100%; min-height: 24rem;
+  padding: 0.625rem; border-radius: 0.5rem;
+  background: #10151d;
+}
+#background-terminal-screen { min-width: 58rem; }
 .flash { padding: 0.6rem 0.8rem; border-radius: 8px; margin: 0 0 1rem; }
 /* The passkey status line takes no room until the ceremony says something. */
 #webauthn-status:empty { display: none; }

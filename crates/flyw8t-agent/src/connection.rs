@@ -80,6 +80,8 @@ pub struct Agent {
     running: Mutex<HashMap<Uuid, CancellationToken>>,
     events_tx: mpsc::Sender<AgentMsg>,
     events_rx: tokio::sync::Mutex<mpsc::Receiver<AgentMsg>>,
+    #[cfg(windows)]
+    terminal: crate::terminal::Runtime,
     started: Instant,
     /// Held for the agent's lifetime: one process per state directory (see `lock_state_dir`).
     _lock: std::fs::File,
@@ -99,6 +101,8 @@ impl Agent {
         let policy = crate::script::load_policy(&cfg.state_dir)?;
         let device_key_id = key_id(KeyKind::Device, key.public_key());
         let (events_tx, events_rx) = mpsc::channel(EVENT_BUFFER);
+        #[cfg(windows)]
+        let terminal = crate::terminal::Runtime::new(cfg.state_dir.clone(), device_id)?;
         Ok(Arc::new(Self {
             cfg,
             device_id,
@@ -113,6 +117,8 @@ impl Agent {
             running: Mutex::new(HashMap::new()),
             events_tx,
             events_rx: tokio::sync::Mutex::new(events_rx),
+            #[cfg(windows)]
+            terminal,
             started: Instant::now(),
             _lock: lock,
         }))
@@ -162,12 +168,18 @@ impl Agent {
             let began = Instant::now();
             match self.session(&shutdown).await {
                 Ok(()) => tracing::info!("session ended"),
-                Err(SessionError::Fatal(f)) => return Err(f),
+                Err(SessionError::Fatal(f)) => {
+                    #[cfg(windows)]
+                    self.terminal.stop(true);
+                    return Err(f);
+                }
                 Err(SessionError::Retry(e)) => {
                     tracing::warn!(error = %format!("{e:#}"), "session failed")
                 }
             }
             if shutdown.is_cancelled() {
+                #[cfg(windows)]
+                self.terminal.stop(false);
                 return Ok(());
             }
             if began.elapsed() > MAX_BACKOFF {
@@ -177,7 +189,11 @@ impl Agent {
             tracing::info!(delay_ms = delay.as_millis() as u64, "reconnecting");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = shutdown.cancelled() => return Ok(()),
+                _ = shutdown.cancelled() => {
+                    #[cfg(windows)]
+                    self.terminal.stop(false);
+                    return Ok(());
+                }
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
@@ -188,7 +204,11 @@ impl Agent {
     pub async fn run_session(self: &Arc<Self>, stop: &CancellationToken) -> Result<()> {
         match self.session(stop).await {
             Ok(()) => Ok(()),
-            Err(SessionError::Fatal(f)) => Err(f.into()),
+            Err(SessionError::Fatal(f)) => {
+                #[cfg(windows)]
+                self.terminal.stop(true);
+                Err(f.into())
+            }
             Err(SessionError::Retry(e)) => Err(e),
         }
     }
@@ -267,6 +287,12 @@ impl Agent {
         // Observations belong only to this socket. A stalled check must not hold
         // up heartbeats or build a queue, including across a reconnect.
         let mut checks = FuturesUnordered::new();
+        // Terminal output cannot displace durable job reports. This reply channel
+        // belongs to only this authenticated socket, so dropping its receiver also
+        // disarms the writer without destroying the Windows process.
+        let (terminal_tx, mut terminal_rx) = mpsc::channel::<AgentMsg>(32);
+        #[cfg(not(windows))]
+        drop(terminal_tx);
 
         loop {
             tokio::select! {
@@ -327,6 +353,12 @@ impl Agent {
                                 send(&mut ws, &reply).await?;
                             }
                         }
+                        #[cfg(windows)]
+                        ServerMsg::BackgroundTerminal { session_id, command } => {
+                            if !self.terminal.submit(session_id, command, terminal_tx.clone()) {
+                                return Err(anyhow::anyhow!("background terminal command queue unavailable").into());
+                            }
+                        }
                         other => {
                             for reply in self.handle(other)? {
                                 send(&mut ws, &reply).await?;
@@ -338,6 +370,7 @@ impl Agent {
                     send(&mut ws, &reply).await?;
                 }
                 Some(event) = events.recv() => send(&mut ws, &event).await?,
+                Some(event) = terminal_rx.recv() => send(&mut ws, &event).await?,
                 _ = heartbeat_tick.tick() => {
                     if last_heard.elapsed() > heartbeat * 3 {
                         return Err(anyhow::anyhow!("server silent for {:?}", last_heard.elapsed()).into());

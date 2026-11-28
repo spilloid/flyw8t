@@ -212,6 +212,16 @@ pub(crate) fn current_windows_execution_account() -> Option<WindowsExecutionAcco
     }
 }
 
+/// The account class of a live Windows process's primary token.
+#[cfg(windows)]
+pub(crate) fn child_windows_execution_account(
+    process: &std::os::windows::io::OwnedHandle,
+) -> Option<WindowsExecutionAccount> {
+    use std::os::windows::io::AsRawHandle;
+
+    platform::execution_account(process.as_raw_handle())
+}
+
 /// `run\<job id>` in the state folder, made new: an existing one fails the job.
 #[cfg(windows)]
 fn job_folder(state_dir: &Path, job: uuid::Uuid) -> anyhow::Result<PathBuf> {

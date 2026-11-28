@@ -4,6 +4,8 @@ All notable changes to flyw8t. Dates are UTC.
 
 ## 0.3.0 (in development)
 
+- Open PowerShell in the browser through an opted-in Windows agent. The terminal verifies the LocalSystem account, supports Ctrl+C and prompt replies, and can reattach to the same process after a brief disconnect.
+- Record background terminal lifecycle in Device Activity and expose scoped, read-only lifecycle status in MCP.
 - Show the current Windows agent account class during background terminal policy checks and retain it in Audit.
 - Show agent-reported versions for authenticated reconnects and update preflight in Device Activity.
 - Recheck collector revocation, technician access, and current site inventory before recording a PortGlass handoff.

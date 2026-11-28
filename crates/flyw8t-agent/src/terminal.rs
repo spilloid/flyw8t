@@ -136,7 +136,11 @@ pub(crate) use policy::read as read_background_policy;
 pub use policy::status as background_policy_enabled;
 
 #[cfg(windows)]
+mod live;
+#[cfg(windows)]
 mod windows_console;
+#[cfg(windows)]
+pub(crate) use live::Runtime;
 #[cfg(windows)]
 pub use windows_console::check as check_powershell;
 

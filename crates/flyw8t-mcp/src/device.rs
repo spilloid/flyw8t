@@ -40,6 +40,56 @@ struct HandoffArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalStatusArgs {
+    device_id: Uuid,
+    session_id: Uuid,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TerminalStatus {
+    device_id: Uuid,
+    session_id: Uuid,
+    account: TerminalAccount,
+    state: TerminalState,
+    observed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<TerminalEndReason>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalAccount {
+    LocalSystem,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalState {
+    Starting,
+    Attached,
+    Detached,
+    TerminationPending,
+    Ended,
+    Rejected,
+    TerminationUnconfirmed,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalEndReason {
+    Closed,
+    ProcessExited,
+    PolicyDisabled,
+    AccessRevoked,
+    Expired,
+    AgentStopped,
+    Unavailable,
+    Busy,
+    InvalidInput,
+}
+
+#[derive(Deserialize)]
 struct HandoffTarget {
     id: Uuid,
     retired: bool,
@@ -107,6 +157,7 @@ pub(crate) enum Tool {
     SystemInfo,
     SystemInfoStatus,
     TerminalHandoff,
+    TerminalStatus,
 }
 
 impl Tool {
@@ -118,7 +169,10 @@ impl Tool {
     ];
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|tool| tool.name() == name)
+        Self::ALL
+            .into_iter()
+            .chain([Self::TerminalStatus])
+            .find(|tool| tool.name() == name)
     }
 
     fn name(self) -> &'static str {
@@ -127,6 +181,7 @@ impl Tool {
             Self::SystemInfo => "device_system_info",
             Self::SystemInfoStatus => "device_system_info_status",
             Self::TerminalHandoff => "device_terminal_handoff",
+            Self::TerminalStatus => "device_terminal_status",
         }
     }
 
@@ -157,6 +212,12 @@ impl Tool {
                 &["device_id"][..],
                 true,
             ),
+            Self::TerminalStatus => (
+                "Read lifecycle status for one explicitly selected background terminal session you initiated. Requires read scope and current technician access.",
+                json!({"device_id":uuid,"session_id":uuid}),
+                &["device_id", "session_id"][..],
+                true,
+            ),
         };
         json!({
             "name": self.name(),
@@ -175,6 +236,7 @@ impl Tool {
             Self::SystemInfo => queue(api, args).await?,
             Self::SystemInfoStatus => status(api, args).await?,
             Self::TerminalHandoff => terminal_handoff(api, args).await?,
+            Self::TerminalStatus => terminal_status(api, args).await?,
         };
         Ok(json!({
             "content":[{"type":"text","text":data.to_string()}],
@@ -182,6 +244,36 @@ impl Tool {
             "isError":false
         }))
     }
+}
+
+async fn terminal_status(api: &Api, args: Value) -> Result<Value> {
+    let args: TerminalStatusArgs = serde_json::from_value(args)
+        .map_err(|_| anyhow!("Supply a device_id and a session_id UUID."))?;
+    ensure!(
+        !args.device_id.is_nil() && !args.session_id.is_nil(),
+        "Supply non-nil device and session UUIDs."
+    );
+    let request = api.diagnostic_request(
+        Method::GET,
+        &format!(
+            "/api/v1/devices/{}/background-terminal/sessions/{}/status",
+            args.device_id, args.session_id
+        ),
+    );
+    let reply: TerminalStatus = read_reply(send(request).await?, 4096, refusal).await?;
+    ensure!(
+        reply.device_id == args.device_id && reply.session_id == args.session_id,
+        "The requested terminal session is unavailable."
+    );
+    ensure!(
+        (20..=35).contains(&reply.observed_at.len())
+            && reply
+                .observed_at
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || b"T:-.+Z".contains(&byte)),
+        "The server returned an invalid observation time."
+    );
+    Ok(serde_json::to_value(reply)?)
 }
 
 async fn terminal_handoff(api: &Api, args: Value) -> Result<Value> {

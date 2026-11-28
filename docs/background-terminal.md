@@ -1,10 +1,10 @@
 # Background terminal
 
-The interactive **Background terminal** is an open 0.3.0 release requirement. The planned workflow gives the technician a PowerShell prompt from the device page through the enrolled agent. The technician can type ordinary PowerShell commands, enter responses to prompts, and interrupt the foreground command with Ctrl+C. Commands share a PowerShell process and its working directory and state. The agent carries the session outside the employee's desktop. Direct SSH is available for endpoints with an SSH service.
+The 0.3.0 candidate opens interactive **Background terminal** from an opted-in Windows device through the enrolled agent connection. Use **Check background terminal policy**, review the account, then select **Open background terminal**. The same PowerShell process handles input, output, prompt replies, and Ctrl+C. The agent starts it in Windows Session 0 and verifies its account before accepting input. End the session from the terminal toolbar.
 
 ## Account choices
 
-- **Background terminal** runs under the Windows identity authorized for unattended maintenance on that device. Show the identity before connecting and in the session record. Enrollment, device policy, and technician permissions govern access. Opening the background terminal requires no prompt on the employee's desktop.
+- **Background terminal** runs in Windows Session 0 as LocalSystem. The browser shows that account before connecting and the agent verifies the child process token. Enrollment, device policy, and technician permissions govern access. Opening the background terminal requires no prompt on the employee's desktop.
 - **Signed-in desktop user** is an attended path. The person approves access to their session and can end it. Their profile and active desktop session are distinct from an SSH login.
 - **Service-level work** uses **Run approved script**. The Windows service normally runs these jobs as LocalSystem. Script signing and run checks also apply to schedules. The job outcome shows the account class observed on PowerShell.
 
@@ -16,7 +16,7 @@ Check the technician's authenticated console session, device scope, account poli
 
 An audit event records the initiator, device, execution account class, session lifecycle and end reason. A transport attachment and an authenticated terminal session are recorded as separate events. Audit records omit terminal contents.
 
-The console now verifies the admission conditions. From **Check background terminal policy**, an enabled device shows **Verify session access**. The confirmation has a 30-second lifetime and works once in the same browser sign-in. It rechecks the original device connection, current local opt-in, and technician access. The agent registry checks the confirmation deadline before queuing its policy request and uses that deadline to decide whether a reply is timely. Device Activity shows whether the agent reported its local policy enabled or disabled at the time of each successful policy check. Audit links each access confirmation to its policy check. The interactive session and its lifecycle remain open.
+The admission has a 30-second lifetime and works once in the same browser sign-in. It rechecks the original device connection, current local opt-in, and technician access. The terminal socket verifies the same console origin and browser sign-in and uses a CSRF value carried in its first frame. The agent checks the opt-in before allowing writes and while the process is running. Audit links the confirmation to the policy check and records attachment, start, detach, resume, and termination evidence.
 
 When available, the policy and confirmation results show the account class of the
 current Windows agent process. The agent reports a coarse class such as LocalSystem
@@ -36,7 +36,7 @@ policy response. Older agents can still report policy without the account class.
 
 ## Reconnect and termination
 
-An unexpected browser or network disconnect detaches the view. The Windows agent owns the process and starts one five-minute deadline for that interruption. Pending work can continue while the PC and agent are running. Failed join attempts leave the deadline in place. A successful reattachment restores the same process and a subsequent interruption gets its own deadline. Device reboot, agent restart, or process exit requires a new session.
+An unexpected browser or network disconnect detaches the view. The Windows agent owns the process and starts one five-minute deadline for that interruption. Pending work can continue while the PC and agent are running. Failed join attempts leave the deadline in place. A successful reattachment restores the same process and a subsequent interruption gets its own deadline. The agent retains up to 256 KiB of output and acknowledges an input frame after writing it to the pseudoconsole. The browser flags gaps and input whose delivery it could not confirm. Device reboot, agent restart, or process exit requires a new session.
 
 Ctrl+C interrupts the foreground command and leaves the prompt open. The **End session** action closes the process and its job when the agent receives it. When the agent is unreachable, show termination as pending. Once the grace period expires, disable resume and report cleanup as unconfirmed until the agent supplies evidence. Permission revocation rejects reattachment and requests immediate termination when the agent is reachable. Local policy disable ends the process on the endpoint. Record detach, reattach, and confirmed termination in Device Activity with the technician, device, account class, and reason. Keep command text and terminal output out of Activity and Audit.
 
@@ -52,8 +52,8 @@ Install a test package that supports background installation without restarting 
 
 Under **Technician and connection options**, **Open direct SSH** opens the existing Windows OpenSSH client over a LAN or VPN route. Specify the computer and **SSH account**. The account field accepts a user name or `DOMAIN\user`. Leave it blank for OpenSSH's default or enter `user@computer` in the computer field. OpenSSH authenticates each session independently.
 
-`flyw8t-agent terminal-check` checks for a local SSH 2.0 greeting on port 22. The readiness check and the attachment prototype provide evidence about their own behavior. The agent-backed terminal remains open on the sprint checklist.
+`flyw8t-agent terminal-check` checks for a local SSH 2.0 greeting on port 22. The enrolled browser terminal uses the Flyw8t agent connection.
 
 On an enrolled Windows agent, a local administrator can run `flyw8t-agent terminal-policy status` from an elevated console. Use `flyw8t-agent terminal-policy enable` or `flyw8t-agent terminal-policy disable` to change the local setting. The default is disabled. The device page can query the setting on the current authenticated agent connection, and a policy change is visible on the next check without restarting the service.
 
-The check records the technician, device, time and observed policy. If access changes while a check is in flight, the audit records a denied outcome under the original request ID and Flyw8t withholds the policy result. Opening, closing and auditing an interactive PowerShell session remain pending.
+The check records the technician, device, time and observed policy. If access changes while a check is in flight, the audit records a denied outcome under the original request ID and Flyw8t withholds the policy result.

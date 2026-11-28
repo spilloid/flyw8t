@@ -115,6 +115,363 @@ async fn next(ws: &mut Ws) -> ServerMsg {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn browser_terminal_binds_live_input_and_output_to_the_admitted_sign_in() {
+    use axum::http::{header, StatusCode};
+    use flyw8t_protocol::messages::{
+        BackgroundTerminalPolicy as Policy, CAP_BACKGROUND_TERMINAL_POLICY,
+    };
+    use flyw8t_protocol::terminal::{
+        TerminalCommand, TerminalEndReason, TerminalEvent, CAP_BACKGROUND_TERMINAL,
+    };
+    use serde_json::{json, Value};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    async fn report_policy(agent: &mut RawAgent) {
+        let ServerMsg::CheckBackgroundTerminalPolicy { request_id } = next(&mut agent.ws).await
+        else {
+            panic!("expected a background terminal policy request");
+        };
+        agent
+            .send(&AgentMsg::BackgroundTerminalPolicyStatus {
+                request_id,
+                policy: Policy::Enabled,
+                agent_account: Some(WindowsExecutionAccount::LocalSystem),
+            })
+            .await;
+    }
+
+    async fn send_json(socket: &mut Ws, frame: Value) {
+        socket.send(Message::text(frame.to_string())).await.unwrap();
+    }
+
+    async fn receive_json(socket: &mut Ws) -> Value {
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), socket.next())
+                .await
+                .expect("browser terminal event deadline")
+                .expect("browser terminal socket open")
+                .unwrap();
+            match next {
+                Message::Text(body) => return serde_json::from_str(&body).unwrap(),
+                Message::Close(frame) => panic!("terminal socket closed: {frame:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    async fn next_terminal(agent: &mut RawAgent) -> ServerMsg {
+        loop {
+            let message = next(&mut agent.ws).await;
+            match &message {
+                ServerMsg::BackgroundTerminal {
+                    command: TerminalCommand::Renew { .. },
+                    ..
+                } => {}
+                ServerMsg::BackgroundTerminal { .. } => return message,
+                _ => panic!("expected terminal command, received {message:?}"),
+            }
+        }
+    }
+
+    let server = start_fresh().await;
+    let (admin, org, agent) = enrolled(&server).await;
+    let device = agent.device_id;
+    sqlx::query("UPDATE devices SET os_family = 'windows' WHERE id = $1")
+        .bind(device)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let mut live = RawAgent::authenticate_with_capabilities(
+        &server,
+        &agent,
+        true,
+        &[CAP_BACKGROUND_TERMINAL_POLICY, CAP_BACKGROUND_TERMINAL],
+    )
+    .await;
+    wait_connected(&server, device).await;
+
+    let check_path = format!("/devices/{device}/background-terminal/check");
+    let (_, check) = tokio::join!(
+        report_policy(&mut live),
+        admin.post(&server, &check_path, &[])
+    );
+    assert_eq!(check.status, StatusCode::OK);
+    assert!(check.body.contains("LocalSystem"));
+    let admission = extract(&check.body, r#"name="admission" value="([^"]+)""#).unwrap();
+    let admission_path = format!("/devices/{device}/background-terminal/admission");
+    let fields = [("admission", admission.as_str()), ("start_terminal", "1")];
+    let (_, admitted) = tokio::join!(
+        report_policy(&mut live),
+        admin.post(&server, &admission_path, &fields),
+    );
+    assert_eq!(admitted.status, StatusCode::SEE_OTHER, "{}", admitted.body);
+    let page = admin.get(&server, &admitted.location()).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert_eq!(page.headers[header::CACHE_CONTROL], "no-store");
+    let path = extract(&page.body, r#"data-terminal-ws="([^"]+)""#).unwrap();
+    let second_login = server.login(ADMIN_EMAIL, ADMIN_PASSWORD).await;
+    let request = |cookie: &str, origin: &str| {
+        let mut request = format!("ws://{}{path}", server.addr)
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(header::COOKIE, cookie.parse().unwrap());
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, origin.parse().unwrap());
+        request
+    };
+    for rejected in [
+        request(&admin.cookie, "https://elsewhere.example.test"),
+        request(&second_login.cookie, &server.url()),
+    ] {
+        assert!(tokio_tungstenite::connect_async(rejected).await.is_err());
+    }
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(request(&admin.cookie, &server.url()))
+        .await
+        .unwrap();
+    send_json(
+        &mut socket,
+        json!({"type":"attach","csrf":admin.csrf,"offset":0}),
+    )
+    .await;
+    let ServerMsg::BackgroundTerminal {
+        session_id,
+        command: TerminalCommand::Open {
+            attachment,
+            account,
+        },
+    } = next_terminal(&mut live).await
+    else {
+        panic!("expected terminal open on the authenticated Windows agent");
+    };
+    assert_eq!(account, WindowsExecutionAccount::LocalSystem);
+    live.send(&AgentMsg::BackgroundTerminal {
+        session_id,
+        event: TerminalEvent::Ready {
+            attachment,
+            account,
+            offset: 0,
+        },
+    })
+    .await;
+    assert_eq!(receive_json(&mut socket).await["type"], "ready");
+    let session_status = format!("{}/status", admitted.location());
+    let status = admin.get(&server, &session_status).await;
+    assert_eq!(status.status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&status.body).unwrap()["state"],
+        "attached"
+    );
+    assert_eq!(
+        second_login.get(&server, &session_status).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    let input = "Write-Output terminal-test-input\r";
+    send_json(
+        &mut socket,
+        json!({"type":"input","sequence":1,"data": input}),
+    )
+    .await;
+    assert_eq!(
+        next_terminal(&mut live).await,
+        ServerMsg::BackgroundTerminal {
+            session_id,
+            command: TerminalCommand::Input {
+                attachment,
+                sequence: 1,
+                data: input.into()
+            },
+        }
+    );
+    live.send(&AgentMsg::BackgroundTerminal {
+        session_id,
+        event: TerminalEvent::Ack {
+            attachment,
+            sequence: 1,
+        },
+    })
+    .await;
+    assert_eq!(receive_json(&mut socket).await["sequence"], 1);
+
+    let output = b"terminal-test-output".to_vec();
+    live.send(&AgentMsg::BackgroundTerminal {
+        session_id,
+        event: TerminalEvent::Output {
+            attachment,
+            offset: 0,
+            data: output.clone(),
+        },
+    })
+    .await;
+    assert_eq!(receive_json(&mut socket).await["data"], json!(output));
+
+    let (mut duplicate, _) =
+        tokio_tungstenite::connect_async(request(&admin.cookie, &server.url()))
+            .await
+            .unwrap();
+    send_json(
+        &mut duplicate,
+        json!({"type":"attach","csrf":admin.csrf,"offset":0}),
+    )
+    .await;
+    let refusal = tokio::time::timeout(Duration::from_secs(3), duplicate.next())
+        .await
+        .expect("second writer refused promptly");
+    assert!(matches!(
+        refusal,
+        None | Some(Ok(Message::Close(_))) | Some(Err(_))
+    ));
+
+    socket.close(None).await.unwrap();
+    assert_eq!(
+        next_terminal(&mut live).await,
+        ServerMsg::BackgroundTerminal {
+            session_id,
+            command: TerminalCommand::Detach { attachment },
+        }
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request(&admin.cookie, &server.url()))
+        .await
+        .unwrap();
+    let offset = output.len() as u64;
+    send_json(
+        &mut socket,
+        json!({"type":"attach","csrf":admin.csrf,"offset":offset}),
+    )
+    .await;
+    let ServerMsg::BackgroundTerminal {
+        session_id: resumed,
+        command:
+            TerminalCommand::Resume {
+                attachment: new_attachment,
+                account: resumed_account,
+                offset: requested,
+            },
+    } = next_terminal(&mut live).await
+    else {
+        panic!("expected resume of the existing terminal")
+    };
+    assert_eq!(resumed, session_id);
+    assert_ne!(new_attachment, attachment);
+    assert_eq!(resumed_account, account);
+    assert_eq!(requested, offset);
+    let attachment = new_attachment;
+    live.send(&AgentMsg::BackgroundTerminal {
+        session_id,
+        event: TerminalEvent::Ready {
+            attachment,
+            account,
+            offset,
+        },
+    })
+    .await;
+    assert_eq!(receive_json(&mut socket).await["offset"], offset);
+
+    send_json(
+        &mut socket,
+        json!({"type":"input","sequence":1,"data":"\u{3}"}),
+    )
+    .await;
+    assert_eq!(
+        next_terminal(&mut live).await,
+        ServerMsg::BackgroundTerminal {
+            session_id,
+            command: TerminalCommand::Input {
+                attachment,
+                sequence: 1,
+                data: "\u{3}".into()
+            },
+        }
+    );
+    send_json(&mut socket, json!({"type":"close"})).await;
+    assert_eq!(
+        next_terminal(&mut live).await,
+        ServerMsg::BackgroundTerminal {
+            session_id,
+            command: TerminalCommand::Close {
+                attachment,
+                reason: TerminalEndReason::Closed
+            },
+        }
+    );
+    live.send(&AgentMsg::BackgroundTerminal {
+        session_id,
+        event: TerminalEvent::Ended {
+            attachment,
+            reason: TerminalEndReason::Closed,
+        },
+    })
+    .await;
+    let mut ended = receive_json(&mut socket).await;
+    if ended["type"] == "termination_pending" {
+        ended = receive_json(&mut socket).await;
+    }
+    assert_eq!(ended["type"], "ended");
+
+    wait_for(
+        "durable terminal end event",
+        Duration::from_secs(5),
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM audit_events
+             WHERE target_id=$1 AND action='device.background_terminal.ended'
+                   AND detail->>'session_id'=$2)",
+            )
+            .bind(device)
+            .bind(session_id.to_string())
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap()
+        },
+    )
+    .await;
+
+    let audit: String = sqlx::query_scalar(
+        "SELECT coalesce(string_agg(detail::text, ' '), '') FROM audit_events
+         WHERE organization_id=$1 AND target_id=$2",
+    )
+    .bind(org)
+    .bind(device)
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert!(audit.contains(session_id.to_string().as_str()));
+    assert!(!audit.contains("terminal-test-input"));
+    assert!(!audit.contains("terminal-test-output"));
+
+    let token = format!("fw8_{}", flyw8t_server::auth::random_secret(32));
+    sqlx::query(
+        "INSERT INTO api_tokens (user_id, name, prefix, token_hash, scopes)
+         SELECT id, 'terminal status fixture', 'fw8_test', $1, ARRAY['read'] FROM users WHERE email=$2",
+    )
+    .bind(flyw8t_server::auth::digest(&token))
+    .bind(ADMIN_EMAIL)
+    .execute(&server.state.db)
+    .await
+    .unwrap();
+    let api_status = server
+        .request(
+            axum::http::Request::get(format!("/api/v1{session_status}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(api_status.status, StatusCode::OK);
+    let evidence: Value = serde_json::from_str(&api_status.body).unwrap();
+    assert_eq!(evidence["state"], "ended");
+    assert_eq!(evidence["reason"], "closed");
+    assert_eq!(evidence["session_id"], session_id.to_string());
+    assert!(evidence.get("input").is_none() && evidence.get("output").is_none());
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn update_preflight_observes_current_fleet_policy_without_replacing_the_live_agent() {
     use flyw8t_agent::{connection::observe_update_policy, AgentConfig};
     use flyw8t_protocol::agent_update::Release;

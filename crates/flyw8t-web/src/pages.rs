@@ -35,6 +35,7 @@ fn render(view: impl IntoView + 'static) -> String {
 }
 
 fn head(title: String, refresh: Option<u32>, script: Option<&'static str>) -> impl IntoView {
+    let uses_terminal = script == Some("/static/terminal.js");
     view! {
         <head>
             <meta charset="utf-8"/>
@@ -48,7 +49,9 @@ fn head(title: String, refresh: Option<u32>, script: Option<&'static str>) -> im
             <meta name="theme-color" content="#2456c7"/>
             <meta name="mobile-web-app-capable" content="yes"/>
             <meta name="apple-mobile-web-app-title" content="flyw8t"/>
+            {uses_terminal.then(|| view! { <link rel="stylesheet" href="/static/xterm.css"/> })}
             <link rel="stylesheet" href="/static/app.css"/>
+            {uses_terminal.then(|| view! { <script src="/static/xterm.js" defer=true></script> })}
             {script.map(|src| view! { <script src=src defer=true></script> })}
         </head>
     }
@@ -64,8 +67,7 @@ pub(crate) fn shell(
     shell_with(title, ctx, active, refresh, None, body)
 }
 
-/// The authenticated page frame: header, navigation, flash, content. `script` loads a page script: the attended-support
-/// one (ADR-0010) or the script editor's (ADR-0014), the only two in the console.
+/// The authenticated page frame. Pages that need JavaScript supply their own script.
 fn shell_with(
     title: &str,
     ctx: &PageCtx,
@@ -1284,6 +1286,7 @@ pub enum BackgroundTerminalPolicyCheck {
 
 pub enum BackgroundTerminalStep {
     Policy(Option<String>),
+    LivePolicy { admission: String },
     Confirmation,
 }
 
@@ -1307,9 +1310,12 @@ pub fn background_terminal_policy_result(
     use BackgroundTerminalPolicyCheck::*;
 
     let title = match &step {
-        BackgroundTerminalStep::Policy(_) => "Background terminal policy",
+        BackgroundTerminalStep::Policy(_) | BackgroundTerminalStep::LivePolicy { .. } => {
+            "Background terminal policy"
+        }
         BackgroundTerminalStep::Confirmation => "Background terminal access",
     };
+    let live = matches!(&step, BackgroundTerminalStep::LivePolicy { .. });
     let finding = match result {
         Enabled if matches!(&step, BackgroundTerminalStep::Confirmation) => {
             "Technician access verified."
@@ -1324,11 +1330,13 @@ pub fn background_terminal_policy_result(
         Expired => "This confirmation expired. Check local policy again.",
     };
     let confirmation = match step {
-        BackgroundTerminalStep::Policy(Some(secret)) => Some(view! {
+        BackgroundTerminalStep::Policy(Some(secret))
+        | BackgroundTerminalStep::LivePolicy { admission: secret } => Some(view! {
             <form method="post" action=format!("/devices/{device}/background-terminal/admission") class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                 <input type="hidden" name="admission" value=secret/>
-                <button type="submit">"Verify session access"</button>
+                {live.then(|| view! { <input type="hidden" name="start_terminal" value="1"/> })}
+                <button type="submit">{if live { "Open background terminal" } else { "Verify session access" }}</button>
                 <span class="muted small">"This confirmation is valid for 30 seconds in this sign-in session."</span>
             </form>
         }),
@@ -1343,11 +1351,63 @@ pub fn background_terminal_policy_result(
             <h2 id="terminal-policy-finding">{finding}</h2>
             {agent_account.map(|account| view! { <p><strong>"Current agent account: "</strong>{windows_execution_account_label(account)}</p> })}
             {confirmation}
-            <p>"Interactive PowerShell sessions are still in development."</p>
+            {(!live).then(|| view! { <p>"Interactive PowerShell sessions are still in development."</p> })}
             <p class="muted small">"Checked at "<time datetime=fmt::iso(ctx.now)>{fmt::timestamp(ctx.now)}</time></p>
         </section>
     };
     shell(title, ctx, Nav::Devices, None, body)
+}
+
+pub fn background_terminal_page(
+    ctx: &PageCtx,
+    device: uuid::Uuid,
+    name: &str,
+    session_id: uuid::Uuid,
+    account: WindowsExecutionAccount,
+) -> String {
+    let ws = format!("/devices/{device}/background-terminal/sessions/{session_id}/ws");
+    let account_value = match account {
+        WindowsExecutionAccount::LocalSystem => "local_system",
+        WindowsExecutionAccount::LocalService => "local_service",
+        WindowsExecutionAccount::NetworkService => "network_service",
+        WindowsExecutionAccount::OtherWindowsAccount => "other_windows_account",
+    };
+    let body = view! {
+        <p class="crumbs">
+            <a href="/devices">"Devices"</a>" / "<a href=format!("/devices/{device}")>{name.to_owned()}</a>
+        </p>
+        <h1>"Background terminal"</h1>
+        <section class="card background-terminal" id="background-terminal" aria-label="PowerShell session"
+            data-terminal-ws=ws data-terminal-csrf=ctx.csrf.clone() data-terminal-account=account_value>
+            <div class="terminal-toolbar">
+                <div>
+                    <h2>"PowerShell"</h2>
+                    <p class="muted small">{windows_execution_account_label(account)}</p>
+                </div>
+                <div class="terminal-controls">
+                    <button id="background-terminal-interrupt" class="secondary" type="button" disabled=true>"Send Ctrl+C"</button>
+                    <button id="background-terminal-end" class="bad" type="button" disabled=true>"End session"</button>
+                </div>
+            </div>
+            <div class="terminal-notices">
+                <p id="background-terminal-status" class="badge neutral" role="status">"Connecting"</p>
+                <p id="background-terminal-detail" class="muted small"></p>
+                <p id="background-terminal-warning" class="small" role="alert" hidden=true></p>
+            </div>
+            <div class="terminal-viewport" role="region" aria-label="Terminal screen">
+                <div id="background-terminal-screen"></div>
+            </div>
+            <noscript><p class="flash bad">"PowerShell sessions need JavaScript in this browser."</p></noscript>
+        </section>
+    };
+    shell_with(
+        "Background terminal",
+        ctx,
+        Nav::Devices,
+        None,
+        Some("/static/terminal.js"),
+        body,
+    )
 }
 
 pub fn device_page(
@@ -4077,6 +4137,37 @@ mod tests {
             assert!(html.contains(label));
             assert!(html.contains("Interactive PowerShell sessions are still in development."));
         }
+    }
+
+    #[test]
+    fn live_terminal_uses_admission_and_same_origin_assets() {
+        let device = Uuid::from_u128(1);
+        let session = Uuid::from_u128(2);
+        let account = WindowsExecutionAccount::LocalSystem;
+        let check = background_terminal_policy_result(
+            &ctx(),
+            device,
+            "Test device",
+            BackgroundTerminalPolicyCheck::Enabled,
+            BackgroundTerminalStep::LivePolicy {
+                admission: "one-time".into(),
+            },
+            Some(account),
+        );
+        assert!(check.contains(&format!("/devices/{device}/background-terminal/admission")));
+        assert!(check.contains("name=\"start_terminal\" value=\"1\""));
+        assert!(check.contains("Open background terminal"));
+        assert!(check.contains("LocalSystem"));
+
+        let page = background_terminal_page(&ctx(), device, "<script> device", session, account);
+        assert!(page.contains(&format!(
+            "data-terminal-ws=\"/devices/{device}/background-terminal/sessions/{session}/ws\""
+        )));
+        assert!(page.contains("data-terminal-account=\"local_system\""));
+        assert!(page.contains("data-terminal-csrf=\"tok&quot;en\""));
+        assert!(page.contains("&lt;script&gt; device"));
+        assert!(page.contains("/static/xterm.css"));
+        assert!(page.find("/static/xterm.js").unwrap() < page.find("/static/terminal.js").unwrap());
     }
 
     fn user(role: &str) -> UserDetail {

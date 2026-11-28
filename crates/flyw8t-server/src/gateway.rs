@@ -688,7 +688,9 @@ async fn connected_loop(
                     Ok(m) => m,
                     Err(e) => {
                         let _ = refuse(sink, RefusalCode::BadMessage, "malformed message").await;
-                        anyhow::bail!("malformed agent message: {e}");
+                        // serde error text can contain part of the original frame.
+                        // Terminal contents must not enter disconnect audit or logs.
+                        anyhow::bail!("malformed agent message at line {}, column {}", e.line(), e.column());
                     }
                 };
                 on_message(state, sink, device_id, conn_id, hostname, msg).await?;
@@ -737,6 +739,13 @@ async fn on_message(
                 policy,
                 agent_account,
             );
+        }
+        AgentMsg::BackgroundTerminal { session_id, event } => {
+            if state.registry.current_conn(device_id) == Some(conn_id) {
+                state
+                    .terminal_sessions
+                    .agent_event(device_id, conn_id, session_id, event);
+            }
         }
         AgentMsg::Job(report) => {
             let job_id = report.job_id;

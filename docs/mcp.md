@@ -79,3 +79,5 @@ Enable device diagnostics on a Flyw8t MCP profile with a technician API token sc
 ## Hand off to the technician console
 
 Call `device_terminal_handoff` with an explicit `device_id` on a device-diagnostics profile with `read` scope. The tool checks the device through the scoped API and returns its connection options URL on the configured Flyw8t origin. Open it in the technician's authenticated browser. On a Windows device, the Connect section shows the local opt-in check when the agent is online and the technician has control permission. It explains the requirement when the check is unavailable. The browser handles sign-in, authorization, and the technician's actions. [Background terminal status and acceptance](background-terminal.md)
+
+Call `device_terminal_status` with the `device_id` and `session_id` to read lifecycle evidence for a session you initiated. The credential needs `read` scope and its owner needs current technician access to the device. Results include the account, state, observation time, and reason when available. Terminal input, output, reconnect, and close use the authenticated browser.
