@@ -118,6 +118,9 @@ impl Server {
                 }
                 if api.device_diagnostics {
                     tools.extend(device::Tool::ALL.into_iter().map(device::Tool::schema));
+                    if capabilities.background_terminal_status {
+                        tools.push(device::Tool::TerminalStatus.schema());
+                    }
                 }
                 json!({"tools":tools})
             }

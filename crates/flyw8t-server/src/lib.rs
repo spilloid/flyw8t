@@ -38,6 +38,8 @@ pub mod scripts;
 pub mod sessions;
 pub mod support;
 mod terminal_admission;
+mod terminal_session;
+mod terminal_status;
 pub mod totp;
 pub mod trust;
 pub mod users;
@@ -68,6 +70,7 @@ pub struct AppState {
     pub remote_access: Box<dyn remote_access::RemoteAccessProvider>,
     pub support: support::SupportHub,
     terminal_admissions: terminal_admission::Admissions,
+    terminal_sessions: terminal_session::Hub,
     pub started_unix: u64,
     pub bodies: BodyGate,
     pub oidc_flows: oidc::Flows,
@@ -102,6 +105,7 @@ pub async fn init(config: Config) -> anyhow::Result<Shared> {
         remote_access: Box::new(remote_access::NotConfigured),
         support: Default::default(),
         terminal_admissions: Default::default(),
+        terminal_sessions: Default::default(),
         started_unix: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
         bodies: BodyGate::default(),
         oidc_flows: Default::default(),
@@ -218,6 +222,22 @@ pub fn router(state: Shared) -> Router {
         .route(
             "/devices/{id}/background-terminal/admission",
             post(terminal_admission::confirm),
+        )
+        .route(
+            "/devices/{device}/background-terminal/sessions/{session}",
+            get(terminal_session::session_page),
+        )
+        .route(
+            "/devices/{device}/background-terminal/sessions/{session}/ws",
+            get(terminal_session::session_ws),
+        )
+        .route(
+            "/devices/{device}/background-terminal/sessions/{session}/end",
+            post(terminal_session::request_end),
+        )
+        .route(
+            "/devices/{device}/background-terminal/sessions/{session}/status",
+            get(terminal_status::browser_status),
         )
         .route("/devices/{id}/jobs", post(web::run_job))
         .route("/devices/{id}/revoke", post(web::revoke_device))
@@ -358,6 +378,9 @@ pub fn router(state: Shared) -> Router {
             get(support::open_invite).post(support::spend_invite),
         )
         .route("/static/support.js", get(support_script))
+        .route("/static/terminal.js", get(terminal_script))
+        .route("/static/xterm.js", get(xterm_script))
+        .route("/static/xterm.css", get(xterm_stylesheet))
         .route("/static/editor.js", get(editor_script))
         .route("/static/passkey.js", get(passkey_script))
         .route("/static/app.css", get(stylesheet))
@@ -390,6 +413,10 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/api/v1/devices", get(api::devices))
         .route("/api/v1/devices/{id}", get(api::device))
+        .route(
+            "/api/v1/devices/{device}/background-terminal/sessions/{session}/status",
+            get(terminal_status::api_status),
+        )
         .route(
             "/api/v1/devices/{id}/jobs",
             get(api::device_jobs).post(api::create_job),
@@ -473,6 +500,29 @@ async fn support_script() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         flyw8t_web::SUPPORT_JS,
+    )
+        .into_response()
+}
+
+async fn terminal_script() -> Response {
+    terminal_asset("text/javascript; charset=utf-8", flyw8t_web::TERMINAL_JS)
+}
+
+async fn xterm_script() -> Response {
+    terminal_asset("text/javascript; charset=utf-8", flyw8t_web::XTERM_JS)
+}
+
+async fn xterm_stylesheet() -> Response {
+    terminal_asset("text/css; charset=utf-8", flyw8t_web::XTERM_CSS)
+}
+
+fn terminal_asset(content_type: &'static str, contents: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        contents,
     )
         .into_response()
 }

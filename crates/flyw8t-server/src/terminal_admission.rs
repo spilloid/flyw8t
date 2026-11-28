@@ -9,9 +9,11 @@ use crate::Shared;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::header;
-use axum::response::Response;
+use axum::response::{IntoResponse, Redirect, Response};
 use flyw8t_domain::Permission;
 use flyw8t_protocol::messages::BackgroundTerminalPolicy;
+use flyw8t_protocol::script::WindowsExecutionAccount;
+use flyw8t_protocol::terminal::CAP_BACKGROUND_TERMINAL;
 use flyw8t_web::{BackgroundTerminalPolicyCheck as Check, BackgroundTerminalStep};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -33,6 +35,7 @@ struct Admission {
     device: Uuid,
     organization: Uuid,
     connection: Uuid,
+    live_terminal: bool,
     policy_check: Uuid,
     expires: Instant,
 }
@@ -89,7 +92,7 @@ pub(crate) async fn check(
 ) -> Response {
     page(&p, async {
         authorize(&p, &Form::parse(&body))?;
-        observe(&state, &p, device, None).await
+        observe(&state, &p, device, None, false).await
     })
     .await
 }
@@ -107,7 +110,14 @@ pub(crate) async fn confirm(
             .get("admission")
             .and_then(|secret| state.terminal_admissions.claim(&p, device, secret))
             .ok_or(AppError::NotFound)?;
-        observe(&state, &p, device, Some(admission)).await
+        observe(
+            &state,
+            &p,
+            device,
+            Some(admission),
+            form.get("start_terminal") == Some("1"),
+        )
+        .await
     })
     .await
 }
@@ -139,6 +149,7 @@ async fn observe(
     p: &Principal,
     device: Uuid,
     admission: Option<Admission>,
+    start_terminal: bool,
 ) -> AppResult<Response> {
     let request_id = Uuid::new_v4();
     let (requested, result) = if admission.is_some() {
@@ -244,6 +255,28 @@ async fn observe(
     audit.detail(detail(fields)).record(&mut *tx).await?;
     tx.commit().await?;
 
+    let live_connection = connection.filter(|connection| {
+        matches!(finding, Check::Enabled)
+            && agent_account == Some(WindowsExecutionAccount::LocalSystem)
+            && state
+                .registry
+                .has_capability(device, *connection, CAP_BACKGROUND_TERMINAL)
+    });
+    if start_terminal {
+        let connection = live_connection.filter(|_| {
+            admission.as_ref().is_some_and(|grant| grant.live_terminal)
+        }).ok_or_else(|| {
+            AppError::Conflict(
+                "The agent could not verify LocalSystem background terminal access. Check policy again."
+                    .into(),
+            )
+        })?;
+        let id = state
+            .terminal_sessions
+            .reserve(state, p, device, org, connection)?;
+        return Ok(Redirect::to(&crate::terminal_session::url(device, id)).into_response());
+    }
+
     let step = if admission.is_some() {
         BackgroundTerminalStep::Confirmation
     } else {
@@ -256,6 +289,7 @@ async fn observe(
                     device,
                     organization: org,
                     connection,
+                    live_terminal: live_connection.is_some(),
                     policy_check: request_id,
                     expires: Instant::now() + TTL,
                 };
@@ -263,7 +297,10 @@ async fn observe(
             }
             _ => None,
         };
-        BackgroundTerminalStep::Policy(secret)
+        match (live_connection, secret) {
+            (Some(_), Some(admission)) => BackgroundTerminalStep::LivePolicy { admission },
+            (_, secret) => BackgroundTerminalStep::Policy(secret),
+        }
     };
     let mut response = html(flyw8t_web::background_terminal_policy_result(
         &ctx(p, None),
@@ -316,6 +353,7 @@ mod tests {
             device,
             organization: Uuid::new_v4(),
             connection,
+            live_terminal: false,
             policy_check: Uuid::new_v4(),
             expires: Instant::now() - Duration::from_secs(1),
         };

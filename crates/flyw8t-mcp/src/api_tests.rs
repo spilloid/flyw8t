@@ -129,6 +129,7 @@ fn servers_with_only_the_screenshot_capability_still_work() {
         serde_json::from_value(json!({"support_screenshot":true})).unwrap();
     assert!(capabilities.support_screenshot);
     assert!(!capabilities.support_session_status);
+    assert!(!capabilities.background_terminal_status);
 }
 
 #[tokio::test]
@@ -149,6 +150,18 @@ async fn advertises_diagnostics_only_after_opt_in() {
                 "device_system_info",
                 "device_system_info_status",
                 "device_terminal_handoff",
+            ],
+        ),
+        (
+            true,
+            "200 OK",
+            json!({"support_screenshot":false,"background_terminal_status":true}),
+            vec![
+                "device_list",
+                "device_system_info",
+                "device_system_info_status",
+                "device_terminal_handoff",
+                "device_terminal_status",
             ],
         ),
     ] {
@@ -181,6 +194,47 @@ async fn advertises_diagnostics_only_after_opt_in() {
                 .await["error"]["code"],
                 -32602
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_status_only_reads_matching_lifecycle_metadata() {
+    for returned_device in [DEVICE, JOB] {
+        let (mut server, thread) = fixture(
+            true,
+            "200 OK",
+            json!({
+                "device_id": returned_device, "session_id": REQUEST, "state": "ended",
+                "account": "local_system", "reason": "closed", "observed_at": "2026-11-28T04:25:00Z",
+                "output": "fixture-terminal-content"
+            }),
+            |headers, body| {
+                assert!(headers.starts_with(&format!(
+                    "GET /api/v1/devices/{DEVICE}/background-terminal/sessions/{REQUEST}/status "
+                )));
+                assert!(body.is_empty());
+            },
+        );
+        let invalid = call(
+            &mut server,
+            "device_terminal_status",
+            json!({"device_id":DEVICE,"session_id":REQUEST,"input":"forbidden"}),
+        )
+        .await;
+        assert_eq!(invalid["result"]["isError"], true);
+        let response = call(
+            &mut server,
+            "device_terminal_status",
+            json!({"device_id":DEVICE,"session_id":REQUEST}),
+        )
+        .await;
+        thread.join().unwrap();
+        assert!(!response.to_string().contains("fixture-terminal-content"));
+        if returned_device == DEVICE {
+            assert_eq!(response["result"]["structuredContent"]["state"], "ended");
+        } else {
+            assert_eq!(response["result"]["isError"], true);
         }
     }
 }

@@ -412,6 +412,18 @@ pub async fn device_activity(
                     "device.background_terminal_admission.result" => {
                         "Background terminal access confirmation recorded"
                     }
+                    "device.background_terminal.attachment" => "Background terminal attached",
+                    "device.background_terminal.started" => "Background PowerShell started",
+                    "device.background_terminal.detached" => "Background terminal detached",
+                    "device.background_terminal.reattached" => "Background terminal reattached",
+                    "device.background_terminal.end_requested" => {
+                        "Background terminal end requested"
+                    }
+                    "device.background_terminal.ended" => "Background terminal ended",
+                    "device.background_terminal.rejected" => "Background terminal rejected",
+                    "device.background_terminal.end_unconfirmed" => {
+                        "Background terminal end unconfirmed"
+                    }
                     "device.support.connected" => "Linked screen share connected",
                     "device.support.ended" => "Linked screen share ended",
                     "job.create" => "Job requested",

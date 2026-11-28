@@ -4,6 +4,7 @@ use crate::agent_update::Release;
 use crate::catalog::Action;
 use crate::inventory::InventoryReport;
 use crate::script::WindowsExecutionAccount;
+use crate::terminal::{TerminalCommand, TerminalEvent};
 use crate::PhysicalConsoleState;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -69,6 +70,11 @@ pub enum ServerMsg {
     CheckPhysicalConsole { request_id: Uuid },
     /// Inspect the endpoint administrator's setting on this connection.
     CheckBackgroundTerminalPolicy { request_id: Uuid },
+    /// A command for the technician's live terminal on this authenticated connection.
+    BackgroundTerminal {
+        session_id: Uuid,
+        command: TerminalCommand,
+    },
 }
 
 /// The organization and site the server assigned when the device enrolled.
@@ -209,6 +215,11 @@ pub enum AgentMsg {
         /// Account class observed on the current agent process. Older agents omit it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_account: Option<WindowsExecutionAccount>,
+    },
+    /// A terminal event from the enrolled device. Content is never included in audit records.
+    BackgroundTerminal {
+        session_id: Uuid,
+        event: TerminalEvent,
     },
 }
 

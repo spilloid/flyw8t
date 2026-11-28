@@ -42,6 +42,8 @@ pub const CAPABILITIES: &[&str] = &[
     flyw8t_protocol::messages::CAP_SCRIPTS,
     #[cfg(windows)]
     flyw8t_protocol::messages::CAP_BACKGROUND_TERMINAL_POLICY,
+    #[cfg(windows)]
+    flyw8t_protocol::terminal::CAP_BACKGROUND_TERMINAL,
 ];
 
 pub use config::AgentConfig;

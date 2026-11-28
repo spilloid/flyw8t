@@ -52,6 +52,8 @@ pub struct Capabilities {
     pub support_screenshot: bool,
     #[serde(default)]
     pub support_session_status: bool,
+    #[serde(default)]
+    pub background_terminal_status: bool,
 }
 
 #[derive(Deserialize, serde::Serialize)]

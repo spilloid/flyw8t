@@ -32,6 +32,11 @@ pub const SUPPORT_JS: &str = concat!(
     "\n})();"
 );
 
+/// The live browser terminal and its locally served terminal renderer.
+pub const TERMINAL_JS: &str = include_str!("terminal.js");
+pub const XTERM_JS: &str = include_str!("vendor/xterm/xterm.js");
+pub const XTERM_CSS: &str = include_str!("vendor/xterm/xterm.css");
+
 /// Script for the script editor page only (ADR-0014), served at `/static/editor.js`.
 pub const EDITOR_JS: &str = include_str!("editor.js");
 
