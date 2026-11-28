@@ -725,10 +725,18 @@ async fn on_message(
                 .registry
                 .physical_console_status(device_id, conn_id, request_id, observed);
         }
-        AgentMsg::BackgroundTerminalPolicyStatus { request_id, policy } => {
-            state
-                .registry
-                .background_terminal_policy_status(device_id, conn_id, request_id, policy);
+        AgentMsg::BackgroundTerminalPolicyStatus {
+            request_id,
+            policy,
+            agent_account,
+        } => {
+            state.registry.background_terminal_policy_status(
+                device_id,
+                conn_id,
+                request_id,
+                policy,
+                agent_account,
+            );
         }
         AgentMsg::Job(report) => {
             let job_id = report.job_id;

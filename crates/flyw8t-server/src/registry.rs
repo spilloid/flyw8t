@@ -5,6 +5,7 @@
 //! is shown as history, never as liveness.
 
 use flyw8t_protocol::messages::{BackgroundTerminalPolicy, CAP_BACKGROUND_TERMINAL_POLICY};
+use flyw8t_protocol::script::WindowsExecutionAccount;
 use flyw8t_protocol::{PhysicalConsoleState, ServerMsg};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,7 +54,12 @@ enum CheckKind {
 
 enum CheckReply {
     PhysicalConsole(PhysicalConsoleState),
-    BackgroundTerminalPolicy(BackgroundTerminalPolicy),
+    BackgroundTerminalPolicy(BackgroundTerminalObservation),
+}
+
+pub(crate) struct BackgroundTerminalObservation {
+    pub policy: BackgroundTerminalPolicy,
+    pub agent_account: Option<WindowsExecutionAccount>,
 }
 
 impl CheckReply {
@@ -252,7 +258,7 @@ impl Registry {
         request_id: Uuid,
         expected_connection: Option<Uuid>,
         valid_until: Option<Instant>,
-    ) -> Result<(Uuid, BackgroundTerminalPolicy), ConsoleCheckError> {
+    ) -> Result<(Uuid, BackgroundTerminalObservation), ConsoleCheckError> {
         let deadline = Instant::now() + DEVICE_CHECK_TIMEOUT;
         match self
             .observe(
@@ -264,7 +270,7 @@ impl Registry {
             )
             .await?
         {
-            (connection, CheckReply::BackgroundTerminalPolicy(policy)) => Ok((connection, policy)),
+            (connection, CheckReply::BackgroundTerminalPolicy(report)) => Ok((connection, report)),
             _ => Err(ConsoleCheckError::Unsupported),
         }
     }
@@ -365,12 +371,16 @@ impl Registry {
         conn_id: Uuid,
         request_id: Uuid,
         policy: BackgroundTerminalPolicy,
+        agent_account: Option<WindowsExecutionAccount>,
     ) -> bool {
         self.receive_observation(
             device_id,
             conn_id,
             request_id,
-            CheckReply::BackgroundTerminalPolicy(policy),
+            CheckReply::BackgroundTerminalPolicy(BackgroundTerminalObservation {
+                policy,
+                agent_account,
+            }),
         )
     }
 

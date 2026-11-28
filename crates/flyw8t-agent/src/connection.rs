@@ -305,17 +305,24 @@ impl Agent {
                                 let (state_dir, device) = (self.cfg.state_dir.clone(), self.device_id);
                                 checks.push(async move {
                                     #[cfg(windows)]
-                                    let policy = tokio::task::spawn_blocking(move || {
-                                        crate::terminal::read_background_policy(&state_dir, device)
-                                    }).await.unwrap_or(BackgroundTerminalPolicy::Unavailable);
+                                    let (policy, agent_account) = tokio::task::spawn_blocking(move || {
+                                        (
+                                            crate::terminal::read_background_policy(&state_dir, device),
+                                            crate::runner::current_windows_execution_account(),
+                                        )
+                                    }).await.unwrap_or((BackgroundTerminalPolicy::Unavailable, None));
                                     #[cfg(not(windows))]
-                                    let policy = BackgroundTerminalPolicy::Unavailable;
-                                    AgentMsg::BackgroundTerminalPolicyStatus { request_id, policy }
+                                    let (policy, agent_account) = (
+                                        BackgroundTerminalPolicy::Unavailable,
+                                        crate::runner::current_windows_execution_account(),
+                                    );
+                                    AgentMsg::BackgroundTerminalPolicyStatus { request_id, policy, agent_account }
                                 }.boxed());
                             } else {
                                 let reply = AgentMsg::BackgroundTerminalPolicyStatus {
                                     request_id,
                                     policy: BackgroundTerminalPolicy::Unavailable,
+                                    agent_account: None,
                                 };
                                 send(&mut ws, &reply).await?;
                             }

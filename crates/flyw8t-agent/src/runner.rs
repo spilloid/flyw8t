@@ -197,6 +197,21 @@ pub struct Output {
     pub windows_account: Option<WindowsExecutionAccount>,
 }
 
+/// The Windows account class of the agent process.
+pub(crate) fn current_windows_execution_account() -> Option<WindowsExecutionAccount> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        // SAFETY: the current-process pseudo-handle is valid and requires no cleanup.
+        platform::execution_account(unsafe { GetCurrentProcess() })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// `run\<job id>` in the state folder, made new: an existing one fails the job.
 #[cfg(windows)]
 fn job_folder(state_dir: &Path, job: uuid::Uuid) -> anyhow::Result<PathBuf> {
@@ -323,10 +338,10 @@ mod platform {
         Err(std::io::Error::last_os_error().into())
     }
 
-    fn execution_account(process: &Owned) -> Option<WindowsExecutionAccount> {
+    pub(super) fn execution_account(process: HANDLE) -> Option<WindowsExecutionAccount> {
         let mut token = Owned(std::ptr::null_mut());
-        // SAFETY: the process handle is owned and the output is a writable handle slot.
-        if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token.0) } == 0 {
+        // SAFETY: callers lend a live process handle and the output is a writable handle slot.
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token.0) } == 0 {
             return None;
         }
         const TOKEN_BYTES: usize =
@@ -593,7 +608,7 @@ mod platform {
         }
         let process = Owned(pi.hProcess);
         drop(Owned(pi.hThread));
-        let windows_account = execution_account(&process);
+        let windows_account = execution_account(process.0);
 
         let out_reader = reader(out_parent.take());
         let err_reader = reader(err_parent.take());

@@ -3,6 +3,7 @@
 use crate::agent_update::Release;
 use crate::catalog::Action;
 use crate::inventory::InventoryReport;
+use crate::script::WindowsExecutionAccount;
 use crate::PhysicalConsoleState;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -205,6 +206,9 @@ pub enum AgentMsg {
     BackgroundTerminalPolicyStatus {
         request_id: Uuid,
         policy: BackgroundTerminalPolicy,
+        /// Account class observed on the current agent process. Older agents omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_account: Option<WindowsExecutionAccount>,
     },
 }
 

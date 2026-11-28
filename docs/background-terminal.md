@@ -18,6 +18,11 @@ An audit event records the initiator, device, execution account class, session l
 
 The console now verifies the admission conditions. From **Check background terminal policy**, an enabled device shows **Verify session access**. The confirmation has a 30-second lifetime and works once in the same browser sign-in. It rechecks the original device connection, current local opt-in, and technician access. The agent registry checks the confirmation deadline before queuing its policy request and uses that deadline to decide whether a reply is timely. Device Activity shows whether the agent reported its local policy enabled or disabled at the time of each successful policy check. Audit links each access confirmation to its policy check. The interactive session and its lifecycle remain open.
 
+When available, the policy and confirmation results show the account class of the
+current Windows agent process. The agent reports a coarse class such as LocalSystem
+or Network Service. Audit records the same observation on the matched, authorized
+policy response. Older agents can still report policy without the account class.
+
 ## Live terminal delivery checklist
 
 - [x] Provide a credential-free MCP link to the connection options for a device the integration can read. The technician opens it in their authenticated browser. [MCP handoff](mcp.md#hand-off-to-the-technician-console)

@@ -12,7 +12,7 @@ pub const MAX_PARAMETERS: usize = 16 * 1024;
 /// The languages a script may be written in.
 pub const LANGUAGES: &[&str] = &["powershell", "bash", "python"];
 
-/// The account class observed on the Windows script interpreter's primary token.
+/// The account class observed on a Windows process's primary token.
 /// Reports carry the class alone, without the SID or account name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

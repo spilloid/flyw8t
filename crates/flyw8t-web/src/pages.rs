@@ -1287,12 +1287,22 @@ pub enum BackgroundTerminalStep {
     Confirmation,
 }
 
+fn windows_execution_account_label(account: WindowsExecutionAccount) -> &'static str {
+    match account {
+        WindowsExecutionAccount::LocalSystem => "LocalSystem (NT AUTHORITY\\SYSTEM)",
+        WindowsExecutionAccount::LocalService => "Local Service",
+        WindowsExecutionAccount::NetworkService => "Network Service",
+        WindowsExecutionAccount::OtherWindowsAccount => "Other Windows account",
+    }
+}
+
 pub fn background_terminal_policy_result(
     ctx: &PageCtx,
     device: uuid::Uuid,
     device_name: &str,
     result: BackgroundTerminalPolicyCheck,
     step: BackgroundTerminalStep,
+    agent_account: Option<WindowsExecutionAccount>,
 ) -> String {
     use BackgroundTerminalPolicyCheck::*;
 
@@ -1331,6 +1341,7 @@ pub fn background_terminal_policy_result(
         <h1>{title}</h1>
         <section class="card" aria-labelledby="terminal-policy-finding">
             <h2 id="terminal-policy-finding">{finding}</h2>
+            {agent_account.map(|account| view! { <p><strong>"Current agent account: "</strong>{windows_execution_account_label(account)}</p> })}
             {confirmation}
             <p>"Interactive PowerShell sessions are still in development."</p>
             <p class="muted small">"Checked at "<time datetime=fmt::iso(ctx.now)>{fmt::timestamp(ctx.now)}</time></p>
@@ -1711,12 +1722,7 @@ pub fn job_page(ctx: &PageCtx, j: JobDetail, can_cancel: bool) -> String {
         view! { <h3>"Structured result"</h3><pre class="output">{pretty}</pre> }
     });
     let account = account
-        .map(|account| match account {
-            WindowsExecutionAccount::LocalSystem => "LocalSystem (NT AUTHORITY\\SYSTEM)",
-            WindowsExecutionAccount::LocalService => "Local Service",
-            WindowsExecutionAccount::NetworkService => "Network Service",
-            WindowsExecutionAccount::OtherWindowsAccount => "Other Windows account",
-        })
+        .map(windows_execution_account_label)
         .or_else(|| {
             (j.row.action == "script.run" && j.finished_at.is_some() && j.started_at.is_some())
                 .then_some("Unavailable")
@@ -4037,6 +4043,39 @@ mod tests {
         JobsView {
             page: 1,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn terminal_policy_shows_only_an_agent_reported_account() {
+        let render = |account| {
+            background_terminal_policy_result(
+                &ctx(),
+                Uuid::nil(),
+                "Device",
+                BackgroundTerminalPolicyCheck::Enabled,
+                BackgroundTerminalStep::Policy(None),
+                account,
+            )
+        };
+        let legacy = render(None);
+        assert!(!legacy.contains("Current agent account"));
+        for (account, label) in [
+            (
+                WindowsExecutionAccount::LocalSystem,
+                "LocalSystem (NT AUTHORITY\\SYSTEM)",
+            ),
+            (WindowsExecutionAccount::LocalService, "Local Service"),
+            (WindowsExecutionAccount::NetworkService, "Network Service"),
+            (
+                WindowsExecutionAccount::OtherWindowsAccount,
+                "Other Windows account",
+            ),
+        ] {
+            let html = render(Some(account));
+            assert!(html.contains("Current agent account:"));
+            assert!(html.contains(label));
+            assert!(html.contains("Interactive PowerShell sessions are still in development."));
         }
     }
 
