@@ -31,6 +31,7 @@ pub enum TerminalCommand {
     },
     Renew {
         attachment: Uuid,
+        check: Uuid,
     },
     Detach {
         attachment: Uuid,
@@ -58,6 +59,10 @@ pub enum TerminalEvent {
     Ack {
         attachment: Uuid,
         sequence: u64,
+    },
+    LeaseRenewed {
+        attachment: Uuid,
+        check: Uuid,
     },
     Ended {
         attachment: Uuid,

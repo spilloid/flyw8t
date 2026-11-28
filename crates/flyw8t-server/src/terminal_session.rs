@@ -443,6 +443,43 @@ struct Binding {
     connection: Uuid,
 }
 
+/// Terminal liveness is stricter than gateway registration. A quiet Windows
+/// socket can blackhole without the larger gateway heartbeat noticing.
+struct EndpointLease {
+    confirmed: Instant,
+    outstanding: Option<Uuid>,
+}
+
+impl EndpointLease {
+    fn new(confirmed: Instant) -> Self {
+        Self {
+            confirmed,
+            outstanding: None,
+        }
+    }
+
+    fn expired_at(&self, now: Instant) -> Option<Instant> {
+        let deadline = self.confirmed + TERMINAL_LEASE;
+        (now >= deadline).then_some(deadline)
+    }
+
+    fn challenge(&mut self, now: Instant) -> Option<Uuid> {
+        if self.outstanding.is_some() || self.expired_at(now).is_some() {
+            return None;
+        }
+        let check = Uuid::new_v4();
+        self.outstanding = Some(check);
+        Some(check)
+    }
+
+    fn confirm(&mut self, check: Uuid, now: Instant) {
+        if self.outstanding == Some(check) && self.expired_at(now).is_none() {
+            self.outstanding = None;
+            self.confirmed = now;
+        }
+    }
+}
+
 struct BrowserAttachment {
     id: Uuid,
     frames: mpsc::Sender<BrowserFrame>,
@@ -453,6 +490,7 @@ struct BrowserAttachment {
     next_input: u64,
     last_ack: u64,
     ready_before: Instant,
+    lease: EndpointLease,
 }
 
 #[derive(Clone, Copy)]
@@ -679,6 +717,7 @@ impl Terminal {
             next_input: 1,
             last_ack: 0,
             ready_before: Instant::now() + ATTACH_TIMEOUT,
+            lease: EndpointLease::new(Instant::now()),
         });
         self.phase = Phase::Attached;
         if !audit_committed {
@@ -694,6 +733,10 @@ impl Terminal {
             return;
         };
         if !browser.ready {
+            return;
+        }
+        if let Some(expired_at) = browser.lease.expired_at(Instant::now()) {
+            self.detach_at(expired_at).await;
             return;
         }
         if browser.frames.is_closed() {
@@ -713,6 +756,11 @@ impl Terminal {
                     return;
                 }
             };
+        if let Some(expired_at) = self.endpoint_expired_at(Instant::now()) {
+            drop(tx);
+            self.detach_at(expired_at).await;
+            return;
+        }
         let sent = self
             .browser
             .as_ref()
@@ -736,6 +784,12 @@ impl Terminal {
     }
 
     async fn detach(&mut self) {
+        let now = Instant::now();
+        self.detach_at(self.endpoint_expired_at(now).unwrap_or(now))
+            .await;
+    }
+
+    async fn detach_at(&mut self, lost_at: Instant) {
         let resume =
             self.browser
                 .take()
@@ -748,10 +802,17 @@ impl Terminal {
             },
         );
         self.phase = Phase::Detached {
-            until: resume.map_or_else(|| Instant::now() + TERMINAL_GRACE, |r| r.until),
+            until: resume.map_or(lost_at + TERMINAL_GRACE, |r| r.until),
         };
         self.audit("device.background_terminal.detached", None, true)
             .await;
+    }
+
+    fn endpoint_expired_at(&self, now: Instant) -> Option<Instant> {
+        self.browser
+            .as_ref()
+            .filter(|browser| browser.ready)
+            .and_then(|browser| browser.lease.expired_at(now))
     }
 
     async fn end(&mut self, reason: TerminalEndReason) {
@@ -846,7 +907,13 @@ impl Terminal {
             Phase::Attached => {
                 let Some(browser) = &self.browser else { return };
                 if !browser.ready && now >= browser.ready_before {
-                    self.end(TerminalEndReason::Unavailable).await;
+                    if browser.resume.is_some() {
+                        // A probe of a stale TCP connection can time out long
+                        // before the original reconnect deadline.
+                        self.detach().await;
+                    } else {
+                        self.end(TerminalEndReason::Unavailable).await;
+                    }
                     return;
                 }
                 let Some(binding) = self.binding else { return };
@@ -854,6 +921,10 @@ impl Terminal {
                     || self.state.registry.current_conn(self.device) != Some(binding.connection)
                 {
                     self.detach().await;
+                    return;
+                }
+                if let Some(expired_at) = self.endpoint_expired_at(now) {
+                    self.detach_at(expired_at).await;
                     return;
                 }
                 let (tx, _) =
@@ -866,10 +937,25 @@ impl Terminal {
                             return;
                         }
                     };
+                let now = Instant::now();
+                if let Some(expired_at) = self.endpoint_expired_at(now) {
+                    drop(tx);
+                    self.detach_at(expired_at).await;
+                    return;
+                }
+                let Some(check) = self
+                    .browser
+                    .as_mut()
+                    .filter(|browser| browser.ready)
+                    .and_then(|browser| browser.lease.challenge(now))
+                else {
+                    return;
+                };
                 let sent = self.send_agent(
                     binding.connection,
                     TerminalCommand::Renew {
                         attachment: binding.attachment,
+                        check,
                     },
                 );
                 drop(tx);
@@ -886,6 +972,7 @@ impl Terminal {
             TerminalEvent::Ready { attachment, .. }
             | TerminalEvent::Output { attachment, .. }
             | TerminalEvent::Ack { attachment, .. }
+            | TerminalEvent::LeaseRenewed { attachment, .. }
             | TerminalEvent::Ended { attachment, .. }
             | TerminalEvent::Rejected { attachment, .. } => *attachment,
         };
@@ -913,6 +1000,17 @@ impl Terminal {
         if !matches!(self.phase, Phase::Attached) || message.connection != binding.connection {
             return;
         }
+        let now = Instant::now();
+        if let Some(expired_at) = self.endpoint_expired_at(now) {
+            self.detach_at(expired_at).await;
+            return;
+        }
+        if let TerminalEvent::LeaseRenewed { check, .. } = &message.event {
+            if let Some(browser) = self.browser.as_mut().filter(|browser| browser.ready) {
+                browser.lease.confirm(*check, now);
+            }
+            return;
+        }
         let Some(browser) = &self.browser else { return };
         match &message.event {
             TerminalEvent::Ready {
@@ -922,7 +1020,13 @@ impl Terminal {
                     self.end(TerminalEndReason::Unavailable).await;
                     return;
                 }
-                let resumed = browser.resume.is_some();
+                let resume = browser.resume;
+                let resumed = resume.is_some();
+                if resume.is_some_and(|resume| now >= resume.until) {
+                    self.detach().await;
+                    self.end(TerminalEndReason::Expired).await;
+                    return;
+                }
                 let (mut tx, _) =
                     match live_access(&self.state, &self.actor, self.device, self.organization)
                         .await
@@ -953,6 +1057,7 @@ impl Terminal {
                 if let Some(browser) = &mut self.browser {
                     browser.ready = true;
                     browser.next_output = *offset;
+                    browser.lease = EndpointLease::new(now);
                 }
                 self.output_seen = self.output_seen.max(*offset);
             }
@@ -1016,5 +1121,48 @@ impl Terminal {
                 self.detach().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unconfirmed_lease_expires_even_with_an_outstanding_challenge() {
+        let started = Instant::now();
+        let mut lease = EndpointLease::new(started);
+        let before = started + TERMINAL_RENEWAL;
+        let deadline = started + TERMINAL_LEASE;
+        let check = lease.challenge(before).unwrap();
+        assert!(lease.challenge(before + TERMINAL_RENEWAL).is_none());
+        assert_eq!(lease.expired_at(deadline), Some(deadline));
+
+        lease.confirm(check, deadline);
+        assert_eq!(
+            lease.expired_at(deadline + TERMINAL_RENEWAL),
+            Some(deadline)
+        );
+        assert!(lease.challenge(deadline).is_none());
+    }
+
+    #[test]
+    fn only_a_fresh_matching_reply_confirms_endpoint_liveness() {
+        let started = Instant::now();
+        let mut lease = EndpointLease::new(started);
+        let first = started + TERMINAL_RENEWAL;
+        let check = lease.challenge(first).unwrap();
+        lease.confirm(Uuid::nil(), first + Duration::from_secs(1));
+        assert_eq!(lease.confirmed, started);
+        assert_eq!(lease.outstanding, Some(check));
+
+        let confirmed = first + Duration::from_secs(2);
+        lease.confirm(check, confirmed);
+        assert_eq!(lease.confirmed, confirmed);
+        assert!(lease.outstanding.is_none());
+        let next = lease.challenge(confirmed + TERMINAL_RENEWAL).unwrap();
+        lease.confirm(check, confirmed + TERMINAL_RENEWAL);
+        assert_eq!(lease.confirmed, confirmed);
+        assert_eq!(lease.outstanding, Some(next));
     }
 }
