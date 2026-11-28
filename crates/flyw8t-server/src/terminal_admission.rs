@@ -3,7 +3,7 @@
 use crate::audit::Audit;
 use crate::auth::{self, Channel, Principal, WebUser};
 use crate::error::{AppError, AppResult};
-use crate::registry::{ConsoleCheckError, Registry};
+use crate::registry::{BackgroundTerminalObservation, ConsoleCheckError, Registry};
 use crate::web::{check_csrf, constant_time_eq, ctx, html, page, windows_observation_target, Form};
 use crate::Shared;
 use axum::body::Bytes;
@@ -123,7 +123,7 @@ async fn observe_agent(
     device: Uuid,
     request_id: Uuid,
     admission: Option<&Admission>,
-) -> Option<Result<(Uuid, BackgroundTerminalPolicy), ConsoleCheckError>> {
+) -> Option<Result<(Uuid, BackgroundTerminalObservation), ConsoleCheckError>> {
     let expected = admission.map(|grant| grant.connection);
     let expires = admission.map(|grant| grant.expires);
     let reply = registry
@@ -207,39 +207,41 @@ async fn observe(
                 .is_none_or(|grant| grant.expires > Instant::now())
         })
         .map(|reply| {
-            reply.and_then(|(connection, policy)| {
+            reply.and_then(|(connection, report)| {
                 if state.registry.current_conn(device) == Some(connection) {
-                    Ok((connection, policy))
+                    Ok((connection, report))
                 } else {
                     Err(ConsoleCheckError::NotConnected)
                 }
             })
         });
-    let (finding, status, connection) = match reply {
-        None => (Check::Expired, "expired", None),
-        Some(Ok((conn, BackgroundTerminalPolicy::Enabled))) => {
-            (Check::Enabled, "enabled", Some(conn))
+    let (finding, status, connection, agent_account) = match reply {
+        None => (Check::Expired, "expired", None, None),
+        Some(Ok((conn, report))) => {
+            let (finding, status) = match report.policy {
+                BackgroundTerminalPolicy::Enabled => (Check::Enabled, "enabled"),
+                BackgroundTerminalPolicy::Disabled => (Check::Disabled, "disabled"),
+                BackgroundTerminalPolicy::Unavailable => (Check::Unavailable, "unavailable"),
+            };
+            (finding, status, Some(conn), report.agent_account)
         }
-        Some(Ok((conn, BackgroundTerminalPolicy::Disabled))) => {
-            (Check::Disabled, "disabled", Some(conn))
+        Some(Err(ConsoleCheckError::NotConnected)) => (Check::Offline, "not_connected", None, None),
+        Some(Err(ConsoleCheckError::Unsupported)) => {
+            (Check::Unsupported, "unsupported", None, None)
         }
-        Some(Ok((conn, BackgroundTerminalPolicy::Unavailable))) => {
-            (Check::Unavailable, "unavailable", Some(conn))
-        }
-        Some(Err(ConsoleCheckError::NotConnected)) => (Check::Offline, "not_connected", None),
-        Some(Err(ConsoleCheckError::Unsupported)) => (Check::Unsupported, "unsupported", None),
-        Some(Err(ConsoleCheckError::Busy)) => (Check::Busy, "busy", None),
-        Some(Err(ConsoleCheckError::Timeout)) => (Check::TimedOut, "timeout", None),
+        Some(Err(ConsoleCheckError::Busy)) => (Check::Busy, "busy", None, None),
+        Some(Err(ConsoleCheckError::Timeout)) => (Check::TimedOut, "timeout", None, None),
     };
     let audit = match (finding, admission.is_some()) {
         (Check::Enabled, _) | (Check::Disabled, false) => audit,
         (Check::Disabled | Check::Expired, true) => audit.denied(),
         _ => audit.failed(),
     };
-    audit
-        .detail(detail(json!({"status": status, "connection": connection})))
-        .record(&mut *tx)
-        .await?;
+    let mut fields = json!({"status": status, "connection": connection});
+    if let Some(account) = agent_account {
+        fields["agent_account"] = json!(account);
+    }
+    audit.detail(detail(fields)).record(&mut *tx).await?;
     tx.commit().await?;
 
     let step = if admission.is_some() {
@@ -269,6 +271,7 @@ async fn observe(
         &name,
         finding,
         step,
+        agent_account,
     ))?;
     response.headers_mut().insert(
         header::CACHE_CONTROL,

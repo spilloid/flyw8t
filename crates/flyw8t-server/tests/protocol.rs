@@ -10,6 +10,7 @@ use flyw8t_protocol::messages::{
     AgentMsg, AgentUpdatePolicy, CapturedStream, ExecOutcome, Finished, JobPhase, JobReport,
     RefusalCode,
 };
+use flyw8t_protocol::script::WindowsExecutionAccount;
 use flyw8t_protocol::{auth, ServerMsg, PROTOCOL_VERSION};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
@@ -504,12 +505,14 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
                 .send(&AgentMsg::BackgroundTerminalPolicyStatus {
                     request_id: Uuid::new_v4(),
                     policy: BackgroundTerminalPolicy::Disabled,
+                    agent_account: Some(WindowsExecutionAccount::NetworkService),
                 })
                 .await;
             current
                 .send(&AgentMsg::BackgroundTerminalPolicyStatus {
                     request_id,
                     policy: BackgroundTerminalPolicy::Enabled,
+                    agent_account: Some(WindowsExecutionAccount::LocalSystem),
                 })
                 .await;
             request_id
@@ -519,6 +522,9 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
     assert_eq!(served.status, StatusCode::OK);
     assert!(served.body.contains("Local policy is enabled"));
     let original = server.state.registry.current_conn(device).unwrap();
+    assert!(served.body.contains("Current agent account"));
+    assert!(served.body.contains("LocalSystem (NT AUTHORITY\\SYSTEM)"));
+    assert!(!served.body.contains("Network Service"));
 
     let (mut replacement, served) = tokio::join!(
         async {
@@ -546,12 +552,14 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
                 .send(&AgentMsg::BackgroundTerminalPolicyStatus {
                     request_id: request,
                     policy: BackgroundTerminalPolicy::Enabled,
+                    agent_account: Some(WindowsExecutionAccount::LocalSystem),
                 })
                 .await;
             replacement
                 .send(&AgentMsg::BackgroundTerminalPolicyStatus {
                     request_id,
                     policy: BackgroundTerminalPolicy::Disabled,
+                    agent_account: None,
                 })
                 .await;
         },
@@ -559,9 +567,11 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
     );
     assert_eq!(served.status, StatusCode::OK);
     assert!(served.body.contains("Local policy is disabled"));
+    assert!(!served.body.contains("Current agent account"));
 
-    let audit: Vec<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT detail->>'request_id', COALESCE(detail->>'status', 'requested'), detail->>'connection'
+    let audit: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT detail->>'request_id', COALESCE(detail->>'status', 'requested'), detail->>'connection',
+                detail->>'agent_account'
          FROM audit_events
          WHERE organization_id = $1 AND target_id = $2
            AND action IN ('device.background_terminal_policy.requested', 'device.background_terminal_policy.result')
@@ -575,7 +585,7 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
     assert_eq!(
         audit
             .iter()
-            .map(|(_, status, _)| status.as_str())
+            .map(|(_, status, ..)| status.as_str())
             .collect::<Vec<_>>(),
         [
             "requested",
@@ -595,6 +605,8 @@ async fn background_terminal_policy_is_scoped_live_and_audited() {
     }
     assert_eq!(audit[3].0, request.to_string());
     assert_eq!(audit[3].2, Some(original.to_string()));
+    assert_eq!(audit[3].3.as_deref(), Some("local_system"));
+    assert!(audit[7].3.is_none());
 
     let activity = admin
         .get(&server, &format!("/devices/{device}/activity"))
@@ -668,6 +680,7 @@ async fn background_terminal_policy_audits_access_revoked_during_check() {
                 .send(&AgentMsg::BackgroundTerminalPolicyStatus {
                     request_id,
                     policy: BackgroundTerminalPolicy::Enabled,
+                    agent_account: Some(WindowsExecutionAccount::LocalSystem),
                 })
                 .await;
             request_id
@@ -676,6 +689,7 @@ async fn background_terminal_policy_audits_access_revoked_during_check() {
     );
     assert_eq!(response.status, StatusCode::FORBIDDEN);
     assert!(!response.body.contains("Local policy is enabled"));
+    assert!(!response.body.contains("Current agent account"));
 
     let events: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
         "SELECT action, outcome, detail FROM audit_events
@@ -722,7 +736,11 @@ async fn terminal_confirmation_is_single_use_and_rechecks_the_same_browser_and_a
             panic!("expected a background terminal policy request");
         };
         agent
-            .send(&AgentMsg::BackgroundTerminalPolicyStatus { request_id, policy })
+            .send(&AgentMsg::BackgroundTerminalPolicyStatus {
+                request_id,
+                policy,
+                agent_account: None,
+            })
             .await;
         request_id
     }
