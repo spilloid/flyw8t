@@ -450,3 +450,11 @@ The publish job checks the exact nine-binary inventory before writing `SHA256SUM
 The PortGlass handoff rechecks the technician's browser sign-in and holds shared locks on the active collector and site through the access audit. A fresh inventory read uses the same lock order as ingestion. The response reflects the collector and site evidence that agreed with the access record.
 
 On 10t7, the PostgreSQL regression failed on the old handler while a collector revocation was in flight. The fixed handler waited, refused after revocation committed, and emitted neither a link nor an access request record. The nine Network tests passed. Enrolled node selection remains open on AnchorDesk #10211.
+
+## Agent version history in Device Activity, 2026-11-27
+
+Device Activity shows the reported candidate version for update preflight decisions and the reported runtime version for authenticated connections. The PostgreSQL regression uses one enrolled device to prove the previous and current versions appear newest first and the renderer suppresses malformed version text. The reconnect test failed with the old layout. With the change, all 16 protocol tests passed, including the candidate reporting checks for enabled, opted-out, and paused policy.
+
+The 10t7 workspace suite, formatting, and Clippy passed. The desktop and phone Device Activity captures show the reported version beneath its authenticated connection event.
+
+The version history supports the signed rollout and rollback drill on AnchorDesk #10212. Service replacement and production-signed reconnect acceptance remain open.

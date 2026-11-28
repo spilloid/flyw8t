@@ -273,6 +273,7 @@ pub async fn device_activity(
         Option<Uuid>,
         Option<String>,
         Option<String>,
+        Option<String>,
     );
     let (all, orgs) = p.scope();
     let (at, source, id) = before.map_or((None, None, None), |c| (Some(c.0), Some(c.1), Some(c.2)));
@@ -300,7 +301,11 @@ pub async fn device_activity(
                     a.outcome, NULL::uuid AS job, NULL::text AS job_action,
                     CASE WHEN a.action IN ('device.support.connected', 'device.support.ended')
                               AND ($2 OR a.detail->>'technician_id' = $8)
-                         THEN a.detail->>'session_id' END AS support_session
+                         THEN a.detail->>'session_id' END AS support_session,
+                    CASE a.action
+                         WHEN 'device.connect' THEN a.detail->>'agent_version'
+                         WHEN 'device.agent_update_preflight' THEN a.detail->'device_reported_candidate'->>'version'
+                         END AS reported_version
                FROM audit_events a JOIN scoped_device d ON a.target_id = d.id
               WHERE a.target_type = 'device' AND (
                     a.organization_id = d.organization_id OR (
@@ -310,22 +315,22 @@ pub async fn device_activity(
               )
              UNION ALL
              SELECT a.at, 0::smallint, a.id, a.actor_label, a.action || '.' || (a.detail->>'to_enabled'),
-                    a.outcome, NULL::uuid, NULL::text, NULL::text
+                    a.outcome, NULL::uuid, NULL::text, NULL::text, NULL::text
                FROM audit_events a JOIN scoped_device d ON a.organization_id = d.organization_id
               WHERE a.target_type = 'organization' AND a.action = 'organization.agent_update_policy'
                 AND a.target_id = d.organization_id AND a.at >= d.enrolled_at
              UNION ALL
-             SELECT a.at, 0::smallint, a.id, a.actor_label, a.action, a.outcome, j.id, j.action, NULL::text
+             SELECT a.at, 0::smallint, a.id, a.actor_label, a.action, a.outcome, j.id, j.action, NULL::text, NULL::text
                FROM audit_events a JOIN device_jobs j ON a.target_id = j.id AND a.organization_id = j.organization_id
               WHERE a.target_type = 'job'
              UNION ALL
-             SELECT e.at, 1::smallint, e.id, e.actor, e.to_state, 'recorded', j.id, j.action, NULL::text
+             SELECT e.at, 1::smallint, e.id, e.actor, e.to_state, 'recorded', j.id, j.action, NULL::text, NULL::text
                FROM job_events e JOIN device_jobs j ON e.job_id = j.id
               WHERE e.to_state IN ('dispatched', 'acknowledged', 'running', 'completed', 'failed',
                                    'timed_out', 'cancelled', 'expired', 'outcome_unknown')
                  OR (e.from_state = 'dispatched' AND e.to_state = 'queued')
          )
-         SELECT at, source, id, actor, action, outcome, job, job_action, support_session FROM activity
+         SELECT at, source, id, actor, action, outcome, job, job_action, support_session, reported_version FROM activity
           WHERE $4::timestamptz IS NULL OR (at, source, id) < ($4, $5, $6)
           ORDER BY at DESC, source DESC, id DESC LIMIT $7",
     )
@@ -347,7 +352,18 @@ pub async fn device_activity(
         .into_iter()
         .take(PAGE)
         .map(
-            |(at, _, _, actor, action, outcome, job, job_action, support_session)| {
+            |(
+                at,
+                _,
+                _,
+                actor,
+                action,
+                outcome,
+                job,
+                job_action,
+                support_session,
+                reported_version,
+            )| {
                 let label = match action.as_str() {
                     "device.enroll" => "Device enrolled",
                     "device.connect" => "Agent authenticated",
@@ -426,6 +442,22 @@ pub async fn device_activity(
                     job,
                     job_action,
                     support_session: support_session.and_then(|id| id.parse().ok()),
+                    version_report: reported_version
+                        .filter(|v| {
+                            !v.is_empty()
+                                && v.len() <= 50
+                                && v.bytes().all(|b| {
+                                    b.is_ascii_alphanumeric()
+                                        || matches!(b, b'.' | b'-' | b'+' | b'_')
+                                })
+                        })
+                        .map(|version| {
+                            if action == "device.connect" {
+                                format!("Agent reported version {version}")
+                            } else {
+                                format!("Agent reported candidate version {version}")
+                            }
+                        }),
                 }
             },
         )

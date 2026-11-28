@@ -351,6 +351,7 @@ pub struct DeviceActivityEvent {
     pub job: Option<Uuid>,
     pub job_action: Option<String>,
     pub support_session: Option<Uuid>,
+    pub version_report: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

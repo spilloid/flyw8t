@@ -59,6 +59,16 @@ impl RawAgent {
         physical_console_check: bool,
         capabilities: &[&str],
     ) -> RawAgent {
+        Self::authenticate_as(server, agent, "raw", physical_console_check, capabilities).await
+    }
+
+    async fn authenticate_as(
+        server: &TestServer,
+        agent: &TestAgent,
+        version: &str,
+        physical_console_check: bool,
+        capabilities: &[&str],
+    ) -> RawAgent {
         let key = DeviceKey::load(&agent.dir.path().join("device.key")).unwrap();
         let mut raw = RawAgent::connect(server).await;
         let sig = key.sign_b64(&auth::auth_message(&raw.nonce, agent.device_id));
@@ -66,7 +76,7 @@ impl RawAgent {
             protocol_version: PROTOCOL_VERSION,
             device_id: agent.device_id,
             signature: sig,
-            agent_version: "raw".into(),
+            agent_version: version.into(),
             physical_console_check,
             capabilities: capabilities.iter().map(|cap| (*cap).into()).collect(),
         })
@@ -269,6 +279,13 @@ async fn update_preflight_observes_current_fleet_policy_without_replacing_the_li
     assert!(activity
         .body
         .contains("Update preflight blocked by organization policy"));
+    assert_eq!(
+        activity
+            .body
+            .matches("Agent reported candidate version 0.3.1")
+            .count(),
+        3
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1133,9 +1150,9 @@ async fn hostile_frames_close_the_connection() {
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn newer_connection_supersedes_older() {
     let server = start_fresh().await;
-    let (_admin, _org, agent) = enrolled(&server).await;
-    let mut old = RawAgent::authenticate(&server, &agent).await;
-    let _new = RawAgent::authenticate(&server, &agent).await;
+    let (admin, _org, agent) = enrolled(&server).await;
+    let mut old = RawAgent::authenticate_as(&server, &agent, "0.3.0", false, &[]).await;
+    let _new = RawAgent::authenticate_as(&server, &agent, "0.3.1", false, &[]).await;
     assert!(matches!(
         next(&mut old.ws).await,
         ServerMsg::Refused {
@@ -1148,6 +1165,23 @@ async fn newer_connection_supersedes_older() {
         .registry
         .connected_since(agent.device_id)
         .is_some());
+    let activity_path = format!("/devices/{}/activity", agent.device_id);
+    let activity = admin.get(&server, &activity_path).await;
+    let after = activity
+        .body
+        .find("Agent reported version 0.3.1")
+        .expect("current version must be visible on the authenticated reconnect");
+    let before = activity
+        .body
+        .find("Agent reported version 0.3.0")
+        .expect("previous version must remain visible");
+    assert!(after < before, "latest connection must appear first");
+
+    let _invalid =
+        RawAgent::authenticate_as(&server, &agent, "0.3.1\nforged display", false, &[]).await;
+    let activity = admin.get(&server, &activity_path).await;
+    assert_eq!(activity.body.matches("Agent authenticated").count(), 3);
+    assert!(!activity.body.contains("forged display"));
     server.stop().await;
 }
 

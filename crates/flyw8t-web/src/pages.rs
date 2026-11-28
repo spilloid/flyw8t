@@ -1531,6 +1531,7 @@ pub fn device_activity_page(
                         <li>
                             <time datetime=fmt::iso(event.at)>{fmt::timestamp(event.at)}</time>
                             <p><strong>{event.action}</strong>" · "{event.actor}</p>
+                            {event.version_report.map(|report| view! { <p class="small muted">{report}</p> })}
                             {job}
                             {session}
                         </li>
