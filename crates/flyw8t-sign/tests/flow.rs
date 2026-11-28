@@ -78,6 +78,165 @@ fn read<T: serde::de::DeserializeOwned>(p: &Path) -> T {
     serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
 }
 
+#[path = "../../flyw8t-protocol/tests/support/agent_update.rs"]
+mod release_fixture;
+
+#[test]
+fn only_the_release_key_can_authorize_the_exact_newer_windows_agent() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use flyw8t_protocol::agent_update::{Release, SignedRelease};
+    use flyw8t_protocol::enrollment_package::EnrollmentPackage;
+    use serde_json::Value;
+
+    let env = Env::new();
+    let release_key = env.s("release.key");
+    let script_key = env.s("script.key");
+    let manifest = env.s("release.json");
+    let artifact = env.s("flyw8t-agent-v0.10.0-x86_64-pc-windows-msvc.exe");
+    let original = release_fixture::versioned_image("0.10.0");
+    std::fs::write(&artifact, &original).unwrap();
+    env.ok(&["keygen", "--out", &script_key]);
+    let keygen = env.ok(&["update", "keygen", "--out", &release_key]);
+    let public_key = keygen
+        .lines()
+        .find_map(|line| line.strip_prefix("Update public key "))
+        .unwrap();
+    assert_eq!(public_key.len(), 64);
+    env.fails(&["show", "--key", &release_key], "this command needs");
+    let sign = |key: &str| {
+        [
+            "update".to_string(),
+            "sign".into(),
+            "--key".into(),
+            key.into(),
+            "--version".into(),
+            "0.10.0".into(),
+            "--artifact".into(),
+            artifact.clone(),
+            "--out".into(),
+            manifest.clone(),
+        ]
+    };
+    env.fails(&refs(&sign(&script_key)), "this command needs");
+
+    let mut relabeled: Value = read(Path::new(&script_key));
+    relabeled["format"] = read::<Value>(Path::new(&release_key))["format"].clone();
+    let relabeled_key = env.s("relabeled.key");
+    std::fs::write(&relabeled_key, serde_json::to_vec(&relabeled).unwrap()).unwrap();
+    env.fails(&refs(&sign(&relabeled_key)), "key file was changed");
+
+    let mut packaged = original.to_vec();
+    EnrollmentPackage {
+        server_url: "https://example.test".into(),
+        organization: "Fixture".into(),
+        site: None,
+        token: "fixture-token".into(),
+    }
+    .append(&mut packaged)
+    .unwrap();
+    std::fs::write(&artifact, &packaged).unwrap();
+    env.fails(&refs(&sign(&release_key)), "without an enrollment token");
+    assert!(!Path::new(&manifest).exists());
+
+    std::fs::write(&artifact, release_fixture::versioned_image("0.9.0")).unwrap();
+    env.fails(
+        &refs(&sign(&release_key)),
+        "Windows agent build version 0.9.0 does not match release version 0.10.0",
+    );
+    let legacy = b"MZ synthetic test FLYW8T_WINDOWS_ENROLLMENT_PACKAGE_V1 raw binary";
+    std::fs::write(&artifact, legacy).unwrap();
+    env.fails(
+        &refs(&sign(&release_key)),
+        "no valid embedded build version",
+    );
+    assert!(!Path::new(&manifest).exists());
+
+    std::fs::write(&artifact, &original).unwrap();
+    env.ok(&refs(&sign(&release_key)));
+    let manifest_source = std::fs::read(&manifest).unwrap();
+    env.fails(&refs(&sign(&release_key)), "creating");
+    assert_eq!(std::fs::read(&manifest).unwrap(), manifest_source);
+    let check = |key: &str, version_flag: &str, version: &str, artifact: &str| {
+        [
+            "update".to_string(),
+            "verify".into(),
+            "--public-key".into(),
+            key.into(),
+            version_flag.into(),
+            version.into(),
+            "--artifact".into(),
+            artifact.into(),
+            "--manifest".into(),
+            manifest.clone(),
+        ]
+    };
+    let verify = |key: &str, version: &str| check(key, "--current-version", version, &artifact);
+    let verify_release =
+        |key: &str, version: &str, path: &str| check(key, "--release-version", version, path);
+    env.ok(&refs(&verify(public_key, "0.9.0")));
+    env.fails(&refs(&verify(public_key, "0.10.0")), "must be newer");
+    env.fails(&refs(&verify(public_key, "0.11.0")), "must be newer");
+    env.fails(
+        &refs(&verify(&"00".repeat(32), "0.9.0")),
+        "trusted update key",
+    );
+    let staged = env.ok(&refs(&verify_release(public_key, "0.10.0", &artifact)));
+    let digest = read::<Value>(Path::new(&manifest))["release"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(staged.contains(&digest));
+    env.fails(
+        &refs(&verify_release(public_key, "0.9.0", &artifact)),
+        "signed release version 0.10.0 does not match expected release version 0.9.0",
+    );
+    env.fails(
+        &refs(&verify_release(&"00".repeat(32), "0.10.0", &artifact)),
+        "trusted update key",
+    );
+    let wrong_name = env.s("flyw8t-agent-v0.9.0-x86_64-pc-windows-msvc.exe");
+    std::fs::copy(&artifact, &wrong_name).unwrap();
+    env.fails(
+        &refs(&verify_release(public_key, "0.10.0", &wrong_name)),
+        "expected the release artifact flyw8t-agent-v0.10.0-x86_64-pc-windows-msvc.exe",
+    );
+    let mut competing_versions = verify_release(public_key, "0.10.0", &artifact).to_vec();
+    competing_versions.extend(["--current-version".into(), "0.9.0".into()]);
+    env.fails(&refs(&competing_versions), "cannot be used with");
+
+    let mut modified = original.to_vec();
+    modified[3] ^= 1;
+    std::fs::write(&artifact, modified).unwrap();
+    env.fails(
+        &refs(&verify(public_key, "0.9.0")),
+        "does not match the manifest",
+    );
+    env.fails(
+        &refs(&verify_release(public_key, "0.10.0", &artifact)),
+        "does not match the manifest",
+    );
+    std::fs::write(&artifact, &original).unwrap();
+    let mut changed: Value = serde_json::from_slice(&manifest_source).unwrap();
+    changed["release"]["version"] = "0.10.1".into();
+    std::fs::write(&manifest, serde_json::to_vec(&changed).unwrap()).unwrap();
+    env.fails(&refs(&verify(public_key, "0.9.0")), "trusted update key");
+
+    // Produce the fixture manifest independently so this exercises verification after signature and digest checks.
+    let key = SigningKey::from_bytes(&[32; 32]);
+    let release = Release::from_artifact("0.10.0".into(), &packaged).unwrap();
+    let signature = Bytes(key.sign(&release.signing_bytes()).to_bytes().to_vec());
+    let signed = SignedRelease { release, signature };
+    std::fs::write(&manifest, serde_json::to_vec(&signed).unwrap()).unwrap();
+    std::fs::write(&artifact, &packaged).unwrap();
+    let public_key = hex::encode(key.verifying_key().to_bytes());
+    for check in [
+        verify(&public_key, "0.9.0"),
+        verify_release(&public_key, "0.10.0", &artifact),
+    ] {
+        env.fails(&refs(&check), "without an enrollment token");
+    }
+}
+
 #[test]
 fn a_signer_never_signs_two_versions_with_one_number() {
     let e = Env::new();

@@ -12,6 +12,9 @@ use flyw8t_domain::evidence;
 use flyw8t_domain::job::{decide, state_for_outcome, ExecState, Report, Verification};
 use flyw8t_domain::Permission;
 use flyw8t_protocol::messages::{ExecOutcome, Finished, JobPhase, JobReport, NotAccepted};
+use flyw8t_protocol::messages::{ScriptOffer, CAP_SCRIPTS};
+use flyw8t_protocol::trust::run::check_approvals;
+use flyw8t_protocol::trust::{verify_authorization, SignedAuthorization, TrustList};
 use flyw8t_protocol::{Action, ServerMsg};
 use serde_json::{json, Value};
 use sqlx::{PgConnection, Postgres, Transaction};
@@ -349,6 +352,269 @@ pub async fn create_in(
 }
 
 // ---------------------------------------------------------------------------------------
+// Script runs (ADR-0015 build step 4)
+
+/// Record a script run. A C0 or C1 run is queued at once; a C2 or C3 run waits in `created` until someone uploads
+/// its run authorization (`authorize_script`). `offer` carries no authorization and no secrets.
+pub(crate) async fn create_script(
+    state: &Shared,
+    p: &Principal,
+    device_id: Uuid,
+    target: &crate::script_runs::ScriptDevice,
+    offer: &ScriptOffer,
+    summary: Value,
+    delivery: std::time::Duration,
+) -> AppResult<Uuid> {
+    let mut tx = state.db.begin().await?;
+    let (all, orgs) = p.scope();
+    let device: Option<(Uuid, Option<Uuid>, Option<OffsetDateTime>, bool)> = sqlx::query_as(
+        "SELECT d.organization_id, d.site_id, d.retired_at,
+                EXISTS (SELECT 1 FROM device_credentials c WHERE c.device_id = d.id AND c.revoked_at IS NULL)
+           FROM devices d WHERE d.id = $1 AND ($2 OR d.organization_id = ANY($3))
+            FOR SHARE OF d",
+    )
+    .bind(device_id)
+    .bind(all)
+    .bind(&orgs)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((org_id, site_id, retired_at, has_credential)) = device else {
+        return Err(AppError::NotFound);
+    };
+    p.require(Permission::RunScripts)?;
+    if (org_id, site_id) != (target.organization_id, target.site_id) {
+        return Err(AppError::Conflict(
+            "The device's organization or site changed. Review the targets and try again.".into(),
+        ));
+    }
+    if retired_at.is_some() || !has_credential {
+        return Err(AppError::Conflict(
+            "this device is retired or its credential is revoked".into(),
+        ));
+    }
+    crate::auth::recheck_actor(&mut tx, p, Some(org_id), false).await?;
+    let (_, head) = crate::trust::locked_head(&mut tx)
+        .await?
+        .ok_or_else(|| AppError::Conflict("The deployment has no script trust list.".into()))?;
+    check_approvals(&head.list, &offer.revision, &offer.approvals, Some(&org_id))
+        .map_err(|error| AppError::Conflict(error.to_string()))?;
+    let (deliver_by,): (OffsetDateTime,) =
+        sqlx::query_as("SELECT clock_timestamp() + make_interval(secs => $1)")
+            .bind(delivery.as_secs_f64())
+            .fetch_one(&mut *tx)
+            .await?;
+    let job_id = insert_script_job(
+        &mut tx,
+        ScriptJobActor::Interactive(p),
+        device_id,
+        org_id,
+        offer,
+        summary,
+        deliver_by,
+    )
+    .await?;
+    tx.commit().await?;
+    if let Err(error) = dispatch_pending(state, device_id, Pass::NewWork).await {
+        tracing::warn!(%job_id, %error, "queued script dispatch will be checked by the sweeper");
+    }
+    Ok(job_id)
+}
+
+pub(crate) enum ScriptJobActor<'a> {
+    Interactive(&'a Principal),
+    Scheduled {
+        user_id: Uuid,
+        email: &'a str,
+        schedule_id: Uuid,
+    },
+}
+
+/// The caller locks the target and checks the person's authority before inserting the job.
+/// Scheduled callers keep their occurrence receipt in this same transaction.
+pub(crate) async fn insert_script_job(
+    tx: &mut PgConnection,
+    actor: ScriptJobActor<'_>,
+    device_id: Uuid,
+    org_id: Uuid,
+    offer: &ScriptOffer,
+    summary: Value,
+    deliver_by: OffsetDateTime,
+) -> AppResult<Uuid> {
+    let (user_id, email, channel, audit) = match actor {
+        ScriptJobActor::Interactive(p) => (
+            p.user_id,
+            p.email.as_str(),
+            p.channel.as_str(),
+            Audit::user(p, "job.create"),
+        ),
+        ScriptJobActor::Scheduled {
+            user_id,
+            email,
+            schedule_id,
+        } => (
+            user_id,
+            email,
+            "scheduler",
+            Audit::scheduled(user_id, email, schedule_id, "job.create"),
+        ),
+    };
+    let actor = format!("user:{email}");
+    let job: JobCore = sqlx::query_as(&format!(
+        "INSERT INTO jobs (id, organization_id, device_id, action, request, timeout_secs, requested_by, request_channel,
+                           state, deliver_by, script_request)
+         VALUES ($1, $2, $3, 'script.run', $4, $5, $6, $7, 'created', $8, $9)
+         RETURNING {CORE}"
+    ))
+    .bind(offer.job_id)
+    .bind(org_id)
+    .bind(device_id)
+    .bind(&summary)
+    .bind(offer.timeout_secs as i32)
+    .bind(user_id)
+    .bind(channel)
+    .bind(deliver_by)
+    .bind(serde_json::to_string(offer).map_err(anyhow::Error::from)?)
+    .fetch_one(&mut *tx)
+    .await?;
+    event(
+        &mut *tx,
+        job.id,
+        "created",
+        None,
+        Some(ExecState::Created),
+        &actor,
+        json!({ "request": summary }),
+    )
+    .await?;
+    audit
+        .org(org_id)
+        .target("job", job.id)
+        .detail(json!({ "device_id": device_id, "action": "script.run", "script": summary }))
+        .record(&mut *tx)
+        .await?;
+    if !offer.revision.risk.needs_run_signature() {
+        queue_script(
+            &mut *tx,
+            job,
+            "script approved; no run signature needed for this class",
+        )
+        .await?;
+        announce(&mut *tx, device_id).await?;
+    }
+    Ok(offer.job_id)
+}
+
+async fn queue_script(tx: &mut PgConnection, mut job: JobCore, why: &str) -> anyhow::Result<()> {
+    transition(
+        &mut *tx,
+        &job,
+        ExecState::Authorized,
+        "system",
+        "authorized",
+        json!({ "reason": why }),
+        Sets::default(),
+    )
+    .await?;
+    job.state = ExecState::Authorized.as_str().into();
+    transition(
+        &mut *tx,
+        &job,
+        ExecState::Queued,
+        "system",
+        "queued",
+        json!({}),
+        Sets::default(),
+    )
+    .await
+}
+
+/// Store a C2 or C3 run's authorization and queue the job. The server checks it as the agent will, so a wrong one is
+/// refused here; the agent checks it again and does not rely on this.
+pub async fn authorize_script(
+    state: &Shared,
+    p: &Principal,
+    job_id: Uuid,
+    text: &str,
+) -> AppResult<Result<(), String>> {
+    p.require(Permission::RunScripts)?;
+    let auth: SignedAuthorization = match serde_json::from_str(text) {
+        Ok(a) => a,
+        Err(_) => return Ok(Err("that is not a signed run authorization".into())),
+    };
+    let mut tx = state.db.begin().await?;
+    let job = lock(&mut tx, job_id).await?.ok_or(AppError::NotFound)?;
+    if !p.can_see_org(job.organization_id) {
+        return Err(AppError::NotFound);
+    }
+    crate::auth::recheck_actor(&mut tx, p, Some(job.organization_id), false).await?;
+    if job.state() != ExecState::Created {
+        return Ok(Err("this run is not waiting for a signature".into()));
+    }
+    let (request,): (Option<String>,) =
+        sqlx::query_as("SELECT script_request FROM jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let offer: ScriptOffer =
+        serde_json::from_str(&request.ok_or(AppError::NotFound)?).map_err(anyhow::Error::from)?;
+    let request = crate::script_runs::run_request(&mut *tx, &offer, job.device_id).await?;
+    let Some((_, head)) = crate::trust::locked_head(&mut tx).await? else {
+        return Ok(Err("there is no trust list".into()));
+    };
+    if let Err(why) = crate::script_runs::check_authorization(
+        &head.list,
+        job.organization_id,
+        &request,
+        &auth,
+        now_unix(),
+    ) {
+        Audit::user(p, "job.authorize")
+            .org(job.organization_id)
+            .target("job", job_id)
+            .denied()
+            .detail(json!({ "reason": why }))
+            .record(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(Err(why));
+    }
+    let valid_until = OffsetDateTime::from_unix_timestamp(
+        i64::try_from(auth.authorization.expires_at).unwrap_or(i64::MAX),
+    )
+    .map_err(|_| AppError::BadRequest("Invalid script authorization expiry.".into()))?;
+    let stored = sqlx::query(
+        "UPDATE jobs SET script_authorization = $2, deliver_by = least(deliver_by, $3)
+          WHERE id = $1 AND least(deliver_by, $3) > clock_timestamp()",
+    )
+    .bind(job_id)
+    .bind(text)
+    .bind(valid_until)
+    .execute(&mut *tx)
+    .await?;
+    if stored.rows_affected() != 1 {
+        return Ok(Err("this run's delivery window has expired".into()));
+    }
+    Audit::user(p, "job.authorize")
+        .org(job.organization_id)
+        .target("job", job_id)
+        .detail(json!({ "signer": auth.authorization.signer.to_string() }))
+        .record(&mut *tx)
+        .await?;
+    let device = job.device_id;
+    queue_script(&mut tx, job, "run signature verified").await?;
+    announce(&mut tx, device).await?;
+    tx.commit().await?;
+    if let Err(error) = dispatch_pending(state, device, Pass::NewWork).await {
+        tracing::warn!(%job_id, %error, "authorized script dispatch will be checked by the sweeper");
+    }
+    Ok(Ok(()))
+}
+
+fn now_unix() -> u64 {
+    OffsetDateTime::now_utc().unix_timestamp().max(0) as u64
+}
+
+// ---------------------------------------------------------------------------------------
 // Dispatch
 
 /// Channel on which "this device has new work or a cancel" is announced to every server
@@ -428,6 +694,40 @@ pub async fn dispatch_pending(state: &Shared, device_id: Uuid, pass: Pass) -> an
     Ok(())
 }
 
+fn check_script_dispatch(
+    head: &TrustList,
+    organization: Uuid,
+    offer: &ScriptOffer,
+) -> Result<(), String> {
+    if offer.deployment_id != head.deployment_id {
+        return Err("The script belongs to another deployment.".into());
+    }
+    let approvers = check_approvals(head, &offer.revision, &offer.approvals, Some(&organization))
+        .map_err(|error| error.to_string())?;
+    let risk = offer.revision.risk;
+    if risk.needs_run_signature() {
+        let authorization = offer
+            .authorization
+            .as_ref()
+            .ok_or("The run signature is missing.")?;
+        let signer =
+            verify_authorization(authorization, head).map_err(|error| error.to_string())?;
+        if !signer.scope.includes(&organization) || !signer.may_approve.allows(risk) {
+            return Err(
+                "The run signer no longer has permission for this script and organization.".into(),
+            );
+        }
+        if risk == flyw8t_protocol::trust::RiskClass::C2
+            && approvers
+                .iter()
+                .any(|approver| approver.person_id == signer.person_id)
+        {
+            return Err("A C2 run needs a signer other than its approver.".into());
+        }
+    }
+    Ok(())
+}
+
 /// Offer one job on connection `conn`. The row lock serializes concurrent passes; the
 /// recorded `last_dispatch_conn` makes a second pass on the same connection a no-op.
 async fn dispatch_one(state: &Shared, job_id: Uuid, conn: Uuid) -> anyhow::Result<()> {
@@ -459,11 +759,65 @@ async fn dispatch_one(state: &Shared, job_id: Uuid, conn: Uuid) -> anyhow::Resul
         .await
         .map(|_| ())
     }
-    let action = job.action()?;
-    let offer = ServerMsg::JobOffer {
-        job_id,
-        action,
-        timeout_secs: job.timeout_secs as u32,
+    let script: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT script_request, script_authorization FROM jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let offer = match script {
+        (Some(request), authorization) => {
+            // Only to an agent that said it runs scripts; otherwise the job waits for one that does.
+            if !state
+                .registry
+                .has_capability(job.device_id, conn, CAP_SCRIPTS)
+            {
+                return Ok(());
+            }
+            let mut offer: ScriptOffer = serde_json::from_str(&request)?;
+            offer.authorization = authorization
+                .map(|a| serde_json::from_str(&a))
+                .transpose()?;
+            // A reconnecting agent can still hold a trust list from before a revocation.
+            // Recheck before every dispatch. Keep the original delivery evidence on re-offers.
+            let decision = match crate::trust::locked_head(&mut tx).await? {
+                Some((_, head)) => check_script_dispatch(&head.list, job.organization_id, &offer),
+                None => Err("The deployment has no script trust list.".into()),
+            };
+            // A trust-list upload can hold the lock until after this offer's delivery window.
+            let within_window: bool =
+                sqlx::query_scalar("SELECT deliver_by > clock_timestamp() FROM jobs WHERE id = $1")
+                    .bind(job_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !within_window {
+                return Ok(());
+            }
+            if let Err(reason) = decision {
+                if job.state() == ExecState::Queued {
+                    transition(
+                        &mut tx,
+                        &job,
+                        ExecState::Cancelled,
+                        "system",
+                        "script_approval_withdrawn",
+                        json!({ "reason": reason }),
+                        Sets {
+                            state_note: Some(reason),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                    tx.commit().await?;
+                }
+                return Ok(());
+            }
+            ServerMsg::ScriptOffer(Box::new(offer))
+        }
+        (None, _) => ServerMsg::JobOffer {
+            job_id,
+            action: job.action()?,
+            timeout_secs: job.timeout_secs as u32,
+        },
     };
     match job.state() {
         ExecState::Queued if job.cancel_requested_at.is_none() => {
@@ -694,7 +1048,14 @@ async fn finished_sets(
         ..Default::default()
     };
     if to == ExecState::Completed {
-        let verdict = evidence::evaluate(&job.action()?, &finished);
+        let verdict = match job.action() {
+            Ok(action) => evidence::evaluate(&action, &finished),
+            // A script run: the evidence rules know the catalog's actions only.
+            Err(_) => evidence::Verdict {
+                verification: Verification::NotApplicable,
+                explanation: "A script's result is its exit code and output; read them.".into(),
+            },
+        };
         if verdict.verification == Verification::Verified {
             record_job_inventory(tx, job, &finished).await?;
         }
@@ -834,69 +1195,54 @@ pub async fn cancel(state: &Shared, p: &Principal, job_id: Uuid) -> AppResult<()
 /// Resolve deadlines and retry queued work. Runs periodically; every rule is idempotent.
 pub async fn sweep(state: &Shared) -> anyhow::Result<()> {
     let grace = state.config.silence_grace.as_secs_f64();
-    let rules: [(&str, ExecState, &str, &str); 3] = [
-        (
-            "SELECT id FROM jobs WHERE state = 'queued' AND deliver_by <= now()",
-            ExecState::Expired,
-            "expired",
-            "The device did not connect before the delivery deadline. The job was never sent and did not run.",
-        ),
-        (
-            "SELECT id FROM jobs WHERE state = 'dispatched' AND deliver_by <= now()",
-            ExecState::OutcomeUnknown,
-            "unconfirmed_delivery",
-            "Sent, but the device never confirmed receiving it before the delivery deadline. It may or may not have run.",
-        ),
-        (
-            "SELECT id FROM jobs WHERE state IN ('acknowledged', 'running')
-                AND coalesce(acknowledged_at, first_dispatched_at) + make_interval(secs => timeout_secs + $1) <= now()",
-            ExecState::OutcomeUnknown,
-            "silent",
-            "The device accepted the job but reported no result within its time limit plus grace. It may still report one.",
-        ),
-    ];
-    for (select, to, kind, note) in rules {
-        let ids: Vec<(Uuid,)> = sqlx::query_as(select)
-            .bind(grace)
-            .fetch_all(&state.db)
+    let ids: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM jobs
+         WHERE (state IN ('queued', 'dispatched') OR (state = 'created' AND script_request IS NOT NULL))
+                 AND deliver_by <= now()
+            OR state IN ('acknowledged', 'running')
+                 AND coalesce(acknowledged_at, first_dispatched_at) + make_interval(secs => timeout_secs + $1) <= now()",
+    )
+    .bind(grace)
+    .fetch_all(&state.db)
+    .await?;
+    for (id,) in ids {
+        let mut tx = state.db.begin().await?;
+        let Some(job) = lock(&mut tx, id).await? else {
+            continue;
+        };
+        let (to, kind, note) = match job.state() {
+            ExecState::Created => (ExecState::Expired, "expired", "The script was never authorized or sent before its delivery deadline. It did not run."),
+            ExecState::Queued => (ExecState::Expired, "expired", "The delivery deadline elapsed. The job was never sent and did not run."),
+            ExecState::Dispatched => (ExecState::OutcomeUnknown, "unconfirmed_delivery", "Sent, but the device never confirmed receiving it before the delivery deadline. It may or may not have run."),
+            ExecState::Acknowledged | ExecState::Running => (ExecState::OutcomeUnknown, "silent", "The device accepted the job but reported no result within its time limit plus grace. It may still report one."),
+            _ => continue,
+        };
+        // Authorization or a device report may have changed state or timing since the scan.
+        let (due,): (bool,) = sqlx::query_as(
+            "SELECT CASE WHEN state IN ('created','queued','dispatched') THEN deliver_by <= clock_timestamp()
+                    ELSE coalesce(acknowledged_at, first_dispatched_at) + make_interval(secs => timeout_secs + $2) <= clock_timestamp() END
+               FROM jobs WHERE id = $1",
+        )
+        .bind(id)
+        .bind(grace)
+        .fetch_one(&mut *tx)
+        .await?;
+        if due {
+            transition(
+                &mut tx,
+                &job,
+                to,
+                "system",
+                kind,
+                json!({}),
+                Sets {
+                    state_note: Some(note.into()),
+                    ..Default::default()
+                },
+            )
             .await?;
-        for (id,) in ids {
-            let mut tx = state.db.begin().await?;
-            if let Some(job) = lock(&mut tx, id).await? {
-                // Re-check under the lock: the row may have moved since the scan.
-                let still_due = match to {
-                    ExecState::Expired => job.state() == ExecState::Queued,
-                    _ => job.state().is_in_flight(),
-                };
-                if still_due && job.state().can_transition_to(to) {
-                    let due: (bool,) = sqlx::query_as(
-                        "SELECT CASE WHEN state IN ('queued','dispatched') THEN deliver_by <= now()
-                                ELSE coalesce(acknowledged_at, first_dispatched_at) + make_interval(secs => timeout_secs + $2) <= now() END
-                           FROM jobs WHERE id = $1",
-                    )
-                    .bind(id)
-                    .bind(grace)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    if due.0 {
-                        transition(
-                            &mut tx,
-                            &job,
-                            to,
-                            "system",
-                            kind,
-                            json!({}),
-                            Sets {
-                                state_note: Some(note.into()),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-            tx.commit().await?;
         }
+        tx.commit().await?;
     }
     for device in state.registry.connected_devices() {
         dispatch_pending(state, device, Pass::NewWork).await?;

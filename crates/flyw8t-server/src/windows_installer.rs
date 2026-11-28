@@ -1,9 +1,35 @@
 use crate::{error::AppError, Shared};
 use anyhow::{anyhow, ensure, Context, Result};
+use flyw8t_protocol::agent_update::{Release, MAX_WINDOWS_AGENT_BYTES};
 use flyw8t_protocol::enrollment_package::is_template;
 use std::time::Duration;
+use uuid::Uuid;
 
-const MAX_AGENT_BYTES: usize = 32 * 1024 * 1024;
+mod intune;
+pub(crate) use intune::deployment_bundle as intune_deployment_bundle;
+
+pub fn intune_detection_script(
+    server_url: &str,
+    organization_id: Uuid,
+    site_id: Option<Uuid>,
+) -> String {
+    use crate::web::powershell_literal;
+
+    let site = site_id.map_or("$null".to_owned(), |id| powershell_literal(&id.to_string()));
+    let script = include_str!("intune-detection.ps1")
+        .replace(
+            "__VERSION__",
+            &powershell_literal(env!("CARGO_PKG_VERSION")),
+        )
+        .replace(
+            "__ORGANIZATION_ID__",
+            &powershell_literal(&organization_id.to_string()),
+        )
+        .replace("__SITE_ID__", &site)
+        .replace("__SERVER_URL__", &powershell_literal(server_url));
+    // Windows PowerShell 5.1 recognizes UTF-8 scripts with a BOM.
+    format!("\u{feff}{script}")
+}
 
 pub async fn template(state: &Shared) -> Result<&[u8], AppError> {
     state
@@ -46,12 +72,18 @@ async fn fetch_template() -> Result<Vec<u8>> {
         .filter_map(|line| line.split_once("  "))
         .find_map(|(digest, name)| (name == filename).then_some(digest))
         .ok_or_else(|| anyhow!("release checksums do not include the Windows agent"))?;
-    let agent = download(&client, &format!("{release}/{filename}"), MAX_AGENT_BYTES).await?;
-    let actual = ring::digest::digest(&ring::digest::SHA256, &agent);
+    let agent = download(
+        &client,
+        &format!("{release}/{filename}"),
+        MAX_WINDOWS_AGENT_BYTES,
+    )
+    .await?;
+    let candidate = Release::from_artifact(version.into(), &agent)?;
     ensure!(
-        hex::encode(actual.as_ref()).eq_ignore_ascii_case(expected),
+        hex::encode(candidate.sha256.0).eq_ignore_ascii_case(expected),
         "Windows agent checksum mismatch"
     );
+    candidate.check_build_version(&agent)?;
     ensure!(
         is_template(&agent),
         "release agent does not support enrollment packages"

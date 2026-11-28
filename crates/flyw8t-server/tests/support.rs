@@ -582,6 +582,212 @@ async fn audit_rows(server: &TestServer, action: &str) -> Vec<(String, String, S
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn device_activity_records_only_a_connected_linked_screen_share() {
+    let server = start_fresh().await;
+    let (admin, org, agent) = enrolled(&server).await;
+    let other_org = admin.create_org(&server, "Other organization").await;
+    let other_token = admin.enrollment_token(&server, other_org, "60", "1").await;
+    let other = TestAgent::enroll(&server.url(), &other_token)
+        .await
+        .unwrap();
+    let tech_email = "support-technician@example.test";
+    let tech = add_user(&server, &admin, tech_email, "technician", Some(org)).await;
+    let coworker = add_user(
+        &server,
+        &admin,
+        "coworker@example.test",
+        "technician",
+        Some(org),
+    )
+    .await;
+    let device = agent.device_id.to_string();
+    let org = org.to_string();
+    let activity_path = format!("/devices/{device}/activity");
+
+    let form = tech
+        .get(&server, &format!("/support?device={device}"))
+        .await;
+    assert_eq!(form.status, StatusCode::OK);
+    assert!(form
+        .body
+        .contains(&format!(r#"name="device" value="{device}""#)));
+    assert!(form
+        .body
+        .contains("The participant chooses the source to share."));
+    assert!(!form.body.contains("View and control"));
+    assert_eq!(
+        tech.get(&server, &format!("/support?device={}", other.device_id))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        tech.post(
+            &server,
+            "/support",
+            &[
+                ("organization", &org),
+                ("device", &other.device_id.to_string())
+            ]
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        admin
+            .post(
+                &server,
+                "/support",
+                &[
+                    ("organization", &other_org.to_string()),
+                    ("device", &device)
+                ]
+            )
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        tech.post(
+            &server,
+            "/support",
+            &[
+                ("organization", &org),
+                ("device", &device),
+                ("capability", "control")
+            ]
+        )
+        .await
+        .status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let open = || async {
+        let response = tech
+            .post(
+                &server,
+                "/support",
+                &[("organization", &org), ("device", &device)],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        let session = extract(&response.body, r#"href="/support/([0-9a-f-]{36})""#)
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        let token = extract(&response.body, r"/s/([A-Za-z0-9_-]{43})").unwrap();
+        let mut technician = ws(
+            &server,
+            &format!("/api/support/{session}/ws"),
+            &tech.cookie,
+            origin(&server),
+        )
+        .await
+        .unwrap();
+        until_state(&mut technician, "waiting").await;
+        let cookie = spend_link(&server, &token).await.unwrap();
+        let mut participant = ws(
+            &server,
+            "/api/support/participant/ws",
+            &cookie,
+            origin(&server),
+        )
+        .await
+        .unwrap();
+        until_state(&mut participant, "authorizing").await;
+        (session, technician, participant)
+    };
+    let (declined, mut tech_socket, mut participant) = open().await;
+    send(&mut participant, json!({"type":"decline"})).await;
+    recv_kind(&mut tech_socket, "ended").await;
+    assert_eq!(db_state(&server, declined).await, "rejected");
+    assert!(audit_rows(&server, "device.support.ended").await.is_empty());
+
+    let (session, mut tech_socket, mut participant) = open().await;
+    // Consenting does not count a participant's earlier media message.
+    send(
+        &mut participant,
+        json!({"type":"media","state":"connected"}),
+    )
+    .await;
+    send(&mut participant, json!({"type":"approve"})).await;
+    until_state(&mut tech_socket, "connecting").await;
+    send(
+        &mut tech_socket,
+        json!({"type":"media","state":"connected"}),
+    )
+    .await;
+    send(&mut tech_socket, json!({"type":"fixture_barrier"})).await;
+    recv_kind(&mut tech_socket, "error").await;
+    assert_eq!(db_state(&server, session).await, "connecting");
+    assert!(audit_rows(&server, "device.support.connected")
+        .await
+        .is_empty());
+
+    send(
+        &mut participant,
+        json!({"type":"media","state":"connected"}),
+    )
+    .await;
+    until_state(&mut tech_socket, "connected").await;
+    send(
+        &mut participant,
+        json!({"type":"media","state":"connected"}),
+    )
+    .await;
+    send(&mut participant, json!({"type":"end"})).await;
+    recv_kind(&mut tech_socket, "ended").await;
+    for action in ["device.support.connected", "device.support.ended"] {
+        let events = audit_rows(&server, action).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].0, "anonymous",
+            "participant triggered this transition"
+        );
+        let detail: Value = serde_json::from_str(&events[0].2).unwrap();
+        assert_eq!(detail["technician"], tech_email);
+        assert_eq!(detail["session_id"], session.to_string());
+    }
+    let activity = admin.get(&server, &activity_path).await;
+    assert_eq!(activity.status, StatusCode::OK);
+    assert_eq!(activity.body.matches(tech_email).count(), 2);
+    assert!(activity.body.contains("Linked screen share connected"));
+    assert!(activity
+        .body
+        .contains("Windows Technician session evidence is still in development"));
+    assert!(activity.body.contains("Linked screen share ended"));
+    assert_eq!(
+        activity
+            .body
+            .matches(&format!(r#"href="/support/{session}""#))
+            .count(),
+        2
+    );
+    assert!(!activity.body.contains(&declined.to_string()));
+    let own_activity = tech.get(&server, &activity_path).await;
+    assert_eq!(own_activity.status, StatusCode::OK);
+    assert!(own_activity
+        .body
+        .contains(&format!(r#"href="/support/{session}""#)));
+
+    let coworker_activity = coworker.get(&server, &activity_path).await;
+    assert_eq!(coworker_activity.status, StatusCode::OK);
+    assert!(coworker_activity
+        .body
+        .contains("Linked screen share connected"));
+    assert!(coworker_activity.body.contains("Linked screen share ended"));
+    assert_eq!(coworker_activity.body.matches(tech_email).count(), 2);
+    assert!(!coworker_activity.body.contains(&session.to_string()));
+    let other = admin
+        .get(&server, &format!("/devices/{}/activity", other.device_id))
+        .await;
+    assert!(!other.body.contains(&session.to_string()));
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
 async fn only_the_creator_attaches_and_sessions_are_scoped_to_organizations() {
     let server = start_fresh().await;
     let admin = server.admin_sudo().await;

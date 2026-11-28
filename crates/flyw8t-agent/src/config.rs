@@ -4,10 +4,12 @@
 //! <state_dir>/
 //!   agent.json      server URL, optional pinned CA, device id once enrolled
 //!   device.key      Ed25519 private key (PKCS#8). Never leaves the device.
+//!   release-public-key.bin   local Windows x64 release verification pin, when configured
 //!   journal/        one file per job; see journal.rs
 //! ```
 
 use anyhow::{bail, Context, Result};
+use flyw8t_protocol::messages::EnrollmentScope;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -21,6 +23,9 @@ pub struct AgentConfig {
     pub ca_cert_pem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<Uuid>,
+    /// Organization and site reported by the server at enrollment. Site moves are recorded in the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_scope: Option<EnrollmentScope>,
     #[serde(skip)]
     pub state_dir: PathBuf,
 }

@@ -14,6 +14,8 @@
 
 An optional screenshot request asks the participant to allow the named AI client to receive still images. Turning screenshots off leaves ordinary screen sharing available. Each screenshot goes from the owning technician's video element to the MCP adapter in an encrypted one-shot response through the control plane. [MCP setup and data handling](mcp.md)
 
+From an active enrolled device, **Start a screen share** preselects the device and its organization for a view-only invitation. The participant chooses the source in their browser. The linked device identifies the technician's selected record. The browser peers finish the transport and security-code checks before reporting media. The technician also waits for the first frame. Once both current peers report media after consent, **Device activity** records **Linked screen share connected**. It records **Linked screen share ended** when that connected session ends. Each entry identifies the technician and links to the support session. Windows Technician's direct RDP and SSH paths use separate client connections and need their own authenticated session reporting.
+
 ## Two kinds of attended help, never confused
 
 | | **Browser screen view** (Phase B) | **Temporary native helper** (Phase C, proposed) |
@@ -115,7 +117,7 @@ The commitment is what makes six digits enough. Someone in the middle must choos
 
 **What this does not protect against.** The pages, and so the script that computes the code, come from the flyw8t server. A compromised flyw8t server can serve a script that shows any code it likes, and no in-page check can prevent that. The code protects against a party that can alter signaling but cannot change the page script. Today nobody separate does both, because the same server serves both. The protection becomes meaningful once signaling or TURN is run by someone else while the pages come from your own server. Protection from a compromised server needs client code trusted independently of it (a signed native helper; see Phase C).
 
-**Browser support.** Browsers without `getRemoteCertificates` show "not available in this browser" in place of a code, never a code derived from the SDP. Tested: Chrome.
+**Browser support.** Browsers without `getRemoteCertificates` show "not available in this browser" in place of a code. The session can still report connected after the transport and first-frame checks. Tested in Chrome.
 
 ## Relay, NAT traversal and deployment
 

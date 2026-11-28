@@ -25,9 +25,8 @@ inputs:
     description: Certificate profile name.
     required: true
   expected-subject:
-    description: Substring the signer subject must contain. Empty skips the subject check.
-    required: false
-    default: ''
+    description: Exact publisher name, CN-prefixed publisher name, or complete certificate subject.
+    required: true
 
 runs:
   using: composite

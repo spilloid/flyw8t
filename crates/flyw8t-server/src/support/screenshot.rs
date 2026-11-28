@@ -90,6 +90,7 @@ struct Pending {
 #[derive(PartialEq, Eq)]
 enum Decision {
     Waiting,
+    Recording,
     Allowed,
     Revoked,
 }
@@ -183,21 +184,41 @@ impl Peers {
             return true;
         }
         if allow && g.decision == Decision::Waiting {
-            g.decision = Decision::Allowed;
-            let msg = Out::ScreenshotAllowed {
-                grant_id: id,
-                recipient: g.recipient.clone(),
-            };
-            if [&self.participant, &self.technician]
-                .into_iter()
-                .flatten()
-                .all(|p| p.tx.try_send(msg.clone()).is_ok())
-            {
-                return true;
-            }
-            self.revoke_screenshots();
+            g.decision = Decision::Recording;
+            return true;
         }
         false
+    }
+
+    fn finish_permission(&mut self, conn: Uuid, id: Uuid, recorded: bool) {
+        if !self.usable() || !self.participant.as_ref().is_some_and(|p| p.conn_id == conn) {
+            return;
+        }
+        let Some(g) = self
+            .screenshots
+            .grant
+            .as_mut()
+            .filter(|g| g.id == id && g.decision == Decision::Recording)
+        else {
+            return;
+        };
+        if !recorded {
+            self.revoke_screenshots();
+            return;
+        }
+        let msg = Out::ScreenshotAllowed {
+            grant_id: id,
+            recipient: g.recipient.clone(),
+        };
+        if [&self.participant, &self.technician]
+            .into_iter()
+            .flatten()
+            .all(|p| p.tx.try_send(msg.clone()).is_ok())
+        {
+            g.decision = Decision::Allowed;
+        } else {
+            self.revoke_screenshots();
+        }
     }
 }
 
@@ -218,11 +239,29 @@ pub(super) async fn permission(
         .get_mut(&id)
         .is_some_and(|peers| peers.permission(side, conn, grant, allow));
     if changed {
-        who.audit("support.screenshot.permission")
+        let audit = who
+            .audit("support.screenshot.permission")
             .target("support_session", id)
-            .detail(json!({"grant_id": grant, "allow": allow}))
-            .record(&state.db)
-            .await?;
+            .detail(json!({"grant_id": grant, "allow": allow}));
+        if !allow {
+            tokio::time::timeout(RESPONSE_TIMEOUT, audit.record(&state.db)).await??;
+            return Ok(());
+        }
+        let state = state.clone();
+        // The grant stays pending until the audit is durable. Keep the socket free to process
+        // a revocation from the participant while this write waits on the database.
+        tokio::spawn(async move {
+            let recorded = matches!(
+                tokio::time::timeout(RESPONSE_TIMEOUT, audit.record(&state.db)).await,
+                Ok(Ok(()))
+            );
+            if !recorded {
+                tracing::warn!(session = %id, "could not record screenshot permission");
+            }
+            if let Some(peers) = state.support.sessions.lock().unwrap().get_mut(&id) {
+                peers.finish_permission(conn, grant, recorded);
+            }
+        });
     }
     Ok(())
 }
@@ -235,10 +274,15 @@ fn permitted(p: &Principal) -> bool {
 }
 
 pub(crate) async fn capabilities(ApiUser(p): ApiUser) -> Json<Value> {
-    Json(json!({ "support_screenshot": permitted(&p) }))
+    let allowed = permitted(&p);
+    Json(json!({
+        "support_screenshot": allowed,
+        "support_session_status": allowed,
+        "background_terminal_status": crate::terminal_status::api_permitted(&p),
+    }))
 }
 
-async fn owner_org(state: &Shared, p: &Principal, id: Uuid) -> AppResult<Uuid> {
+async fn owner_session(state: &Shared, p: &Principal, id: Uuid) -> AppResult<(Uuid, String, bool)> {
     // Both browser and API callers must own this support session and still see its organization.
     let (all, orgs) = p.scope();
     let row: Option<(Uuid, String, bool)> = sqlx::query_as(
@@ -252,11 +296,58 @@ async fn owner_org(state: &Shared, p: &Principal, id: Uuid) -> AppResult<Uuid> {
     .bind(orgs)
     .fetch_optional(&state.db)
     .await?;
-    match row {
-        None => Err(AppError::NotFound),
-        Some((org, status, true)) if status == "connected" => Ok(org),
-        _ => Err(unavailable("session_unavailable")),
+    row.ok_or(AppError::NotFound)
+}
+
+async fn owner_org(state: &Shared, p: &Principal, id: Uuid) -> AppResult<Uuid> {
+    let (org, status, view_only) = owner_session(state, p, id).await?;
+    if status == "connected" && view_only {
+        Ok(org)
+    } else {
+        Err(unavailable("session_unavailable"))
     }
+}
+
+pub(crate) async fn session_status(
+    State(state): State<Shared>,
+    Path(session): Path<Uuid>,
+    ApiUser(p): ApiUser,
+) -> AppResult<impl IntoResponse> {
+    let (token, _) = authorized(&p)?;
+    if !state.limiter.allow(
+        &format!("support-status:{token}"),
+        120,
+        Duration::from_secs(60),
+    ) {
+        return Err(AppError::RateLimited);
+    }
+    let (_, status, view_only) = owner_session(&state, &p, session).await?;
+    let screenshot_access = {
+        let sessions = state.support.sessions.lock().unwrap();
+        match sessions
+            .get(&session)
+            .filter(|peers| status == "connected" && view_only && peers.usable())
+        {
+            None => "unavailable",
+            Some(peers) => match &peers.screenshots.grant {
+                None => "consent_required",
+                Some(g) if g.token_id != token => "unavailable",
+                Some(g) => match g.decision {
+                    Decision::Waiting | Decision::Recording => "consent_pending",
+                    Decision::Allowed => "allowed",
+                    Decision::Revoked => "revoked",
+                },
+            },
+        }
+    };
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "session_id": session,
+            "state": status,
+            "screenshot_access": screenshot_access,
+        })),
+    ))
 }
 
 // Dropping the waiting HTTP future (including a revoked/slow request) frees the single slot.
@@ -518,6 +609,13 @@ mod tests {
         assert!(!p.permission(Side::Participant, Uuid::new_v4(), grant, true));
         assert!(!p.permission(Side::Participant, user, Uuid::new_v4(), true));
         assert!(p.permission(Side::Participant, user, grant, true));
+        assert!(!p.approved(token, grant));
+        assert!(p.ask(token, "My client").is_err());
+        assert!(technician.try_recv().is_err());
+        assert!(participant.try_recv().is_err());
+        p.finish_permission(Uuid::new_v4(), grant, true);
+        assert!(!p.approved(token, grant));
+        p.finish_permission(user, grant, true);
         assert!(matches!(
             technician.try_recv(),
             Ok(Out::ScreenshotAllowed { .. })
@@ -550,6 +648,29 @@ mod tests {
         ));
         assert!(p.ask(token, "My client").is_err());
         assert!(participant.try_recv().is_err());
+    }
+
+    #[test]
+    fn revocation_while_recording_supersedes_a_pending_allow() {
+        let (mut p, mut technician, mut participant) = connected();
+        let token = Uuid::new_v4();
+        assert!(p.ask(token, "My client").is_err());
+        let Out::ScreenshotConsent { grant_id, .. } = participant.try_recv().unwrap() else {
+            panic!("expected consent prompt");
+        };
+        let tech = p.technician.as_ref().unwrap().conn_id;
+        let user = p.participant.as_ref().unwrap().conn_id;
+        assert!(p.permission(Side::Participant, user, grant_id, true));
+        assert!(p.permission(Side::Technician, tech, grant_id, false));
+        p.finish_permission(user, grant_id, true);
+        assert!(!p.approved(token, grant_id));
+        for channel in [&mut technician, &mut participant] {
+            assert!(matches!(
+                channel.try_recv(),
+                Ok(Out::ScreenshotRevoked { .. })
+            ));
+            assert!(channel.try_recv().is_err());
+        }
     }
 
     #[test]

@@ -2,7 +2,53 @@
 
 All notable changes to flyw8t. Dates are UTC.
 
-## Unreleased
+## 0.3.0 (in development)
+
+- Open PowerShell in the browser through an opted-in Windows agent. The terminal verifies the LocalSystem account, supports Ctrl+C and prompt replies, and can reattach to the same process after a brief disconnect.
+- Record background terminal lifecycle in Device Activity and expose scoped, read-only lifecycle status in MCP.
+- Show the current Windows agent account class during background terminal policy checks and retain it in Audit.
+- Show agent-reported versions for authenticated reconnects and update preflight in Device Activity.
+- Recheck collector revocation, technician access, and current site inventory before recording a PortGlass handoff.
+- Verify the complete release binary inventory before GitHub publication and check downloaded assets against it.
+- Device Activity distinguishes enabled and disabled background terminal policy observations.
+- Require an exact publisher match when verifying signed Windows release executables.
+- Show the background terminal policy check directly in a Windows device's Connect section, with an explanation when it is unavailable.
+- Return a device-scoped browser link to the connection options with the `device_terminal_handoff` MCP tool.
+- Clarify device connection actions and distinguish recorded screen-share media connections from Windows desktop launches in Device Activity.
+- Record browser screen-share connections after the transport and security-code checks finish and the technician receives a frame.
+
+- Record the participant's screenshot permission before enabling capture for the named MCP client. Revocation stops capture immediately.
+- Check local PowerShell input, output, interruption, and cleanup on Windows with `flyw8t-agent terminal-check --powershell`, including forced cleanup while PowerShell waits for input.
+- Verify background terminal access in the browser. The single-use confirmation rechecks the technician's sign-in and the original agent connection, and records the result in Device Activity.
+- Enforce the browser confirmation deadline when queuing a background terminal policy recheck and accepting its reply.
+- Set the automatic agent update policy per organization, or opt out an individual device. Changes appear in Audit and Device Activity.
+- Verify a newer Windows x64 update candidate locally with `flyw8t-agent update-check`. It checks the signed release manifest and the timestamped Authenticode publisher.
+- Verify a staged rollback executable for the running Windows x64 agent version alongside an update candidate with `update-check` and the local release key pin.
+- Check the enrolled device's current automatic update policy after verifying a local candidate with `update-check --fleet-policy`. Audit and Device Activity record the decision.
+- Pin and inspect the Windows agent release public key with `flyw8t-agent update-trust`. Update preflight uses this pin by default.
+- Prepare and verify Windows x64 agent update manifests offline with `flyw8t-sign update` and a dedicated release key. The manifest version must match the version embedded in the candidate.
+- Check a staged update against the exact intended release version, canonical artifact filename and trusted release key with `flyw8t-sign update verify --release-version`.
+- Apply the same Windows agent image checks in both offline update verification modes and on the endpoint. Publish new release manifests only after writing and flushing them.
+- Download a site-specific Intune bundle containing the Win32 app, matching detection script, and install and uninstall settings.
+- Download an Intune detection script from Windows enrollment. It checks the service registration, signed agent version, and organization and site recorded at enrollment.
+
+- Report the organization and site recorded at enrollment through `flyw8t-agent status --json` for managed deployment checks.
+- Recover an older agent's original enrollment scope at authenticated check-in when the console retains its enrollment token record.
+
+- Verify an enrolled Windows device's local background-terminal policy from connection options. Device Activity records the technician who requested the check and the result.
+- Check an enrolled Windows agent's opt-in with `flyw8t-agent terminal-policy status`. A console policy check denied after an access change records the denial against the original request.
+- The device workspace shows memory and disk history from saved inventory. Refresh data queues an inventory job and brings the technician back to the device.
+- Device connection actions distinguish a consented screen share, the signed-in physical desktop, and an RDP sign-in. Local Technician setup and direct SSH are under connection options.
+- Choose the SSH account independently of the computer in Technician. Approved Windows script results show the PowerShell account class reported by the agent.
+- Device detail keeps access, diagnostics and recent results together, with the device identity and last inventory report visible above them. Full identity, inventory, custom fields and management remain on the same page.
+- Run approved PowerShell revisions on Windows agents with pinned script trust. The agent validates script approvals and any required run authorization before it starts the job.
+- Resolve plain company, site and device fields when submitting an approved script and choose how long the job can wait for an offline agent.
+- Schedule an approved C0 or C1 PowerShell revision on a Windows device once, daily, or weekly in UTC, with a configurable delivery window and occurrence history.
+- Check whether the endpoint's local SSH service sends an SSH 2.0 greeting with `flyw8t-agent terminal-check`.
+- Check the state of an attended support session and the current client's screenshot permission with the MCP tool `support_session_status`.
+- Enable MCP device diagnostics to find an enrolled device, queue its built-in inventory check, and inspect the job and evidence with a scoped technician token.
+- Administrators and technicians can open **Device activity** on devices in their assigned organizations to see agent connections, console checks, operator actions and job events in one timeline. Open a job from the timeline for its result and evidence.
+- Start an attended screen-share invitation from a device. Device activity records the linked share when media connects and ends, with its technician and a link to the support session.
 
 ## 0.2.0 — 2026-11-26 (pre-release)
 

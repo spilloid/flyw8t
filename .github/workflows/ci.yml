@@ -25,7 +25,7 @@ jobs:
         run: cargo build --locked -p flyw8t-agent -p flyw8t-technician -p flyw8t-server --target x86_64-pc-windows-msvc
       - name: Registered device link opens the idle technician chooser
         run: ./scripts/test-technician-handoff.ps1 -Binary ./target/x86_64-pc-windows-msvc/debug/flyw8t-technician.exe
-      - name: First-use Chrome prompt and three device-page links
+      - name: First-use Chrome prompt and Windows device-page links
         uses: ./.github/actions/check-browser-handoff
         with:
           binaries: target/x86_64-pc-windows-msvc/debug
@@ -37,14 +37,23 @@ jobs:
         run: |
           $env:FLYW8T_TEST_AGENT_BINARY = (Resolve-Path './target/x86_64-pc-windows-msvc/debug/flyw8t-agent.exe').Path
           cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-server --test windows_physical_console -- --ignored --nocapture
-
-      - name: Install the organization and site package silently on Windows
+      - name: Run approved PowerShell against the Windows agent and PostgreSQL
+        env:
+          FLYW8T_TEST_DATABASE_URL: postgres://postgres:root@127.0.0.1:5432/postgres
+        run: cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-server --test trust --test script_runs -- --include-ignored
+      - name: Test quiet Windows installation and retry from the Intune bundle
         shell: pwsh
         env:
           FLYW8T_TEST_DATABASE_URL: postgres://postgres:root@127.0.0.1:5432/postgres
         run: |
           $env:FLYW8T_TEST_AGENT_BINARY = (Resolve-Path './target/x86_64-pc-windows-msvc/debug/flyw8t-agent.exe').Path
           cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-server --test windows_installer -- --ignored
+      - name: Check the Windows release key pin on NTFS
+        run: cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-agent --lib update_verify::key_pin::tests::first_pin_wins_and_insecure_or_damaged_files_fail_closed -- --exact --ignored
+      - name: Diagnose cold Windows PowerShell startup (observations only)
+        if: always()
+        run: ./scripts/diagnose-powershell-startup.ps1
+        timeout-minutes: 3
 
   linux:
     name: Linux - PostgreSQL end-to-end, protocol, TLS and UI capture
@@ -103,6 +112,8 @@ jobs:
           node-version: 22
       - name: Compose startup, MFA sign-in and restore into an empty database
         run: node scripts/compose-smoke.mjs
+      - name: Compose upgrade from published 0.2.0 and recover the baseline
+        run: node scripts/compose-smoke.mjs --upgrade-from-0.2.0
 
   mac-probe:
     name: Mac feasibility probe compiles (no runtime gate)

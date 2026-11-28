@@ -4,6 +4,19 @@
 
 On 2026-11-26 the operator scoped the **0.2.0 pre-release** to Windows agent setup and enrollment, including silent deployment of a site package. Broader foundation checks remain listed below with their own evidence requirements.
 
+## 0.3.0 sprint acceptance
+
+- [x] Device workspace with stored inventory trends and a refresh action.
+- [x] Approved scripts with one-time and recurring schedules, delivery windows, and run-on-reconnect.
+- [x] Device Activity with operator and job evidence, including linked browser screen-share activity.
+- [ ] Background PowerShell on an enrolled Windows PC, including interactive prompts and Ctrl+C while the employee continues working.
+- [ ] Quiet enrollment and a site-specific Intune Win32 assignment that detects the signed installation and preserves device identity on retry.
+- [ ] Browser remote control, consented MCP screenshot and input tools, and Network access through a selected opted-in device.
+- [ ] Default-on signed agent updates, including device and organization opt-outs, reconnect evidence, and rollback.
+- [ ] Live Windows acceptance, a verified GitHub release, and the HomeLab rollout.
+
+The first three items have local candidate evidence. Repeat their checks against the release commit. The Device Activity scope above covers browser screen sharing. Native desktop session evidence is part of the browser and Windows acceptance work still underway.
+
 ## Product contract
 
 | Release | Required scope |
@@ -19,9 +32,19 @@ Diagnostics stay allowlisted. Scripts follow [ADR-0014](decisions/ADR-0014-scrip
 
 ## Device operations and audit
 
+The fleet follow-up includes a device workspace centered on stored telemetry and connection actions, an [audited background PowerShell terminal](background-terminal.md) through the enrolled agent, approved scripts with field inputs and scheduling, actual technician session evidence, and consented MCP screenshot and input operations. The background terminal acceptance test is software installation by an authorized technician while the employee stays in a meeting. The combined Windows workflow needs physical acceptance.
+
+The next desktop pilot targets a browser viewer on a Mac and one enrolled Windows PC. Verify consented keyboard and mouse control and actual connection events in Device Activity. Windows pre-login console access has its own physical acceptance check.
+
+Generate a site-scoped Intune Win32 kit from the same installer and deployment settings. Use the [SpoolSmith package workflow](https://github.com/spilloid/spoolsmith/blob/56801b87d0a4b334f3c459980549cb5682595ecd/docs/intune-deployment.md) as the reference for review, packaging and detection. Verify a real Intune rollout to the selected site, delayed enrollment and a repeat install that preserves device identity.
+
+Opening a discovered asset's web interface through an opted-in device belongs under Network. See the [proposed node selection flow](network-operations.md#proposed-network-node-selection).
+
+Windows packaging acceptance includes a [silent site package rollout](deployment.md#silent-deployment-from-a-site-enrollment-package) in managed deployment, an agent check-in and a repeat install that preserves identity.
+
 Company, site and device custom fields already ship. An administrator defines them in **Administration → Custom fields**. Technicians can edit values where the definition allows it. A device value overrides site, company and global values, and each change has a history entry.
 
-1. **Device activity.** Show existing agent and operator audit events alongside the device's job history. Record actual technician connection, disconnect and session identity when the remote desktop path reports them. A console launch request establishes operator intent. A session connection requires separate evidence.
+1. **Device activity.** Show existing agent and operator audit events alongside the device's job history. Record actual technician connection, disconnect and session identity when the remote desktop path reports them. Opening a Windows desktop action does not establish a connection. Device Activity identifies linked screen-share media connections; native Technician session evidence remains open. A session connection requires separate evidence.
 2. **Run approved revisions.** Integrate and review the signed Windows runner from [PR #35](https://github.com/spilloid/flyw8t/pull/35) and [the Windows hardening follow-up](https://github.com/spilloid/flyw8t/pull/37) against current main. Prove a real run from a device page, including who requested it, revision, approval, delivery, output and outcome. Resolve declared device/site/company inputs under the existing organization and signing rules.
 3. **Run when the device comes online.** Offer an explicit delivery window and show queued work on the device, with its expiration and cancel action. A reconnect can deliver an eligible queued run once. An interrupted or unknown execution stays visible for review.
 4. **Schedule one-time and recurring runs.** Pin the approved revision, target scope, timezone and delivery policy. Deduplicate each occurrence per device across restarts and workers. Show upcoming occurrences, cancellations, missed windows and results under the same device activity. Recheck authorization when materializing a run, including the lifetime and scope of any required signature.
@@ -50,6 +73,8 @@ does not renumber the full milestones below or promise a delivery date.
 | **1.0.0: Supported release** | Verified artifacts, supported upgrades, recovery and support documentation. | Close all gates with evidence; pass final release review. |
 
 Work already underway may finish before its milestone. A script library or server helper handshake does not prove the complete remediation or remote-control workflow.
+
+Bring the first Windows [signed agent auto-update](decisions/ADR-0008-agent-updates.md#fleet-policy) pilot forward after 0.2.0. Automatic updates default on once the signed updater ships. Administrators can turn them off for an organization or a device. The 0.6.0 milestone still covers the full fleet lifecycle.
 
 ## 0.2.0 gate and first sprint
 

@@ -3,6 +3,8 @@
 //! and a device's report can never break or script a page.
 
 mod common;
+#[path = "common/intune_bundle.rs"]
+mod intune_bundle;
 
 use axum::http::StatusCode;
 use common::*;
@@ -310,6 +312,8 @@ async fn a_new_enrollment_token_comes_with_the_commands_to_run() {
         .body
         .contains("Deploy quietly with Intune or Group Policy"));
     assert!(again.body.contains("Flyw8t-Setup-x64.exe --quiet"));
+    assert!(again.body.contains("Download Intune bundle"));
+    assert!(again.body.contains("Download Intune detection script"));
     assert!(!again.headers["content-security-policy"]
         .to_str()
         .unwrap()
@@ -317,6 +321,14 @@ async fn a_new_enrollment_token_comes_with_the_commands_to_run() {
 
     // The token shown separately can enroll a device.
     let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
+    let recorded = flyw8t_agent::AgentConfig::load(agent.dir.path()).unwrap();
+    assert_eq!(
+        recorded.enrollment_scope,
+        Some(flyw8t_protocol::messages::EnrollmentScope {
+            organization_id: org,
+            site_id: None,
+        })
+    );
     let list = admin.get(&server, "/devices").await;
     assert!(list.body.contains(&agent.device_id.to_string()));
     server.stop().await;
@@ -341,53 +353,255 @@ async fn a_windows_installer_only_enrolls_into_its_selected_site() {
     .fetch_one(&server.state.db)
     .await
     .unwrap();
+    let path = format!("/organizations/{org}/enrollment-tokens");
+    let detection = admin
+        .post(
+            &server,
+            &path,
+            &[
+                ("site", &site.to_string()),
+                ("download", "intune-detection"),
+            ],
+        )
+        .await;
+    assert_eq!(detection.status, StatusCode::OK);
+    assert_eq!(detection.headers[header::CACHE_CONTROL], "no-store");
+    assert!(detection.headers[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .contains("Detect-Flyw8t.ps1"));
+    assert!(detection.body.starts_with('\u{feff}'));
+    assert!(detection
+        .body
+        .contains(&format!("$expectedOrganization = '{org}'")));
+    assert!(detection
+        .body
+        .contains(&format!("$expectedSite = '{site}'")));
+    assert!(detection.body.contains(&format!(
+        "$expectedServer = '{}'",
+        server.state.config.public_url
+    )));
+    assert!(!detection.body.contains("fw8e_"));
+    let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(tokens, 0, "detection download does not issue a credential");
+    for download in ["intune", "intune-detection"] {
+        let invalid = admin
+            .post(
+                &server,
+                &path,
+                &[
+                    ("site", &Uuid::new_v4().to_string()),
+                    ("download", download),
+                ],
+            )
+            .await;
+        assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     let base = b"MZ synthetic test agent";
     server
         .state
         .windows_agent_template
         .set(base.to_vec())
         .unwrap();
-    let body = format!("csrf={}&site={site}&download=windows", admin.csrf);
-    let reply = flyw8t_server::router(server.state.clone())
-        .oneshot(
-            Request::post(format!("/organizations/{org}/enrollment-tokens"))
-                .header(header::COOKIE, &admin.cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(body))
-                .unwrap(),
-        )
+    for (download, filename) in [
+        ("windows", "Flyw8t-Setup-x64.exe"),
+        ("intune", "Flyw8t-Intune.zip"),
+    ] {
+        let body = format!("csrf={}&site={site}&download={download}", admin.csrf);
+        let reply = flyw8t_server::router(server.state.clone())
+            .oneshot(
+                Request::post(&path)
+                    .header(header::COOKIE, &admin.cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(reply.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            reply.headers()[header::CONTENT_DISPOSITION],
+            format!("attachment; filename={filename}")
+        );
+        let bytes = to_bytes(reply.into_body(), 32 * 1024).await.unwrap();
+        let installer = if download == "intune" {
+            let files = intune_bundle::unpack(&bytes, &detection.body);
+            assert!(files.detector.starts_with("\u{feff}".as_bytes()));
+            assert!(String::from_utf8(files.uninstall)
+                .unwrap()
+                .contains("service uninstall"));
+            files.installer
+        } else {
+            bytes.to_vec()
+        };
+        let (base_len, package) = EnrollmentPackage::read(&mut Cursor::new(&installer))
+            .unwrap()
+            .unwrap();
+        assert_eq!(base_len as usize, base.len());
+        assert_eq!(&installer[..base_len as usize], base);
+        assert_eq!(package.organization, "Contoso");
+        assert_eq!(package.site.as_deref(), Some("Main Office"));
+        let device = TestAgent::enroll(&server.url(), &package.token)
+            .await
+            .unwrap();
+        let saved: (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT organization_id, site_id FROM devices WHERE id = $1")
+                .bind(device.device_id)
+                .fetch_one(&server.state.db)
+                .await
+                .unwrap();
+        assert_eq!(saved, (org, Some(site)));
+        let recorded = flyw8t_agent::AgentConfig::load(device.dir.path()).unwrap();
+        assert_eq!(
+            recorded.enrollment_scope,
+            Some(flyw8t_protocol::messages::EnrollmentScope {
+                organization_id: org,
+                site_id: Some(site),
+            })
+        );
+        assert!(
+            TestAgent::enroll(&server.url(), &package.token)
+                .await
+                .is_err(),
+            "default setup allows one PC"
+        );
+    }
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs PostgreSQL: set FLYW8T_TEST_DATABASE_URL"]
+async fn a_legacy_agent_recovers_its_original_enrollment_scope() {
+    use flyw8t_agent::AgentConfig;
+    use flyw8t_protocol::messages::EnrollmentScope;
+    use std::time::Duration;
+
+    let server = start_fresh().await;
+    let admin = server.admin_sudo().await;
+    let org = admin.create_org(&server, "Contoso").await;
+    let other_org = admin.create_org(&server, "Fabrikam").await;
+    let (site, moved_to): (Uuid, Uuid) = sqlx::query_as(
+        "WITH original AS (INSERT INTO sites (organization_id, name) VALUES ($1, 'Original') RETURNING id),
+              reassigned AS (INSERT INTO sites (organization_id, name) VALUES ($1, 'Reassigned') RETURNING id)
+         SELECT original.id, reassigned.id FROM original, reassigned",
+    )
+    .bind(org)
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    let foreign_token = admin.enrollment_token(&server, other_org, "60", "1").await;
+    let foreign_device = TestAgent::enroll(&server.url(), &foreign_token)
         .await
         .unwrap();
-    assert_eq!(reply.status(), StatusCode::OK);
-    assert_eq!(reply.headers()[header::CACHE_CONTROL], "no-store");
-    assert!(reply.headers()[header::CONTENT_DISPOSITION]
-        .to_str()
-        .unwrap()
-        .contains("Flyw8t-Setup-x64.exe"));
-    let bytes = to_bytes(reply.into_body(), 16 * 1024).await.unwrap();
-    let (base_len, package) = EnrollmentPackage::read(&mut Cursor::new(&bytes))
-        .unwrap()
-        .unwrap();
-    assert_eq!(base_len as usize, base.len());
-    assert_eq!(&bytes[..base_len as usize], base);
-    assert_eq!(package.organization, "Contoso");
-    assert_eq!(package.site.as_deref(), Some("Main Office"));
-    let device = TestAgent::enroll(&server.url(), &package.token)
-        .await
-        .unwrap();
-    let saved: (Uuid, Option<Uuid>) =
-        sqlx::query_as("SELECT organization_id, site_id FROM devices WHERE id = $1")
-            .bind(device.device_id)
+    let foreign_enrolled_via: Uuid =
+        sqlx::query_scalar("SELECT enrolled_via FROM devices WHERE id = $1")
+            .bind(foreign_device.device_id)
             .fetch_one(&server.state.db)
             .await
             .unwrap();
-    assert_eq!(saved, (org, Some(site)));
-    assert!(
-        TestAgent::enroll(&server.url(), &package.token)
+
+    for (original_site, has_foreign_token, expected_scope) in [
+        (
+            Some(site),
+            false,
+            Some(EnrollmentScope {
+                organization_id: org,
+                site_id: Some(site),
+            }),
+        ),
+        (
+            None,
+            false,
+            Some(EnrollmentScope {
+                organization_id: org,
+                site_id: None,
+            }),
+        ),
+        (Some(site), true, None),
+    ] {
+        let reply = admin
+            .post(
+                &server,
+                &format!("/organizations/{org}/enrollment-tokens"),
+                &[
+                    ("ttl_minutes", "60"),
+                    ("max_uses", "1"),
+                    (
+                        "site",
+                        &original_site.map_or_else(String::new, |id| id.to_string()),
+                    ),
+                ],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let token = extract(&reply.body, r"(fw8e_[A-Za-z0-9_-]{43})").unwrap();
+        let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
+        let device_id = agent.device_id;
+        let mut cfg = AgentConfig::load(agent.dir.path()).unwrap();
+        let key = std::fs::read(cfg.key_path()).unwrap();
+
+        // Versions before Intune detection stored the identity without the original scope.
+        cfg.enrollment_scope = None;
+        cfg.save().unwrap();
+        let token_id: Uuid = sqlx::query_scalar(
+            "UPDATE devices SET site_id = $2 WHERE id = $1 RETURNING enrolled_via",
+        )
+        .bind(device_id)
+        .bind(moved_to)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+        // Revocation stops new enrollments with the token, but preserves its historical scope.
+        sqlx::query("UPDATE enrollment_tokens SET revoked_at = now() WHERE id = $1")
+            .bind(token_id)
+            .execute(&server.state.db)
             .await
-            .is_err(),
-        "default setup allows one PC"
-    );
+            .unwrap();
+        if has_foreign_token {
+            sqlx::query("UPDATE devices SET enrolled_via = $2 WHERE id = $1")
+                .bind(device_id)
+                .bind(foreign_enrolled_via)
+                .execute(&server.state.db)
+                .await
+                .unwrap();
+        }
+
+        let (stop, task) = agent.connect(&server.url());
+        wait_for(
+            "inventory after legacy authentication",
+            Duration::from_secs(15),
+            || async {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT FROM inventory_snapshots WHERE device_id = $1)",
+                )
+                .bind(device_id)
+                .fetch_one(&server.state.db)
+                .await
+                .unwrap()
+            },
+        )
+        .await;
+        let recovered = AgentConfig::load(agent.dir.path()).unwrap();
+        assert_eq!(recovered.enrollment_scope, expected_scope);
+        assert_eq!(recovered.device_id, Some(device_id));
+        assert_eq!(std::fs::read(recovered.key_path()).unwrap(), key);
+        let (current_site, uses): (Uuid, i32) = sqlx::query_as(
+            "SELECT d.site_id, t.uses FROM devices d JOIN enrollment_tokens t ON t.id = $2 WHERE d.id = $1",
+        )
+        .bind(device_id)
+        .bind(token_id)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+        assert_eq!((current_site, uses), (moved_to, 1));
+        stop.cancel();
+        task.await.unwrap().unwrap();
+    }
     server.stop().await;
 }
 

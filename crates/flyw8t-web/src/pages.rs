@@ -2,7 +2,7 @@ use crate::fmt;
 use crate::model::*;
 use flyw8t_domain::finding::{freshness, Freshness};
 use flyw8t_domain::job::{outcome, ExecState, Tone, ALL_STATES};
-use flyw8t_protocol::CATALOG;
+use flyw8t_protocol::{script::WindowsExecutionAccount, CATALOG};
 use leptos::prelude::*;
 use time::{Duration, OffsetDateTime};
 
@@ -35,6 +35,7 @@ fn render(view: impl IntoView + 'static) -> String {
 }
 
 fn head(title: String, refresh: Option<u32>, script: Option<&'static str>) -> impl IntoView {
+    let uses_terminal = script == Some("/static/terminal.js");
     view! {
         <head>
             <meta charset="utf-8"/>
@@ -48,7 +49,9 @@ fn head(title: String, refresh: Option<u32>, script: Option<&'static str>) -> im
             <meta name="theme-color" content="#2456c7"/>
             <meta name="mobile-web-app-capable" content="yes"/>
             <meta name="apple-mobile-web-app-title" content="flyw8t"/>
+            {uses_terminal.then(|| view! { <link rel="stylesheet" href="/static/xterm.css"/> })}
             <link rel="stylesheet" href="/static/app.css"/>
+            {uses_terminal.then(|| view! { <script src="/static/xterm.js" defer=true></script> })}
             {script.map(|src| view! { <script src=src defer=true></script> })}
         </head>
     }
@@ -64,8 +67,7 @@ pub(crate) fn shell(
     shell_with(title, ctx, active, refresh, None, body)
 }
 
-/// The authenticated page frame: header, navigation, flash, content. `script` loads a page script: the attended-support
-/// one (ADR-0010) or the script editor's (ADR-0014), the only two in the console.
+/// The authenticated page frame. Pages that need JavaScript supply their own script.
 fn shell_with(
     title: &str,
     ctx: &PageCtx,
@@ -729,9 +731,9 @@ pub fn devices_page(
 fn inventory_section(inv: Option<InventoryView>, now: OffsetDateTime) -> impl IntoView {
     let Some(inv) = inv else {
         return view! {
-            <section class="card">
+            <section class="device-section">
                 <h2>"Inventory"</h2>
-                <p class="empty">"The device has not reported inventory yet."</p>
+                <p class="muted">"The device has not reported inventory yet."</p>
             </section>
         }
         .into_any();
@@ -801,9 +803,9 @@ fn inventory_section(inv: Option<InventoryView>, now: OffsetDateTime) -> impl In
         },
     );
     view! {
-        <section class="card">
+        <section class="device-section">
             <h2>"Inventory " {fresh_badge}</h2>
-            <p class="muted">{provenance}</p>
+            <p class="muted small">{provenance}</p>
             <dl class="facts">
                 <dt>"Hostname"</dt><dd>{r.hostname.clone()}</dd>
                 <dt>"Operating system"</dt><dd>{os}" · "{r.os.arch.clone()}</dd>
@@ -852,7 +854,7 @@ fn action_forms(
                         <p class="muted">{a.description}</p>
                     </div>
                     {params}
-                    <button type="submit">{button}</button>
+                    <button type="submit" aria-label=format!("{button} {}", a.title)>{button}</button>
                 </form>
             }
         })
@@ -873,13 +875,13 @@ fn run_forms(
             .into_any();
     }
     let note = if connected {
-        "The device is connected; jobs are sent immediately."
+        "Read-only diagnostics. Jobs are sent to the connected agent."
     } else {
-        "The device is not connected. Jobs queue until it connects or their 15-minute delivery window passes."
+        "Read-only diagnostics queue for up to 15 minutes while the agent is offline."
     };
     view! {
-        <p class="muted">{note}" Read-only diagnostics only."</p>
-        <div class="actions">{action_forms(ctx, format!("/devices/{device_id}/jobs"), vec![], "Run")}</div>
+        <p class="muted small">{note}</p>
+        <div class="device-diagnostics">{action_forms(ctx, format!("/devices/{device_id}/jobs"), vec![], "Run")}</div>
     }
     .into_any()
 }
@@ -913,7 +915,7 @@ fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
         }
     });
     view! {
-        <section class="card">
+        <section class="device-section">
             <h2>"Manage"</h2>
             {edit}
         </section>
@@ -921,20 +923,90 @@ fn manage_section(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
     .into_any()
 }
 
+fn device_agent_update_policy(ctx: &PageCtx, d: &DeviceDetail) -> impl IntoView {
+    let policy = d.agent_update_policy;
+    let status = if d.row.retired {
+        "Device retired"
+    } else if policy.allows_automatic_updates() {
+        "Enabled by policy"
+    } else if !policy.organization_enabled && policy.device_opted_out {
+        "Organization paused · Device opted out"
+    } else if policy.device_opted_out {
+        "Device opted out"
+    } else {
+        "Paused by organization"
+    };
+    let edit = (ctx.is_admin && !d.row.retired).then(|| view! {
+        <form method="post" action=format!("/devices/{}/agent-update-policy", d.row.id) class="inline-form">
+            <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+            <label>"Device preference"<select name="policy">
+                <option value="inherit" selected=!policy.device_opted_out>"Follow organization"</option>
+                <option value="opt-out" selected=policy.device_opted_out>"Opt out"</option>
+            </select></label>
+            <button type="submit">"Save preference"</button>
+        </form>
+    });
+    view! {
+        <details id="agent-update-policy" class="device-section">
+            <summary>"Automatic agent updates · "{status}</summary>
+            <p class="hint">"This preference applies when signed automatic updates are available. An organization pause applies to every device."</p>
+            {edit}
+        </details>
+    }
+}
+
 /// The device's last report at a glance: disks, memory, uptime and how old the report is.
-fn glance_section(d: &DeviceDetail, now: OffsetDateTime) -> Option<impl IntoView> {
-    let inv = d.inventory.as_ref()?;
+fn inventory_trend(
+    samples: impl Iterator<Item = (OffsetDateTime, u8)>,
+    label: &str,
+    latest: u8,
+) -> impl IntoView {
+    let values: Vec<_> = samples.collect();
+    if values.len() < 2 {
+        return view! { <meter min="0" max="100" low="75" high="90" optimum="0" value=latest.to_string() aria-label=label.to_string()></meter> }.into_any();
+    }
+    let points = values.into_iter().map(|(time, pct)| {
+        let detail = format!("{}: {pct}% used", fmt::timestamp(time));
+        let tooltip = detail.clone();
+        view! { <li title=tooltip><meter min="0" max="100" low="75" high="90" optimum="0" value=pct.to_string() aria-label=detail></meter></li> }
+    }).collect_view();
+    view! { <ol class="inventory-trend" aria-label=format!("{label}, readings from oldest to newest")>{points}</ol> }.into_any()
+}
+
+fn glance_section(
+    ctx: &PageCtx,
+    d: &DeviceDetail,
+    history: &[InventorySample],
+    refreshing: bool,
+) -> impl IntoView {
+    let refresh = (ctx.can_run && !d.row.retired).then(|| view! {
+        <form method="post" action=format!("/devices/{}/jobs", d.row.id)>
+            <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+            <input type="hidden" name="action" value="system.info"/>
+            <input type="hidden" name="return_to_device" value="yes"/>
+            <button type="submit" disabled=refreshing>{if refreshing { "Refresh pending" } else { "Refresh data" }}</button>
+        </form>
+    });
+    let Some(inv) = d.inventory.as_ref() else {
+        return view! {
+            <section class="device-snapshot">
+                <header><p class="muted small">"Monitoring · Awaiting first report"</p>{refresh}</header>
+            </section>
+        }.into_any();
+    };
+    let now = ctx.now;
     let r = &inv.report;
     let memory = (r.hardware.memory_total_bytes > 0).then(|| {
         let pct = used_percent(
             r.hardware.memory_total_bytes,
             r.hardware.memory_available_bytes,
         );
+        let trend = inventory_trend(history.iter().filter_map(|s| s.memory_used.map(|pct| (s.received_at, pct))), "Memory used", pct);
         view! {
             <div class="stat">
                 <span class="k">"Memory"</span>
                 <span class="v">{format!("{pct}% used")}</span>
-                <meter min="0" max="100" low="75" high="90" optimum="0" value=pct.to_string() aria-label="Memory used"></meter>
+                {trend}
                 <span class="muted small">{format!("{} free of {}", fmt::bytes(r.hardware.memory_available_bytes), fmt::bytes(r.hardware.memory_total_bytes))}</span>
             </div>
         }
@@ -946,12 +1018,15 @@ fn glance_section(d: &DeviceDetail, now: OffsetDateTime) -> Option<impl IntoView
         .take(4)
         .map(|k| {
             let pct = used_percent(k.total_bytes, k.available_bytes);
-            let aria = format!("{} used", k.mount_point);
+            let aria = format!("Disk {} used", k.mount_point);
+            let trend = inventory_trend(history.iter().filter_map(|s| {
+                s.disk_used.iter().find(|(mount, _)| mount == &k.mount_point).map(|(_, pct)| (s.received_at, *pct))
+            }), &aria, pct);
             view! {
                 <div class="stat">
                     <span class="k">{format!("Disk {}", k.mount_point)}</span>
                     <span class="v">{format!("{pct}% used")}</span>
-                    <meter min="0" max="100" low="75" high="90" optimum="0" value=pct.to_string() aria-label=aria></meter>
+                    {trend}
                     <span class="muted small">{format!("{} free of {}", fmt::bytes(k.available_bytes), fmt::bytes(k.total_bytes))}</span>
                 </div>
             }
@@ -962,17 +1037,20 @@ fn glance_section(d: &DeviceDetail, now: OffsetDateTime) -> Option<impl IntoView
         .flatten()
         .next()
         .unwrap_or_else(|| r.os.family.clone());
-    Some(view! {
-        <section class="card">
+    view! {
+        <section class="device-snapshot" aria-label="Device monitoring">
+            <header>
+                <div><h2>"Monitoring"</h2><p class="muted small">"Last reported "{time_cell(now, inv.received_at)}</p></div>
+                {refresh}
+            </header>
             <div class="stats">
                 <div class="stat"><span class="k">"System"</span><span class="v">{os}</span><span class="muted small">{r.os.arch.clone()}</span></div>
                 {disks}
                 {memory}
                 <div class="stat"><span class="k">"Uptime"</span><span class="v">{fmt::duration_secs(r.uptime_secs)}</span><span class="muted small">"when reported"</span></div>
             </div>
-            <p class="muted small">"Reported by the device "{time_cell(now, r.collected_at)}". Not live: run System information for current figures."</p>
         </section>
-    })
+    }.into_any()
 }
 
 pub fn bulk_confirm_page(ctx: &PageCtx, c: BulkConfirm) -> String {
@@ -1067,38 +1145,64 @@ fn windows_downloads(component: &str, label: &'static str) -> impl IntoView {
 }
 
 fn desktop_launch_section(ctx: &PageCtx, d: &DeviceDetail) -> Option<impl IntoView> {
-    if !ctx.can_support || d.row.retired || !d.os_family.eq_ignore_ascii_case("windows") {
+    if !ctx.can_support || d.row.retired {
         return None;
     }
+    let windows = d.os_family.eq_ignore_ascii_case("windows");
     let host = flyw8t_protocol::desktop_link::host(&d.row.hostname);
     let query = host.map(|h| format!("?host={h}")).unwrap_or_default();
     let target = match host {
-        Some(h) => format!("Review {h} in the app before connecting."),
-        None => "Enter the computer name or IP address in the app before connecting.".into(),
+        Some(h) => format!("Confirm {h} in Technician before connecting."),
+        None => "Enter the computer name or IP address in Technician.".into(),
     };
-    let choices = [
-        ("assist", "Help someone", "Choose a signed-in user’s Windows session. Windows may ask the user for consent."),
-        ("console", "Unattended console", "View or control the physical desktop if a user is signed in and device policy allows it."),
-        ("sign-in", "Windows sign-in", "Sign in to Windows. This can lock the physical desktop or resume an existing session."),
-    ].into_iter().map(|(mode, label, description)| view! {
-        <a class="action desktop-choice" href=format!("flyw8t://open/{mode}{query}")
-            aria-labelledby=format!("desktop-{mode}-label") aria-describedby=format!("desktop-{mode}-hint")>
-            <strong id=format!("desktop-{mode}-label")>{label}</strong>
-            <span class="small" id=format!("desktop-{mode}-hint")>{description}</span>
-        </a>
-    }).collect_view();
+    let help = format!("/support?device={}", d.row.id);
     Some(view! {
-        <section class="card" aria-labelledby="desktop-launch-title">
-            <h2 id="desktop-launch-title">"Open in Flyw8t Technician"</h2>
-            <p class="desktop-target">{target}" Use a Windows PC that can reach this device over the network or VPN."</p>
-            <div class="actions">{choices}</div>
-            <p><a href=format!("flyw8t://open/terminal{query}")>"Open SSH terminal"</a>" · Requires SSH on the device and a LAN or VPN route."</p>
-            <details class="desktop-link-help">
-                <summary>"Set up browser links on Windows"</summary>
-                {windows_downloads("technician", "Download Flyw8t Technician (Windows x64)")}
-                <p>"On your own Windows PC, compare the file’s SHA-256 hash with its entry in SHA256SUMS. In Properties → Digital Signatures, check that Windows reports a valid signature from Joseph Spillers with a timestamp."</p>
-                <p>"Keep the executable in a permanent folder. Open it and choose Browser links → Enable for this Windows user. Then choose a session here and confirm the browser prompt."</p>
-            </details>
+        <section id="device-connection-options" class="device-section" aria-labelledby="desktop-launch-title">
+            <h2 id="desktop-launch-title">"Connect"</h2>
+            <div class="device-session-actions">
+                <div>
+                    <a class="device-button" href=help aria-describedby="desktop-help-hint">"Start a screen share"</a>
+                    <p class="muted small" id="desktop-help-hint">"Send an invitation. The person chooses what to share and grants control separately."</p>
+                </div>
+                {windows.then(|| view! {
+                    <div>
+                        <a class="device-button" href=format!("flyw8t://open/console{query}") aria-describedby="desktop-control-hint">"Open physical desktop"</a>
+                        <p class="muted small" id="desktop-control-hint">"Open Technician to connect to the signed-in physical desktop when Windows policy allows it."</p>
+                    </div>
+                    <div>
+                        <a class="device-button" href=format!("flyw8t://open/sign-in{query}") aria-describedby="desktop-rdp-hint">"Sign in with RDP"</a>
+                        <p class="muted small" id="desktop-rdp-hint">"Open Technician to start or resume a Windows session. The physical screen may lock."</p>
+                    </div>
+                })}
+            </div>
+            {windows.then(|| view! {
+                <div class="device-session-actions">
+                    <div>
+                        <h3>"Background terminal policy"</h3>
+                        <p class="muted small" id="background-terminal-hint">"Shows whether the device has opted in to background PowerShell."</p>
+                        {if !ctx.can_control {
+                            view! { <p class="muted small">"Control permission is required to check background terminal policy."</p> }.into_any()
+                        } else if !matches!(d.row.connection, Connection::Connected { .. }) {
+                            view! { <p class="muted small">"The device is offline. The agent must be connected to check background terminal policy."</p> }.into_any()
+                        } else {
+                            view! {
+                                <form method="post" action=format!("/devices/{}/background-terminal/check", d.row.id)>
+                                    <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                                    <button type="submit" aria-describedby="background-terminal-hint">"Check background terminal policy"</button>
+                                </form>
+                            }.into_any()
+                        }}
+                    </div>
+                </div>
+                <details class="desktop-link-help">
+                    <summary>"Technician and connection options"</summary>
+                    <p class="muted small">{target}" Direct connections require a LAN or VPN route."</p>
+                    <p><a href=format!("flyw8t://open/assist{query}")>"Help a Windows session through Technician"</a></p>
+                    <p><a href=format!("flyw8t://open/terminal{query}")>"Open direct SSH"</a>" · Opens Technician and requires a separate SSH service on the device."</p>
+                    {windows_downloads("technician", "Download Flyw8t Technician (Windows x64)")}
+                    <p class="muted small">"Check the executable against SHA256SUMS and verify the publisher signature. Open Technician and choose Browser links → Enable for this Windows user."</p>
+                </details>
+            })}
         </section>
     })
 }
@@ -1168,7 +1272,150 @@ pub fn physical_console_result(
     shell("Physical console check", ctx, Nav::Devices, None, body)
 }
 
-pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
+#[derive(Clone, Copy)]
+pub enum BackgroundTerminalPolicyCheck {
+    Enabled,
+    Disabled,
+    Unavailable,
+    Unsupported,
+    Offline,
+    Busy,
+    TimedOut,
+    Expired,
+}
+
+pub enum BackgroundTerminalStep {
+    Policy(Option<String>),
+    LivePolicy { admission: String },
+    Confirmation,
+}
+
+fn windows_execution_account_label(account: WindowsExecutionAccount) -> &'static str {
+    match account {
+        WindowsExecutionAccount::LocalSystem => "LocalSystem (NT AUTHORITY\\SYSTEM)",
+        WindowsExecutionAccount::LocalService => "Local Service",
+        WindowsExecutionAccount::NetworkService => "Network Service",
+        WindowsExecutionAccount::OtherWindowsAccount => "Other Windows account",
+    }
+}
+
+pub fn background_terminal_policy_result(
+    ctx: &PageCtx,
+    device: uuid::Uuid,
+    device_name: &str,
+    result: BackgroundTerminalPolicyCheck,
+    step: BackgroundTerminalStep,
+    agent_account: Option<WindowsExecutionAccount>,
+) -> String {
+    use BackgroundTerminalPolicyCheck::*;
+
+    let title = match &step {
+        BackgroundTerminalStep::Policy(_) | BackgroundTerminalStep::LivePolicy { .. } => {
+            "Background terminal policy"
+        }
+        BackgroundTerminalStep::Confirmation => "Background terminal access",
+    };
+    let live = matches!(&step, BackgroundTerminalStep::LivePolicy { .. });
+    let finding = match result {
+        Enabled if matches!(&step, BackgroundTerminalStep::Confirmation) => {
+            "Technician access verified."
+        }
+        Enabled => "Local policy is enabled.",
+        Disabled => "Local policy is disabled.",
+        Unavailable => "The agent could not verify local policy.",
+        Unsupported => "This agent version does not report local terminal policy.",
+        Offline => "The agent disconnected or reconnected during the check.",
+        Busy => "The agent or console is busy.",
+        TimedOut => "The agent did not answer in time.",
+        Expired => "This confirmation expired. Check local policy again.",
+    };
+    let confirmation = match step {
+        BackgroundTerminalStep::Policy(Some(secret))
+        | BackgroundTerminalStep::LivePolicy { admission: secret } => Some(view! {
+            <form method="post" action=format!("/devices/{device}/background-terminal/admission") class="inline-form">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <input type="hidden" name="admission" value=secret/>
+                {live.then(|| view! { <input type="hidden" name="start_terminal" value="1"/> })}
+                <button type="submit">{if live { "Open background terminal" } else { "Verify session access" }}</button>
+                <span class="muted small">"This confirmation is valid for 30 seconds in this sign-in session."</span>
+            </form>
+        }),
+        _ => None,
+    };
+    let body = view! {
+        <p class="crumbs">
+            <a href="/devices">"Devices"</a>" / "<a href=format!("/devices/{device}")>{device_name.to_owned()}</a>
+        </p>
+        <h1>{title}</h1>
+        <section class="card" aria-labelledby="terminal-policy-finding">
+            <h2 id="terminal-policy-finding">{finding}</h2>
+            {agent_account.map(|account| view! { <p><strong>"Current agent account: "</strong>{windows_execution_account_label(account)}</p> })}
+            {confirmation}
+            {(!live).then(|| view! { <p>"Interactive PowerShell sessions are still in development."</p> })}
+            <p class="muted small">"Checked at "<time datetime=fmt::iso(ctx.now)>{fmt::timestamp(ctx.now)}</time></p>
+        </section>
+    };
+    shell(title, ctx, Nav::Devices, None, body)
+}
+
+pub fn background_terminal_page(
+    ctx: &PageCtx,
+    device: uuid::Uuid,
+    name: &str,
+    session_id: uuid::Uuid,
+    account: WindowsExecutionAccount,
+) -> String {
+    let ws = format!("/devices/{device}/background-terminal/sessions/{session_id}/ws");
+    let account_value = match account {
+        WindowsExecutionAccount::LocalSystem => "local_system",
+        WindowsExecutionAccount::LocalService => "local_service",
+        WindowsExecutionAccount::NetworkService => "network_service",
+        WindowsExecutionAccount::OtherWindowsAccount => "other_windows_account",
+    };
+    let body = view! {
+        <p class="crumbs">
+            <a href="/devices">"Devices"</a>" / "<a href=format!("/devices/{device}")>{name.to_owned()}</a>
+        </p>
+        <h1>"Background terminal"</h1>
+        <section class="card background-terminal" id="background-terminal" aria-label="PowerShell session"
+            data-terminal-ws=ws data-terminal-csrf=ctx.csrf.clone() data-terminal-account=account_value>
+            <div class="terminal-toolbar">
+                <div>
+                    <h2>"PowerShell"</h2>
+                    <p class="muted small">{windows_execution_account_label(account)}</p>
+                </div>
+                <div class="terminal-controls">
+                    <button id="background-terminal-interrupt" class="secondary" type="button" disabled=true>"Send Ctrl+C"</button>
+                    <button id="background-terminal-end" class="bad" type="button" disabled=true>"End session"</button>
+                </div>
+            </div>
+            <div class="terminal-notices">
+                <p id="background-terminal-status" class="badge neutral" role="status">"Connecting"</p>
+                <p id="background-terminal-detail" class="muted small"></p>
+                <p id="background-terminal-warning" class="small" role="alert" hidden=true></p>
+            </div>
+            <div class="terminal-viewport" role="region" aria-label="Terminal screen">
+                <div id="background-terminal-screen"></div>
+            </div>
+            <noscript><p class="flash bad">"PowerShell sessions need JavaScript in this browser."</p></noscript>
+        </section>
+    };
+    shell_with(
+        "Background terminal",
+        ctx,
+        Nav::Devices,
+        None,
+        Some("/static/terminal.js"),
+        body,
+    )
+}
+
+pub fn device_page(
+    ctx: &PageCtx,
+    d: DeviceDetail,
+    history: &[InventorySample],
+    refreshing: bool,
+) -> String {
     let now = ctx.now;
     let connected = matches!(d.row.connection, Connection::Connected { .. });
     let conn_detail = match &d.row.connection {
@@ -1226,15 +1473,15 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
             </details>
         }
     });
-    let glance = glance_section(&d, now);
+    let glance = glance_section(ctx, &d, history, refreshing);
     let title = d.row.name().to_string();
     let manage = manage_section(ctx, &d);
     let desktop = desktop_launch_section(ctx, &d);
     let console_check = (ctx.can_support && connected && !d.row.retired && d.os_family.eq_ignore_ascii_case("windows")).then(|| {
         view! {
-            <section class="card" aria-labelledby="console-check-title">
+            <section class="device-section device-console-check" aria-labelledby="console-check-title">
                 <h2 id="console-check-title">"Physical console"</h2>
-                <p>"Ask the connected agent whether a user is signed in at this PC’s physical desktop."</p>
+                <p class="muted small">"Ask the agent whether a user is signed in at this PC’s physical desktop."</p>
                 <form method="post" action=format!("/devices/{}/physical-console/check", d.row.id)>
                     <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                     <button type="submit">"Check physical console"</button>
@@ -1243,6 +1490,8 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
         }
     });
     let tags = tag_chips(&d.row.tags);
+    let hostname = (title != d.row.hostname)
+        .then(|| view! { " · "<span class="mono">{d.row.hostname.clone()}</span> });
     let notes = (!d.notes.is_empty())
         .then(|| view! { <dt>"Notes"</dt><dd class="notes">{d.notes.clone()}</dd> });
     let retired_note = d.row.retired.then(|| view! { <p class="flash bad">"This device is retired. Its credential is revoked; it cannot connect or run jobs."</p> });
@@ -1256,44 +1505,77 @@ pub fn device_page(ctx: &PageCtx, d: DeviceDetail) -> String {
             .unwrap_or_default()
     );
     let body = view! {
-        <p class="crumbs"><a href="/devices">"Devices"</a>" / "</p>
-        <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
-        {ctx.is_admin.then(|| view! { <p><a href=format!("/devices/{}/activity", d.row.id)>"View device activity"</a></p> })}
-        {retired_note}
-        <p>{tags}</p>
-        {console_check}
-        {desktop}
-        {glance}
-        <div class="grid">
-            <section class="card">
-                <h2>"Identity"</h2>
-                <dl class="facts">
-                    <dt>"Hostname"</dt><dd class="mono">{d.row.hostname.clone()}</dd>
-                    <dt>"Organization"</dt><dd>{org_line}</dd>
-                    <dt>"Connection"</dt><dd>{conn_detail}</dd>
-                    <dt>"Enrolled"</dt><dd>{fmt::timestamp(d.enrolled_at)}</dd>
-                    <dt>"Agent"</dt><dd class="mono">{d.row.agent_version.clone().unwrap_or_else(|| "—".into())}</dd>
-                    <dt>"Credential"</dt><dd>{credential}</dd>
-                    <dt>"External remote access"</dt><dd>{d.remote_access.clone()}</dd>
-                    <dt>"Device ID"</dt><dd class="mono">{d.row.id.to_string()}</dd>
-                    {notes}
-                </dl>
-            </section>
-            {inventory_section(d.inventory.clone(), now)}
+        <div class="device-workspace">
+            <header class="device-header">
+                <p class="crumbs"><a href="/devices">"Devices"</a></p>
+                <h1>{title.clone()}" "{connection_badge(&d.row.connection, now)}</h1>
+                <p class="device-location">{org_line.clone()}{hostname}{tags}</p>
+                <p class="device-links">
+                    <a href="#device-jobs">"Job history"</a>
+                    {ctx.can_view_device_activity.then(|| view! { <a href=format!("/devices/{}/activity", d.row.id)>"Device activity"</a> })}
+                    <a href="#device-reference">"Identity & inventory"</a>
+                    {(ctx.can_manage_devices || !d.fields.is_empty()).then(|| view! { <a href="#device-management">"Manage"</a> })}
+                </p>
+                {retired_note}
+            </header>
+            {glance}
+            <div class="device-columns">
+                <div class="device-operations">
+                    {desktop}
+                    {(ctx.can_run && !d.row.retired && d.os_family.eq_ignore_ascii_case("windows")).then(|| view! {
+                        <section class="device-section">
+                            <h2>"Automation"</h2>
+                            <div class="device-action-group">
+                                <a class="device-button" href=format!("/devices/{}/scripts", d.row.id)>"Run approved script"</a>
+                                <a class="device-button" href=format!("/devices/{}/schedules", d.row.id)>"Script schedules"</a>
+                            </div>
+                        </section>
+                    })}
+                    <section id="device-jobs" class="device-section">
+                        <h2>"Job history"</h2>
+                        {job_table(d.recent_jobs.clone(), now, false)}
+                    </section>
+                    {(ctx.can_run && !d.row.retired || console_check.is_some()).then(|| view! {
+                        <details class="device-section">
+                            <summary>"Troubleshooting tools"</summary>
+                            {console_check}
+                            {(ctx.can_run && !d.row.retired).then(|| run_forms(ctx, d.row.id, connected, d.row.retired))}
+                        </details>
+                    })}
+                </div>
+                <aside id="device-reference" aria-label="Device reference">
+                    <section class="device-section">
+                        <h2>"Identity"</h2>
+                        <dl class="facts">
+                            <dt>"Hostname"</dt><dd class="mono">{d.row.hostname.clone()}</dd>
+                            <dt>"Organization"</dt><dd>{org_line}</dd>
+                            <dt>"Agent connection"</dt><dd>{conn_detail}</dd>
+                            <dt>"Enrolled"</dt><dd>{fmt::timestamp(d.enrolled_at)}</dd>
+                            <dt>"Agent version"</dt><dd class="mono">{d.row.agent_version.clone().unwrap_or_else(|| "—".into())}</dd>
+                            <dt>"Credential"</dt><dd>{credential}</dd>
+                            <dt>"External remote access"</dt><dd>{d.remote_access.clone()}</dd>
+                            <dt>"Device ID"</dt><dd class="mono">{d.row.id.to_string()}</dd>
+                            {notes}
+                        </dl>
+                    </section>
+                    {inventory_section(d.inventory.clone(), now)}
+                </aside>
+            </div>
+            <div id="device-management">
+                {manage}
+                {device_agent_update_policy(ctx, &d)}
+                {fields_card(ctx, &d.fields, "device", d.row.id)}
+                {danger}
+            </div>
         </div>
-        <section class="card">
-            <h2>"Run a diagnostic"</h2>
-            {run_forms(ctx, d.row.id, connected, d.row.retired)}
-        </section>
-        <section>
-            <h2>"Job history"</h2>
-            {job_table(d.recent_jobs.clone(), now, false)}
-        </section>
-        {manage}
-        {fields_card(ctx, &d.fields, "device", d.row.id)}
-        {danger}
     };
-    shell(&title, ctx, Nav::Devices, None, body)
+    shell(
+        &title,
+        ctx,
+        Nav::Devices,
+        (refreshing && connected).then_some(3),
+        body,
+    )
 }
 
 pub fn device_activity_page(
@@ -1313,11 +1595,16 @@ pub fn device_activity_page(
                     let job = event.job.map(|id| view! {
                         <p class="small"><a href=format!("/jobs/{id}")>{event.job_action.unwrap_or_else(|| "View job".into())}</a></p>
                     });
+                    let session = event.support_session.map(|id| view! {
+                        <p class="small"><a href=format!("/support/{id}")>"View support session"</a></p>
+                    });
                     view! {
                         <li>
                             <time datetime=fmt::iso(event.at)>{fmt::timestamp(event.at)}</time>
                             <p><strong>{event.action}</strong>" · "{event.actor}</p>
+                            {event.version_report.map(|report| view! { <p class="small muted">{report}</p> })}
                             {job}
+                            {session}
                         </li>
                     }
                 }).collect_view()}
@@ -1327,6 +1614,7 @@ pub fn device_activity_page(
     let body = view! {
         <p class="crumbs"><a href="/devices">"Devices"</a>" / "<a href=device_href.clone()>{device.name().to_owned()}</a></p>
         <h1>"Device activity"</h1>
+        <p class="muted">"Linked screen shares record actual connections and end times here. Windows Technician session evidence is still in development."</p>
         <section class="card">
             {content}
             {older.map(|cursor| view! {
@@ -1458,6 +1746,10 @@ pub fn job_page(ctx: &PageCtx, j: JobDetail, can_cancel: bool) -> String {
             </form>
         }
     });
+    let sign = (j.row.action == "script.run" && j.row.state == ExecState::Created).then(|| {
+        let href = format!("/jobs/{}/authorize", j.row.id);
+        view! { <p class="card"><strong>"This run waits for a run signature: "</strong><a href=href>"sign and upload it"</a></p> }
+    });
     let cancel_note = j.cancel_requested_at.map(|t| {
         view! { <p class="flash bad">{format!("Cancellation requested {}. Waiting for the device to confirm.", fmt::timestamp(t))}</p> }
     });
@@ -1470,10 +1762,32 @@ pub fn job_page(ctx: &PageCtx, j: JobDetail, can_cancel: bool) -> String {
     .flatten()
     .map(|n| view! { <li>{n}</li> })
     .collect_view();
-    let result = j.result.clone().map(|r| {
+    let account = if j.row.action == "script.run" {
+        j.result.as_ref().and_then(|result| {
+            serde_json::from_value::<WindowsExecutionAccount>(
+                result.get("windows_account")?.clone(),
+            )
+            .ok()
+        })
+    } else {
+        None
+    };
+    let account_only = account.is_some()
+        && j.result
+            .as_ref()
+            .and_then(|r| r.as_object())
+            .is_some_and(|r| r.len() == 1);
+    let result = j.result.clone().filter(|_| !account_only).map(|r| {
         let pretty = serde_json::to_string_pretty(&r).unwrap_or_default();
         view! { <h3>"Structured result"</h3><pre class="output">{pretty}</pre> }
     });
+    let account = account
+        .map(windows_execution_account_label)
+        .or_else(|| {
+            (j.row.action == "script.run" && j.finished_at.is_some() && j.started_at.is_some())
+                .then_some("Unavailable")
+        })
+        .map(|label| view! { <dt>"Windows account reported by agent"</dt><dd>{label}</dd> });
     let exit = j
         .exit_code
         .map(|c| view! { <dt>"Exit code"</dt><dd class="mono">{c}</dd> });
@@ -1504,6 +1818,7 @@ pub fn job_page(ctx: &PageCtx, j: JobDetail, can_cancel: bool) -> String {
         <h1>{title.clone()}" "{badge(o.tone, o.label)}</h1>
         <p class="lead">{o.explanation}</p>
         {cancel_note}
+        {sign}
         {cancel}
         <div class="grid">
             <section class="card">
@@ -1527,6 +1842,7 @@ pub fn job_page(ctx: &PageCtx, j: JobDetail, can_cancel: bool) -> String {
                     <dt>"Device accepted"</dt><dd>{opt_time(now, j.acknowledged_at)}</dd>
                     <dt>"Started (device clock)"</dt><dd>{j.started_at.map(fmt::timestamp).unwrap_or_else(|| "—".into())}</dd>
                     <dt>"Finished (device clock)"</dt><dd>{j.finished_at.map(fmt::timestamp).unwrap_or_else(|| "—".into())}</dd>
+                    {account}
                     {exit}
                 </dl>
                 <ul class="notes">{notes}</ul>
@@ -1537,7 +1853,7 @@ pub fn job_page(ctx: &PageCtx, j: JobDetail, can_cancel: bool) -> String {
             {stream_block("Standard output", j.stdout.clone())}
             {stream_block("Standard error", j.stderr.clone())}
             {result}
-            {(j.stdout.is_none() && j.stderr.is_none() && j.result.is_none()).then(|| view! { <p class="empty">"No output received."</p> })}
+            {(j.stdout.is_none() && j.stderr.is_none() && (j.result.is_none() || account_only)).then(|| view! { <p class="empty">"No output received."</p> })}
         </section>
         <section class="card">
             <h2>"Lifecycle"</h2>
@@ -1942,7 +2258,7 @@ pub fn organization_page(
         view! {
             <p>"Choose the site, download the installer, and open it on the Windows PC. Setup shows the destination and asks for administrator approval."</p>
             {return_to_setup}
-            <form method="post" action=url class="inline-form">
+            <form id="windows-enrollment-form" method="post" action=url class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
                 <label>"Site"<select name="site"><option value="">"(none)"</option>{site_opts}</select></label>
                 <label>"Valid for"<select name="ttl_minutes">
@@ -1961,6 +2277,10 @@ pub fn organization_page(
                 <p>"Run the downloaded package as SYSTEM or from an elevated process."</p>
                 <pre><code>"Flyw8t-Setup-x64.exe --quiet"</code></pre>
                 <p class="hint">"Set the device count and validity for your rollout before downloading."</p>
+                <button type="submit" form="windows-enrollment-form" name="download" value="intune">"Download Intune bundle"</button>
+                <p class="hint">"Includes the .intunewin app, matching detection script, and Intune settings."</p>
+                <button type="submit" form="windows-enrollment-form" name="download" value="intune-detection" class="secondary">"Download Intune detection script"</button>
+                <p class="hint">"Use the same site selection for the installer and detection script."</p>
             </details>
             <details>
                 <summary>"Manual setup downloads"</summary>
@@ -2008,6 +2328,17 @@ pub fn organization_page(
         })
         .collect_view();
     let devices_href = format!("/devices?org={id}");
+    let update_policy = org.automatic_agent_updates;
+    let update_policy_form = ctx.is_admin.then(|| view! {
+        <form method="post" action=format!("/organizations/{id}/agent-update-policy") class="inline-form">
+            <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+            <label>"Organization policy"<select name="policy">
+                <option value="enabled" selected=update_policy>"Enabled"</option>
+                <option value="paused" selected=!update_policy>"Paused"</option>
+            </select></label>
+            <button type="submit">"Save policy"</button>
+        </form>
+    });
     let rename = ctx.is_admin.then(|| {
         let url = format!("/organizations/{id}/rename");
         view! {
@@ -2038,6 +2369,11 @@ pub fn organization_page(
                 {enroll_form}
             </section>
         </div>
+        <details id="agent-update-policy" class="card">
+            <summary>"Automatic agent updates · "{if update_policy { "Enabled" } else { "Paused" }}</summary>
+            <p class="hint">"This policy applies when signed automatic updates are available. Pausing covers the whole organization. Devices keep their own opt-outs."</p>
+            {update_policy_form}
+        </details>
         {fields_card(ctx, &fields, "organization", id)}
         {rename}
         <section>
@@ -2108,6 +2444,7 @@ fn admin_tabs(active: &'static str) -> impl IntoView {
     let tabs = [
         ("/admin", "Users and API tokens"),
         ("/admin/fields", "Custom fields"),
+        ("/admin/trust", "Script trust"),
     ]
     .into_iter()
     .map(|(href, label)| {
@@ -2285,6 +2622,7 @@ pub fn support_list_page(
     sessions: Vec<SupportSessionView>,
     orgs: Vec<OrgRef>,
     invite: Option<SupportInvite>,
+    device: Option<SupportDevice>,
 ) -> String {
     let now = ctx.now;
     let invite = invite.map(|i| {
@@ -2307,10 +2645,13 @@ pub fn support_list_page(
             .into_iter()
             .map(|s| {
                 let href = format!("/support/{}", s.id);
+                let linked = s.linked_device.map(|(id, name)| view! {
+                    <div class="muted">"Linked device: "<a href=format!("/devices/{id}")>{name}</a></div>
+                });
                 view! {
                     <tr>
                         <td data-label="Session"><a href=href class="mono">{fmt::short_id(s.id)}</a></td>
-                        <td data-label="For">{s.note.clone().unwrap_or_else(|| "—".into())}<div class="muted">{s.organization.clone()}</div></td>
+                        <td data-label="For">{s.note.unwrap_or_else(|| "—".into())}<div class="muted">{s.organization}</div>{linked}</td>
                         <td data-label="State">{support_state_badge(s.state, s.state_label)}</td>
                         <td data-label="Created">{time_cell(now, s.created_at)}" · "{s.created_by.clone()}</td>
                     </tr>
@@ -2333,12 +2674,18 @@ pub fn support_list_page(
         .into_iter()
         .map(|o| view! { <option value=o.id.to_string()>{o.name}</option> })
         .collect_view();
-    let body = view! {
-        <h1>"Support"</h1>
-        {no_orgs}
-        {invite}
-        <section class="card">
-            <h2>"Start an attended session"</h2>
+    let request = match device {
+        Some(d) => view! {
+            <p>"Link this screen share to "<strong>{d.name}</strong>" in "{d.organization.name}". The participant chooses the source to share."</p>
+            <form method="post" action="/support" class="inline-form">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <input type="hidden" name="device" value=d.id.to_string()/>
+                <input type="hidden" name="organization" value=d.organization.id.to_string()/>
+                <label>"Who are you helping? (optional)"<input type="text" name="note" maxlength="200" placeholder="Front desk, printer issue"/></label>
+                <button type="submit">"Create screen-share invitation"</button>
+            </form>
+        }.into_any(),
+        None => view! {
             <p>"The person you are helping opens a link in their browser and chooses a tab, a window, or their screen to show you. With "<strong>"view"</strong>" you can see it and nothing more. With "<strong>"control"</strong>" they also run the flyw8t helper and allow it there, and you can use their mouse and keyboard. Nothing is installed, and the session ends when either of you ends it."</p>
             <form method="post" action="/support" class="inline-form">
                 <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
@@ -2350,6 +2697,15 @@ pub fn support_list_page(
                 </fieldset>
                 <button type="submit">"Create invitation"</button>
             </form>
+        }.into_any(),
+    };
+    let body = view! {
+        <h1>"Support"</h1>
+        {no_orgs}
+        {invite}
+        <section class="card">
+            <h2>"Start an attended session"</h2>
+            {request}
         </section>
         <section>
             <h2>"Recent sessions"</h2>
@@ -2397,6 +2753,11 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
         (s.state, s.state_label)
     };
     let data_state = if s.terminal { "ended" } else { state };
+    let linked = s.linked_device.map(|(id, name)| {
+        view! {
+            <dt>"Linked device"</dt><dd><a href=format!("/devices/{id}")>{name}</a></dd>
+        }
+    });
     let body = view! {
         <p class="crumbs"><a href="/support">"Support"</a>" / "</p>
         <h1>{title.clone()}" "<span id="state-badge" class=support_badge_class(state)>{label}</span></h1>
@@ -2408,6 +2769,7 @@ pub fn support_session_page(ctx: &PageCtx, s: SupportSessionView, ice_servers: &
             {ended}
             <dl class="facts card">
                 <dt>"Organization"</dt><dd>{s.organization.clone()}</dd>
+                {linked}
                 <dt>"Technician"</dt><dd>{s.created_by.clone()}</dd>
                 <dt>"For"</dt><dd>{s.note.clone().unwrap_or_else(|| "—".into())}</dd>
                 <dt>"Granted"</dt><dd>{caps}</dd>
@@ -3374,6 +3736,7 @@ pub fn script_page(
 }
 
 /// One revision in full, and what changed since the one before.
+#[allow(clippy::too_many_arguments)]
 pub fn script_revision_page(
     ctx: &PageCtx,
     s: ScriptView,
@@ -3381,10 +3744,12 @@ pub fn script_revision_page(
     problems: Vec<ScriptProblem>,
     missing: Vec<MissingRequired>,
     changes: Option<RevisionChanges>,
+    approvals: ApprovalsView,
     can_edit: bool,
 ) -> String {
     let id = s.id;
     let n = r.number;
+    let approvals_view = approvals_card(ctx, id, n, approvals);
     let unchanged = |rows: &[DiffRow]| rows.iter().all(|d| matches!(d, DiffRow::Folded(_)));
     let changes_view = changes.map(|c| {
         let (source, params) = (c.source, c.parameters);
@@ -3427,6 +3792,7 @@ pub fn script_revision_page(
             <dt>"File"</dt><dd><a href=download>"Download"</a></dd>
         </dl>
         {checks}
+        {approvals_view}
         {changes_view}
         <section class="card">
             <h2>"Script"</h2>
@@ -3462,6 +3828,250 @@ pub fn oidc_return_page(
     )
 }
 
+fn approvals_card(ctx: &PageCtx, id: uuid::Uuid, n: i32, a: ApprovalsView) -> impl IntoView {
+    let request = format!("/scripts/{id}/revisions/{n}/approval-request.json");
+    let action = format!("/scripts/{id}/revisions/{n}/approvals");
+    let rows = a
+        .rows
+        .into_iter()
+        .map(|r| {
+            let state = if r.valid { "valid" } else { "no longer valid" };
+            view! {
+                <tr>
+                    <td>{r.person}</td>
+                    <td class="mono">{r.key_id}</td>
+                    <td><time datetime=fmt::iso(r.approved_at)>{fmt::timestamp(r.approved_at)}</time></td>
+                    <td>{state}</td>
+                </tr>
+            }
+        })
+        .collect_view();
+    let body = if a.trusted {
+        view! {
+            <table class="list">
+                <thead><tr><th>"Approved by"</th><th>"Key"</th><th>"When"</th><th>"State"</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+            <p>"To approve with your offline key: download the "<a href=request>"approval request"</a>
+               ", review the script file itself, then run "<code>"flyw8t-sign approve --request approval-request.json --source <the file you reviewed> --out approval.json"</code>" and paste the result here."</p>
+            <form method="post" action=action>
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>"Signed approval"<textarea name="approval" rows="6" maxlength="65536" required></textarea></label>
+                <button type="submit">"Store approval"</button>
+            </form>
+        }
+        .into_any()
+    } else {
+        view! { <p>"No trust list yet: an administrator sets one up on the "<a href="/admin/trust">"Trust page"</a>"."</p> }.into_any()
+    };
+    view! {
+        <section class="card">
+            <h2>"Approvals"</h2>
+            <p class="muted">"An agent runs a revision only with a valid approval it checks itself. What this page shows is a convenience: the agent does not rely on it."</p>
+            {body}
+        </section>
+    }
+}
+
+/// Choosing an approved script to run on a device (ADR-0015 build step 4).
+pub fn run_script_page(
+    ctx: &PageCtx,
+    device: uuid::Uuid,
+    hostname: &str,
+    device_key: &str,
+    options: Vec<RunOption>,
+) -> String {
+    let action = format!("/devices/{device}/scripts");
+    let back = format!("/devices/{device}");
+    let forms = options
+        .into_iter()
+        .map(|o| {
+            let asks = o
+                .asks
+                .into_iter()
+                .map(|(name, prompt)| {
+                    let label = prompt.unwrap_or_else(|| name.clone());
+                    view! { <label>{label}<input type="text" name=format!("v_{name}") maxlength="4096"/></label> }
+                })
+                .collect_view();
+            let schedule = (matches!(o.risk.as_str(), "C0" | "C1") && o.blocked.is_none()).then(|| {
+                let href = format!("/devices/{device}/schedules/new/{}/{}", o.script_id, o.number);
+                view! { <p><a href=href>"Schedule this revision"</a></p> }
+            });
+            let title = format!("{} · revision {} · {}", o.name, o.number, o.risk);
+            let signed = matches!(o.risk.as_str(), "C2" | "C3").then(|| {
+                view! { <p class="muted">"This class needs a run signature: after you start it, sign the run with flyw8t-sign and upload it."</p> }
+            });
+            let body = match o.blocked {
+                Some(why) => view! { <p class="muted">{format!("Cannot run here: {why}.")}</p> }.into_any(),
+                None => view! {
+                    <form method="post" action=action.clone()>
+                        <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                        <input type="hidden" name="script" value=o.script_id.to_string()/>
+                        <input type="hidden" name="number" value=o.number.to_string()/>
+                        {asks}
+                        <label>"Timeout (seconds)"<input type="number" name="timeout" min="1" max="3600" value="300"/></label>
+                        <label>"Delivery window"<select name="delivery">
+                            <option value="default">"Server default"</option>
+                            <option value="hour">"Up to 1 hour"</option>
+                            <option value="day">"Up to 24 hours"</option>
+                            <option value="week">"Up to 7 days"</option>
+                        </select></label>
+                        <p class="muted small">"An offline agent can receive the run on its next check-in within this window. Signed runs also expire when the signature expires."</p>
+                        {signed}
+                        <button type="submit">"Start run"</button>
+                    </form>
+                }
+                .into_any(),
+            };
+            view! { <section class="card"><h2>{title}</h2>{body}{schedule}</section> }
+        })
+        .collect_view();
+    let body = view! {
+        <p class="crumbs"><a href=back>{hostname.to_string()}</a>" / "</p>
+        <h1>"Run an approved script"</h1>
+        <p>"Runs under the Windows agent’s account, typically LocalSystem when installed as a service. The result shows the account reported by the agent."</p>
+        <p><a href=format!("/devices/{device}/schedules")>"Script schedules"</a></p>
+        <dl class="facts card">
+            <dt>"Device key id"</dt><dd class="mono">{device_key.to_string()}</dd>
+        </dl>
+        <p class="muted">"Compare the key id with "<code>"flyw8t-agent status"</code>" on the device before adding it to "<code>"flyw8t-sign device add"</code>"."</p>
+        {forms}
+    };
+    shell("Run a script", ctx, Nav::Devices, None, body)
+}
+
+/// Signing a C2 or C3 run and uploading the signature.
+pub fn authorize_run_page(
+    ctx: &PageCtx,
+    job: uuid::Uuid,
+    risk: &str,
+    device_key: &str,
+    waiting: bool,
+    error: Option<String>,
+) -> String {
+    let request = format!("/jobs/{job}/run-request.json");
+    let action = format!("/jobs/{job}/authorization");
+    let back = format!("/jobs/{job}");
+    let error = error.map(|e| view! { <p class="flash bad">{format!("Refused: {e}")}</p> });
+    let form = if waiting {
+        view! {
+            <ol>
+                <li>"Download the "<a href=request>"run request"</a>"."</li>
+                <li><code>"flyw8t-sign authorize --key root.key --request run-request.json --out run-signature.json"</code>
+                    " on your own machine. It checks the revision, its approvals and the device ("<span class="mono">{device_key.to_string()}</span>") against what it holds itself, and shows what it signs."</li>
+                <li>"Paste run-signature.json here. "{format!("A {risk} signature is valid for a short time only.")}</li>
+            </ol>
+            <form method="post" action=action>
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>"Run signature"<textarea name="authorization" rows="6" maxlength="65536" required></textarea></label>
+                <button type="submit">"Upload and run"</button>
+            </form>
+        }
+        .into_any()
+    } else {
+        view! { <p>"This run is no longer waiting for a signature."</p> }.into_any()
+    };
+    let body = view! {
+        <p class="crumbs"><a href=back>"Job"</a>" / "</p>
+        <h1>"Sign this run"</h1>
+        {error}
+        <section class="card">{form}</section>
+    };
+    shell("Sign a run", ctx, Nav::Jobs, None, body)
+}
+
+/// The trust page (ADR-0015 build step 3).
+pub fn trust_page(
+    ctx: &PageCtx,
+    t: Option<TrustView>,
+    rp_id: String,
+    origin: String,
+    passkeys: Vec<(uuid::Uuid, String)>,
+) -> String {
+    let keys = passkeys
+        .into_iter()
+        .map(|(id, name)| {
+            let href = format!("/account/passkeys/{id}/signer.json");
+            view! { <li><a href=href>{name}</a></li> }
+        })
+        .collect_view();
+    let upload = |label: &'static str| {
+        view! {
+            <form method="post" action="/admin/trust/versions">
+                <input type="hidden" name="csrf" value=ctx.csrf.clone()/>
+                <label>{label}<textarea name="version" rows="8" maxlength="1048576" required></textarea></label>
+                <button type="submit">"Store version"</button>
+            </form>
+        }
+    };
+    let body = match t {
+        None => view! {
+            <h1>"Script trust"</h1>
+            <p>"No trust list yet. Scripts cannot run until there is one, and agents are pinned to it."</p>
+            <section class="card">
+                <h2>"Set it up"</h2>
+                <ol>
+                    <li>"On your own machine: "<code>"flyw8t-sign keygen --out root.key"</code>". Keep a second copy somewhere else."</li>
+                    <li>"Optionally, download a passkey of yours as a signer entry: "<ul>{keys}</ul></li>
+                    <li><code>{format!("flyw8t-sign draft-genesis --key root.key --person <you> --rp-id {rp_id} --origin {origin} [--signer passkey-signer.json] --out draft.json")}</code></li>
+                    <li><code>"flyw8t-sign genesis --key root.key --draft draft.json --out genesis.json"</code>". It prints the trust fingerprint: keep it in your own notes. Agents pin that copy, not this page."</li>
+                    <li>"Paste genesis.json here."</li>
+                </ol>
+                {upload("Signed first version")}
+            </section>
+        }
+        .into_any(),
+        Some(t) => {
+            let signers = t
+                .signers
+                .into_iter()
+                .map(|s| {
+                    view! {
+                        <tr><td>{s.person}</td><td>{s.kind}</td><td>{s.role}</td><td>{s.may_approve}</td><td class="mono">{s.key_id}</td></tr>
+                    }
+                })
+                .collect_view();
+            let list = |items: Vec<String>| {
+                if items.is_empty() {
+                    view! { <p class="muted">"None."</p> }.into_any()
+                } else {
+                    view! { <ul>{items.into_iter().map(|i| view! { <li class="mono">{i}</li> }).collect_view()}</ul> }.into_any()
+                }
+            };
+            view! {
+                <h1>"Script trust"</h1>
+                <p class="muted">"Everything on this page comes from this server. Under a compromised server none of it is proof: compare the fingerprint with your own notes, and versions with "<code>"flyw8t-sign show"</code>" and "<code>"flyw8t-agent trust status"</code>"."</p>
+                <dl class="facts card">
+                    <dt>"Fingerprint"</dt><dd class="mono">{t.fingerprint}</dd>
+                    <dt>"Deployment"</dt><dd class="mono">{t.deployment}</dd>
+                    <dt>"Version"</dt><dd>{t.version}</dd>
+                    <dt>"Head"</dt><dd class="mono">{t.head}</dd>
+                    <dt>"Relying party"</dt><dd>{t.rp_id}" · "{t.origins.join(", ")}</dd>
+                    <dt>"Threshold"</dt><dd>{format!("{} different list admins", t.threshold)}</dd>
+                    <dt>"Chain"</dt><dd><a href="/admin/trust/chain.json">"Download"</a>" for "<code>"flyw8t-sign trust import"</code>" or "<code>"trust update"</code></dd>
+                </dl>
+                <section class="card">
+                    <h2>"Signers"</h2>
+                    <table class="list">
+                        <thead><tr><th>"Person"</th><th>"Kind"</th><th>"Role"</th><th>"May approve up to"</th><th>"Key id"</th></tr></thead>
+                        <tbody>{signers}</tbody>
+                    </table>
+                    <h3>"Removed keys"</h3>{list(t.removed)}
+                    <h3>"Revoked revisions"</h3>{list(t.revoked)}
+                </section>
+                <section class="card">
+                    <h2>"Next version"</h2>
+                    <p>"Edit the head into the next version (version + 1, previous = the head above), sign it with "<code>"flyw8t-sign sign-list"</code>", and paste it here."</p>
+                    {upload("Signed next version")}
+                </section>
+            }
+            .into_any()
+        }
+    };
+    shell("Script trust", ctx, Nav::Admin, None, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3476,6 +4086,7 @@ mod tests {
             now: OffsetDateTime::UNIX_EPOCH + Duration::days(1),
             can_run: true,
             is_admin: true,
+            can_view_device_activity: true,
             can_enroll: true,
             can_support: true,
             can_control: true,
@@ -3493,6 +4104,70 @@ mod tests {
             page: 1,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn terminal_policy_shows_only_an_agent_reported_account() {
+        let render = |account| {
+            background_terminal_policy_result(
+                &ctx(),
+                Uuid::nil(),
+                "Device",
+                BackgroundTerminalPolicyCheck::Enabled,
+                BackgroundTerminalStep::Policy(None),
+                account,
+            )
+        };
+        let legacy = render(None);
+        assert!(!legacy.contains("Current agent account"));
+        for (account, label) in [
+            (
+                WindowsExecutionAccount::LocalSystem,
+                "LocalSystem (NT AUTHORITY\\SYSTEM)",
+            ),
+            (WindowsExecutionAccount::LocalService, "Local Service"),
+            (WindowsExecutionAccount::NetworkService, "Network Service"),
+            (
+                WindowsExecutionAccount::OtherWindowsAccount,
+                "Other Windows account",
+            ),
+        ] {
+            let html = render(Some(account));
+            assert!(html.contains("Current agent account:"));
+            assert!(html.contains(label));
+            assert!(html.contains("Interactive PowerShell sessions are still in development."));
+        }
+    }
+
+    #[test]
+    fn live_terminal_uses_admission_and_same_origin_assets() {
+        let device = Uuid::from_u128(1);
+        let session = Uuid::from_u128(2);
+        let account = WindowsExecutionAccount::LocalSystem;
+        let check = background_terminal_policy_result(
+            &ctx(),
+            device,
+            "Test device",
+            BackgroundTerminalPolicyCheck::Enabled,
+            BackgroundTerminalStep::LivePolicy {
+                admission: "one-time".into(),
+            },
+            Some(account),
+        );
+        assert!(check.contains(&format!("/devices/{device}/background-terminal/admission")));
+        assert!(check.contains("name=\"start_terminal\" value=\"1\""));
+        assert!(check.contains("Open background terminal"));
+        assert!(check.contains("LocalSystem"));
+
+        let page = background_terminal_page(&ctx(), device, "<script> device", session, account);
+        assert!(page.contains(&format!(
+            "data-terminal-ws=\"/devices/{device}/background-terminal/sessions/{session}/ws\""
+        )));
+        assert!(page.contains("data-terminal-account=\"local_system\""));
+        assert!(page.contains("data-terminal-csrf=\"tok&quot;en\""));
+        assert!(page.contains("&lt;script&gt; device"));
+        assert!(page.contains("/static/xterm.css"));
+        assert!(page.find("/static/xterm.js").unwrap() < page.find("/static/terminal.js").unwrap());
     }
 
     fn user(role: &str) -> UserDetail {

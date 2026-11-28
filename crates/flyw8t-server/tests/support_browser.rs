@@ -201,16 +201,24 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         config.ice_servers = servers;
     }
     let server = start(config).await;
-    let admin = server.admin().await;
-    let org = admin
-        .create_org(&server, "Contoso Dental")
+    let admin = server.admin_sudo().await;
+    let org = admin.create_org(&server, "Contoso Dental").await;
+    let token = admin.enrollment_token(&server, org, "60", "1").await;
+    let agent = TestAgent::enroll(&server.url(), &token).await.unwrap();
+    sqlx::query("UPDATE devices SET display_name = 'Support test PC' WHERE id = $1")
+        .bind(agent.device_id)
+        .execute(&server.state.db)
         .await
-        .to_string();
+        .unwrap();
     let r = admin
         .post(
             &server,
             "/support",
-            &[("organization", org.as_str()), ("note", "Demo")],
+            &[
+                ("organization", &org.to_string()),
+                ("device", &agent.device_id.to_string()),
+                ("note", "Demo"),
+            ],
         )
         .await;
     assert_eq!(r.status, StatusCode::OK);
@@ -222,6 +230,7 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         "/usr/bin/google-chrome",
         "/usr/bin/chromium",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ]
     .iter()
     .map(PathBuf::from)
@@ -504,6 +513,19 @@ async fn two_browsers_pair_consent_and_share_a_tab() {
             .await
             .unwrap();
     assert_eq!(state, "closed");
+    let activity = admin
+        .get(&server, &format!("/devices/{}/activity", agent.device_id))
+        .await;
+    assert_eq!(activity.status, StatusCode::OK);
+    assert!(activity.body.contains("Linked screen share connected"));
+    assert!(activity.body.contains("Linked screen share ended"));
+    assert_eq!(
+        activity
+            .body
+            .matches(&format!(r#"href="/support/{session_id}""#))
+            .count(),
+        2
+    );
     cdp.screenshot(&tech, out_dir.join("support-technician-ended.png"))
         .await;
 

@@ -386,9 +386,10 @@ impl TestAgent {
             server_url: server_url.into(),
             ca_cert_pem: None,
             device_id: None,
+            enrollment_scope: None,
             state_dir: dir.path().to_path_buf(),
         };
-        let (device_id, _) = flyw8t_agent::enroll(cfg, token).await?;
+        let (device_id, _, _) = flyw8t_agent::enroll(cfg, token, None).await?;
         Ok(TestAgent { dir, device_id })
     }
 

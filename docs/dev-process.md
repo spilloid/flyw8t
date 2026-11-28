@@ -46,6 +46,32 @@ Every round is logged here, including the ones that went badly.
 | 38 | 2026-11-10 | ADR-0015 design, round 2 (db71b97) | orchestrator | Codex **`gpt-6.1-sol`, high**, read-only, design review round 2 | Round 1 rechecked: 12 resolved or adequately stated (3 as limits), 13 partial. 6 new (5 high, 1 medium) and 9 build-step-2 gaps (3 high, 6 medium); all taken | **Revised.** Operator chose (2026-11-10): spent records kept forever (pruning let a second authorization for the same job replay it); freshness by signed `issued at` with the window cap measured from signing; `flyw8t-sign authorize` recomputes hashes from source, verifies against its own checkpointed chain and a local device list; a run ends when its Job Object is empty (wait under the timeout, then kill). Also added: supplied parameter names must equal declared, none extra (PowerShell 5.1 sends unmatched splats to `$args`, confirmed by Codex); `Started` durable before the interpreter, admission order spelled out; removal closure (dropped keys must be in removed keys) and unchanged person ids; canonical key forms; list updates verified under the predecessor, approvals and runs under the head; signer-side checkpoint against equivocation; escaped displays; strict decoding; plain-parameter AST and `secret` syntax; salt visibility narrowed; complete grammar, literal-byte and rejection vectors required in build step 2; key-file format. New stated limit: a genesis made while the server is compromised can mislabel the passkey entry. A round 3 is optional; build step 2's own review will check the grammar. |
 | 39 | 2026-11-10 to 11-11 | ADR-0015 build step 2: statement encoding, chain verification, signatures, shared run checks, `flyw8t-sign` (`trust-protocol`) | orchestrator | Literal vectors from an independent Python encoder (checked in CI), 44 protocol tests, 3 end-to-end `flyw8t-sign` flows through the real binary; 2 of 2 mutants caught (signing checkpoint, transition check before signing). Codex **`gpt-6.1-sol`, high**, read-only, round 1 on 7b1914f | 10 raised (1 high, 6 medium, 3 low); all real, all fixed in 80f5732 | **Fixed.** State lock for the whole command; write-through replacement; every signature-independent transition rule checked before recording or signing; deployment, fingerprint and signing key shown before every confirmation; escaped diagnostics; bounded inputs and KDF costs; duplicate value names refused while parsing; `crossOrigin`/`topOrigin` presence including `null`; full statement encodings and a fixed passkey signature in the vectors; a threshold-2 test of the checkpoint. |
 | 40 | 2026-11-11 | Re-review of row 39 (80f5732) | — | **Claude Opus 5.5 subagent** standing in (Codex usage limit until 04:36), read-only, fresh context | Round 1: 6 fixed, 4 partial. 6 new (2 medium, 4 low); all real, all fixed | **Fixed.** `genesis` runs every signature-independent check before recording, and reports a real failure as one; `trust import` honours the checkpoint; linear duplicate check with a 1024-name cap; signing a genesis as a non-root needs `--as-list-admin`, and every other governing key is listed for confirmation; diagnostics escape line breaks; `--person-id` for a second key of one person. Same-family review: a Codex pass over rows 39 and 40 is owed before merge. |
+| 41 | 2026-11-11 | ADR-0015 build steps 3 and 4: server trust chain and approvals, agent pinning and updates, script admission, spent-run store, PowerShell runner in a Job Object, console run flow (`trust-server`) | orchestrator | New suites `tests/trust.rs` and `tests/script_runs.rs` (PostgreSQL, real agent, real PowerShell: C0 runs, C3 waits for a signature, wrong device or values refused); agent unit tests for every admission rule, the spent store (torn record, restart), trust updates (fork, forged), the runner (binding by name, refused `param()` forms, secret redaction, waiting for children, timeout). Full workspace suite green with `--include-ignored` | Review pending | **Open.** Codex was out of quota; a Claude stand-in review runs first, and a Codex pass over rows 39 to 41 is owed before merge. Known gaps: browser passkey signing, field and secret parameters, non-Windows runners (`docs/running-scripts.md`). |
+
+## Script-runner validation repair: 2026-11-12
+
+Codex implementation, independent review pending. Follow-up to the failed trust-server CI run 42974734028: Linux stopped on an unused Windows-only `Ordering` import, and Windows ran the real PowerShell/database test without `FLYW8T_TEST_DATABASE_URL`. The old non-Windows ignore marker was also insufficient because Linux CI uses `--include-ignored`. The suite now compiles only on Windows and is explicitly ignored pending its database prerequisite; the import matches the runner's Windows implementation. This repairs validation routing; the script execution implementation's independent review remains open.
+
+Local evidence: the full Windows workspace run passed **261 tests** against disposable PostgreSQL 18.6, including the real PowerShell C0/C3 test, TLS, virtual-passkey browser, two-browser WebRTC and UI capture. Only the fixture-generation helper was excluded. The script test also passed explicitly with PostgreSQL, and running its executable with the database variable removed correctly yielded one ignored test and no database attempt. Formatting, whitespace and workspace/all-target clippy with warnings denied passed. Rust/Cargo 1.99.1 MSVC host/target, zero dev/test debug information, incremental off, two build jobs, Node 24.22.1 and installed Chrome. A shared target's old pre-script protocol check metadata initially caused unresolved imports in clippy; clearing that protocol cache and re-checking passed. Prefer separate target directories for divergent protocol worktrees. Clean Linux CI is still required for the platform fix. The release-foundation journal hardening lives in a separate main-targeted change and must be incorporated before production script rollout.
+
+## Native runner follow-up: 2026-11-13
+
+The operator requested resolution and authorized adversarial delegation. Claude was not installed or exposed by a connected tool. Two fresh-context Codex `gpt-6.1-sol`/high reviewers were dispatched read-only; this is a **same-family substitution**, not cross-family review. The journal reviewer examined release-foundation `22176a9` against `ff67d58`, found no new blocking replay-safety defect, and graded filesystem-failure regressions B+ but producer failure/reconnect integration C. The runner reviewer examined `10e0eae`: routing fixes were sound; it reproduced PowerShell 5.1 adding a relative `WindowsPowerShell\Modules` path to the supplied protected list, and identified synchronous stdin delivery before deadline handling, job-query errors treated as an empty process tree, and the missing run-directory owner/ACL check required by ADR-0015.
+
+Before fixes, new native tests failed for the unsorted environment, stdin blocking timeout handling (64 KiB into an interpreter that never reads), and the actual child environment containing three paths including the relative entry. The wrapper now restores absolute System-first/Program Files paths and explicitly imports the Windows Utility/Management manifests before any dependent cmdlet. A dedicated input writer allows timeout/cancellation while input is blocked; job-query, termination, wait and exit-code errors fail explicitly. CI now records synthetic cold-start stage observations rather than increasing deadlines or disabling AMSI/Defender. The two original CI attempts both timed out all three PowerShell tests at 60 seconds with empty streams; new CI evidence is required to adjudicate the startup change.
+
+Nonblocking baseline follow-ups remain explicit: a final result whose journal write fails may be sent without durable result evidence and lost across disconnect/reconnect; the model assumes successful persistence and does not prove that integration case. Keep G02-JOURNAL open until producer integration is covered. Separately, the run-directory owner/ACL check required by ADR-0015 remains unimplemented. Neither finding is claimed fixed by the startup/pipe work, and the script implementation is not approved for production rollout.
+
+The second same-family review found no new blocking implementation defect. Its validation requests added a 64 KiB successful secret-delivery test, a live-descendant job-query-failure injection test and bounded diagnostic stream collection. All twelve runner tests passed locally. The query-error regression also rejected a mutant that returned zero active processes on a failed query. Initial workspace clippy against the older shared target failed writing missing fingerprint metadata; final validation uses a fresh target under this worktree instead of sharing divergent protocol build caches. Final full-workspace and CI results are recorded with the PR's exact head.
+
+Environment interruption: at 00:22 on 2026-11-13 (America/New_York), cleanup removed files from the older release worktree's target, including the live disposable PostgreSQL cluster. Its log recorded a missing postmaster.pid/PG_VERSION and immediate shutdown. The operator agreed to exclude active validation files. PostgreSQL 18.6-5 was restored from the official EDB archive outside target cleanup paths and verified against SHA-256 `e2246ba91d22345bc3d017586c09ede52d9df180b1eeb480f050445f1cad84e2`. No production database was involved.
+
+Final local validation passed **269 tests**, with ignored suites enabled and only the fixture-generation helper excluded. This includes all 40 agent tests, the delivery model, real PowerShell C0/C3 execution, PostgreSQL flows, native TLS, browser passkeys, two-browser support and UI capture (a support phone capture was inspected). Workspace/all-target clippy with warnings denied, formatting, diff whitespace and the diagnostic's PowerShell syntax/execution also passed. Rust/Cargo 1.99.1 MSVC host/target, two build jobs, incremental disabled, zero dev/test debug information and the worktree-local target were used. The normal user context was used for the complete browser suite. The existing MSVC LNK4098 runtime-library warning remains a packaging follow-up; it did not fail linking. Captures remain ignored and unpublished.
+
+CI follow-up at **48c4659**, [run 43376355917](https://github.com/spilloid/flyw8t/actions/runs/43376355917): all 40 Windows agent tests passed in 10.08 seconds, including the twelve runner tests. The diagnostic's original order and System-only inputs stalled after engine startup and were stopped at 20 seconds; System-first completed in 426 ms and explicit imports in 342 ms. This strongly implicates first-use module discovery, with the ordered-cache caveat above. Linux PostgreSQL/browser/UI, container and standards passed. Windows then exposed two trust integration tests missing their PostgreSQL ignore prerequisite, both panicking on the absent database variable. Both now match the other database suites; they remain in Linux CI's `--include-ignored` run and in the complete provisioned local run. Test code and assertions are unchanged.
+
+The prerequisite follow-up was reviewed read-only by the same Codex reviewer with no blocker. With the database variable removed, the trust executable reports zero passed/two ignored and makes no connection attempt. With PostgreSQL provisioned and `--include-ignored`, the complete **269-test** workspace run passed again, including both trust tests and the real C0/C3 runner flow. Formatting, whitespace and workspace/all-target clippy also passed before the follow-up commit.
+
 | 41 | 2026-11-14 | 0.1.2: console frame, fleet health on the overview and device list, enrollment commands, published server image (`console-0.1.2`) | orchestrator | Full workspace suite on the final tree: **276 passed, 0 failed, 35 suites** (PostgreSQL 18.6 throwaway cluster, Chrome), then one more PostgreSQL test added and run with its file (4 of 4). `ui_capture` screenshots looked at: overview, device list and device page, desktop and phone, both themes. 18 of 18 mutants caught. Codex **`gpt-6.1-sol`, high**, read-only, one round on the working tree | `ui_capture` failed first: the device page overflowed at desktop width (the inventory disk row could not wrap). Two mutants survived first (the two-day stale boundary; agent-version counts outside the caller's organizations) and the tests were strengthened. Codex: 10 raised (1 high, 4 medium, 5 low), all real, all taken; no tenancy leak and no secret-handling regression found | **Fixed.** The server address in the enrollment commands is a PowerShell single-quoted literal (it was unquoted: a crafted `FLYW8T_PUBLIC_URL` would have run in an elevated shell). The connection and attention filters, both orders and the overview read up to 50,000 devices before the list is cut to 2,000; a cut list says so, and a partial overview gives no all-clear. Staleness goes by the server's receipt time, and a device connected two days with no readable inventory is a concern. The release job compares the image's whole version line (`grep -F` accepted 0.1.20 for 0.1.2). An Order box sorts where the headings are hidden. Long agent versions wrap. Wording corrected: `status` does not show connection; the image does contain `bash`. **Not fixed, stated:** agent-version counts carry no age (the page now says they date from each device's last connection). **Removed:** a sentence in `deployment.md` saying the proxy layout was first run on 2026-11-14 on Kubernetes behind Authentik; no record of what that run checked was found. **Not run:** the release workflow's `image` job, and the fix round has not been re-reviewed. The first build at full parallelism died with dependency-metadata errors again (as on 11-12); `CARGO_INCREMENTAL=0`, two jobs and a separate target folder passed. |
 | 42 | 2026-11-14 | CI flake on `main` after merging PR 38: `connection::tests::one_process_per_state_directory` (`lock-test-flake`) | orchestrator | The Linux job failed once on the merge commit (run 43672573246) at "released on drop"; the same tree passed on the pull request. Local: the test passes, and with the first lock leaked (`mem::forget`) it fails, so it still proves release | 1 / 1 (test only) | **Fixed.** The last acquire waits up to five seconds instead of zero. Likely cause, not proven: the executor tests spawn processes in the same test binary, and on Linux a child holds a copy of the lock file's descriptor between fork and exec, so the lock outlives `drop` for a moment. The agent itself already waits when taking the lock. Not reviewed (test-only change). **Second flake, same day** (PR 39's own Linux run 43673476593): `report_for_job_recorded_as_queued_is_accepted_not_looped` found no `implied_dispatch` event. The test sets the job back to `queued` by hand and then reports; the sweeper (every 200 ms in tests) could find it `queued` in between and dispatch it in the ordinary way. The server is right in either order; the test raced. Reproduced by adding a 500 ms pause between the edit and the report in the old test (fails). **Fixed (test only):** the test keeps the row locked from its edit until the server's report handler is waiting on that lock, then commits. Five local runs passed. Not reviewed. |
 | 43 | 2026-11-14 | Release 0.1.2 (tag `v0.1.2` on `6b81d8b`, operator's go-ahead) | orchestrator | PR 38 and PR 39 green; `main` green at `6b81d8b` (run 43675342909). One-time signing setup run (`scripts/setup-signing.ps1`, with the operator's approval): the Signing check had failed that day because `AZURE_CLIENT_ID` was unset; after setup it passed (run 43673702581). Release run 43676106648: both builds, `image` and `publish` passed. Downloaded all assets: `sha256sum -c SHA256SUMS` OK for all four; both `.exe` files report a valid, timestamped Authenticode signature from `CN=Joseph Spillers` | — | **Published** as a pre-release. The server image was pushed for the first time (`ghcr.io/spilloid/flyw8t-server:0.1.2@sha256:f0302c030932262a5489bad2e9ca070adc3cc86fdc6e339130f8d4c17e79f5b4`). **Not done:** nobody has pulled or run the published image; the downloaded binaries were not run; the 0.1.2 review fixes (row 41) and the two test fixes (row 42) remain unreviewed. |
@@ -197,6 +223,196 @@ The Windows installer uses the existing organization and site enrollment token p
 
 The device Activity page reads organization-scoped audit records and job transitions from their existing append-only tables. All six console integration tests passed on local PostgreSQL 17.7. They cover a real agent diagnostic, the audit permission, cross-organization exclusion and older-page boundaries where events share a timestamp. The console screenshot suite includes the Activity page. The full browser suite and independent review remain pending.
 
+## MCP session status, 2026-11-26
+
+Compared KVM IT v0.8.2 at `43abf00` with the Flyw8t attended screenshot path. The new status tool uses the same credential scope and session ownership checks as capture. The call reads the live grant and recorded session state. Nine adapter unit tests and all 18 PostgreSQL support tests passed. The support suite exercises waiting, consent required, consent pending, allowed, another owner, wrong scope and a revoked credential. The built stdio adapter passed a status round trip against an HTTP fixture using MCP 2025-11-25 and 2025-03-26. Clippy passed for all server and adapter targets. Independent review remains pending.
+
+The macOS headless Chrome test passed with synthetic media, two tabs, PostgreSQL and the built stdio adapter. It checked status before the first screenshot request, completed the participant consent flow, and retrieved a crop. The returned crop matched the synthetic frame.
+
+## Device workspace and execution sprint, 2026-11-26
+
+The device workspace puts remote access, diagnostics and job history beside identity and inventory. The existing management and custom-field controls follow them. The full console capture suite passed in Chrome at 1280, 820 and 390 pixels, in both themes, including the new script schedules page. Desktop and phone captures were inspected.
+
+The signed runner integration branch passed its Windows PowerShell execution suite and Linux checks in [run 45882072572](https://github.com/spilloid/flyw8t/actions/runs/45882072572). The schedule integration passed with PostgreSQL 17.7, covering concurrent execution of the scheduler, cancellation, tenant boundaries, and permission and trust revocation. The isolated MCP adapter passed 13 tests. A live stdio call using the deployed v1 API returned verified inventory from an enrolled Windows device. That call covered the existing `system.info` action.
+
+Review led to current trust checks at script dispatch, scoped signature validation, safe expiry for jobs awaiting a signature, and durable handling of refused scripts and partial replay-journal writes. The reconnect test delivered one eligible job and recorded zero dispatches for a revoked revision and for a job whose window closed while dispatch waited on the trust lock. Temporarily removing the deadline recheck made the regression record a dispatch and fail. The updated domain, trust, console, support, fleet and adapter suites passed 89 tests. The agent passed 35 applicable tests on macOS. Three existing network-command tests require tools at the Windows or Linux paths. The support JavaScript suite passed 31 tests. Targeted Clippy passed with warnings denied.
+
+The terminal readiness probe checks for the local SSH listener. Agent transport, SSH session acceptance and native Technician audit still require implementation and real Windows verification. The linked attended screen share records observed media connection and closure. Native session launch, keyboard and mouse integration, and final release-gate review remain open.
+
+## Device monitoring and connection choices, 2026-11-26
+
+The device page uses existing periodic and job inventory for memory and per-disk trends. The scoped technician refresh integration test passed with a connected test agent, PostgreSQL and a verified inventory result. All six console tests and four trust tests passed. The trust fixture checks that a script result shows the agent's reported account class in the outcome.
+
+All 17 fleet tests passed. The full Chrome capture suite passed at desktop, tablet and phone widths in both themes. The Windows device fixture contains eight synthetic snapshots, and its desktop and phone captures were inspected. Targeted Clippy passed with warnings denied.
+
+The direct SSH account field passed portable Technician tests. A temporary source check compiled the Windows Rust UI and PowerShell token observation for the MSVC target. The full Windows agent cross-check stopped in the C dependency because the Mac lacks the Windows SDK headers. Windows still needs a native Technician and PowerShell run to verify the new account behavior. The SSH argument regression failed when its separate account field was temporarily ignored in a fixture and passed after restoration.
+
+The background terminal now targets the enrolled agent connection without an SSH service requirement. The Network node selector is a design proposal for discovered web interfaces. Technician browser-link registration remains local to its desktop launcher. See [Background terminal](background-terminal.md) and [Network operations](network-operations.md#proposed-network-node-selection).
+
+The operator clarified the background terminal's acceptance case. The technician installs software while the employee stays in a meeting. PowerShell is the default, console prompts go to the technician, and endpoint policy and technician permissions authorize the session without an employee approval prompt. The [Windows acceptance steps](background-terminal.md#acceptance-on-windows) capture this distinction from attended desktop access. This round changes the acceptance criteria.
+
+## Silent enrollment and scoped activity, 2026-11-26
+
+The quiet installer uses the same site package as interactive setup and runs from an elevated process. Installer review found two startup problems: Windows could report the service running before the agent opened its state, and a retry after service registration could strand an existing enrollment. The service now reports running after it initializes the agent. Quiet setup checks the service registration and protected files before it resumes an existing enrollment. Removing the `/quiet` alias from a temporary copy of the argument parser made its regression test fail. Windows CI includes a LocalSystem install and tests recovery of stopped and missing services. Windows-target Clippy passed for the actual agent binary and installer fixture. The local cross-check skipped ring's C build because the Mac lacks the Windows SDK. Native execution of the fixture is pending.
+
+Technician accounts can see Device Activity for their assigned organizations. The PostgreSQL scope check covered the session owner, a coworker, an administrator, and a different organization. The native RDP client has sign-in and disconnect callbacks. Auditing those events still needs an authenticated path from the Windows client, and physical-console shadowing needs independently observed session evidence.
+
+The background terminal policy check verifies the enrolled endpoint's local administrator opt-in on its active agent connection and records the observation in Device Activity. The integrated PostgreSQL tests passed for device activity, linked screen-share events, physical-console observation, and background terminal policy. The Windows installer fixture also checks the installed agent's disabled, enabled, and disabled-again policy states. Interactive PowerShell, Windows account selection for the terminal, and session auditing remain open.
+
+The final browser capture run passed. Enrollment and Device Activity captures were inspected. The fleet and enrollment suites and targeted macOS Clippy also passed.
+
+## Automatic agent update policy, 2026-11-26
+
+The operator chose automatic agent updates as the default with an explicit opt-out. ADR-0008 records the organization and device settings and the evidence expected from an early Windows pilot. The updater remains release work.
+
+## Enrollment scope for managed deployment, 2026-11-26
+
+The server now reports the enrolled organization and site IDs to the agent. The agent saves them with the device identity and exposes them through `status --json`. The PostgreSQL fleet suite passed for site-specific and organization-wide enrollment. Older agents and servers can lack the scope record. The recorded IDs describe enrollment time, and site changes still need verification against the console. Generating the Intune package and validating assignment in a real tenant remain open.
+
+The enrollment form now generates an Intune detection script for the selected site without issuing a credential. The fleet HTTP test passed for the download and for refusal of an unknown site. A PowerShell fixture with mocked Windows service and signature checks passed 16 cases. Deleting the site comparison in a temporary copy made the detector accept a wrong-site fixture. The Chrome capture suite and focused server and web Clippy passed. Native Windows and Intune tenant acceptance remain open.
+
+## Background terminal policy audit, 2026-11-26
+
+When access changes during a live policy check, the console withholds the endpoint reply and logs a denial against the original request. The PostgreSQL regression test failed before the fix because the request had no matching result, then passed with the denial recorded. All 29 PostgreSQL protocol, console, fleet and script-trust tests passed. Protocol Clippy and the Windows agent cross-target check also passed. An elevated Windows operator can inspect the local opt-in with `flyw8t-agent terminal-policy status`. The installer fixture now checks this command alongside the console check. Native Windows execution and independent review remain open.
+
+## Intune deployment bundle, 2026-11-26
+
+The enrollment form now generates the Win32 application package on the server. The download includes the selected site's installer, detection script and Intune settings. This follows the paired artifacts in [SpoolSmith](https://spilloid.github.io/spoolsmith/guide/intune.html#the-intunewin-file). The server writes the [Win32 archive layout](https://learn.microsoft.com/en-us/troubleshoot/mem/intune/app-management/develop-deliver-working-win32-app-via-intune) with [ProfileVersion1 encryption metadata](https://learn.microsoft.com/en-us/graph/api/resources/intune-apps-fileencryptioninfo?view=graph-rest-1.0). It pairs the detector with the exact organization and site from the enrollment request.
+
+The five PostgreSQL fleet tests, focused Clippy, and Chrome capture suite passed. The expanded enrollment panel was inspected at desktop and phone widths. The package test opens the HTTP download, verifies the metadata and ciphertext authentication, rejects a changed ciphertext byte, decrypts the inner archive, and uses the recovered credential to enroll in the selected site. It compares the detector with the separate download. An independent Python and OpenSSL check unpacked a bundle from a loopback server and matched the original agent bytes to the published v0.2.0 Windows release checksum. Upload, assignment, silent install, detection and uninstall in a real Intune tenant remain open.
+
+## Signed Windows agent release manifests, 2026-11-26
+
+The offline signer can create a dedicated agent release key, sign a Windows x64 manifest for the original build artifact, and verify the signed version, file size and SHA-256 against a trusted public key. It refuses to sign a personalized enrollment installer. Verification rejects same-version and older candidates. The encrypted key file binds the key to its release or script purpose.
+
+The protocol and signer suites passed 56 tests and their Clippy check passed. A temporary test key signed a manifest for the published v0.2.0 Windows agent after its checksum matched the release list. OpenSSL independently verified the signature. Removing the SHA-256 comparison made the same-size artifact mutation pass verification and fail the regression test. Endpoint trust provisioning, automatic rollout and Windows service replacement and rollback remain open.
+
+## Automatic update preferences, 2026-11-26
+
+The organization policy defaults to enabled. Devices can follow their organization or opt out. Pausing and resuming an organization preserves device opt-outs. Only administrators can change these settings. Each change saves its audit record in the same transaction, and Device Activity shows the relevant organization and device changes.
+
+All 12 PostgreSQL console and fleet tests passed, including role and CSRF refusals, scope isolation, idempotent saves, and the pause and resume sequence. A separate migration rehearsal preserved an existing organization and offline device and applied the enabled default. An isolated check of the four policy combinations rejected a copy that omitted the organization pause. Focused Clippy and the web fleet test compilation passed. Chrome lost its connection on the first run. The capture suite passed after freeing space from stale compiler caches, and the desktop organization and phone device controls were inspected. The Windows updater still needs to consume these preferences and prove installation and rollback.
+
+## Windows update preflight, 2026-11-26
+
+The Windows x64 agent now checks a candidate against its running version and an independently supplied release key. It holds the executable open for read sharing while checking the signed size and SHA-256, x64 PE header, and timestamped Authenticode publisher. The command reports the verified version. The signing rehearsal includes a Windows runtime test that checks the real signed build and rejects a damaged copy even when a fixture manifest correctly describes its bytes.
+
+Windows-targeted Clippy and the portable candidate test passed. Removing the architecture check made the wrong-architecture regression fail. An independent check matched the published v0.2.0 agent checksum, inspected its expected publisher and timestamp record, and showed that the test's COFF change alters the Authenticode image digest. The signing workflow YAML parsed locally. Native WinVerifyTrust execution, pinned key provisioning, automatic delivery and service rollback remain open.
+
+## Background terminal admission, 2026-11-26
+
+After an enabled policy response, the device page offers a 30-second, single-use confirmation bound to the technician's browser sign-in, device, and agent connection. Confirmation checks the technician's current access and repeats the policy check on that connection. Device Activity shows the outcome, and the audit links it to the policy check.
+
+All 15 PostgreSQL protocol tests passed against local fixtures. The new regression covers a separate sign-in, another device, replay, a change to local policy, and a replacement connection. Removing the connection check made the regression fail. The restored test and focused Clippy passed. Desktop and phone captures of the device page were inspected. The interactive PowerShell session and acceptance on Windows remain open.
+
+## Interactive PowerShell scope, 2026-11-26
+
+The operator approved ordinary PowerShell commands in a live technician terminal. The project guidance now applies catalog validation and script signing to jobs and records the separate terminal authorization requirements. The threat model records how endpoint opt-in and the Windows identity affect the scope of a terminal session.
+
+A Windows-only test exercises a local PowerShell process through ConPTY with fixed commands. It checks persistent state, Ctrl+C, prompt replies, and an orderly exit. Windows-targeted Clippy passed for the test and its Windows path helper in isolation. The full agent cross-check requires Windows C runtime headers for `ring`. The test still needs to run on Windows, and the browser-to-agent process and stream remain open.
+
+## Background terminal and signed deployment checks, 2026-11-26
+
+The confirmation now checks its original deadline immediately before contacting the agent and limits the observation to the time remaining. The expiry regression passed with a synthetic outbound agent connection. Removing the check caused the regression to see a probe after expiry. All 15 PostgreSQL protocol tests passed, including a check that a missing CSRF token leaves the legitimate confirmation usable. The ConPTY fixture now keeps leftover bytes between reads and checks for unwanted command completion through the returning prompt. Windows-targeted Clippy passed for the fixture in isolation, and the pipe-reader regression failed when the unread bytes were discarded again.
+
+The signed Windows rehearsal now selects a real fixture site at enrollment and asks the console for a generated Intune detector for that site and another site. It checks the downloaded scripts against the local template and runs them against the installed signed agent. The matching site must return exit code zero with detection output. The other site must return exit code one with empty output. The handoff smoke test now finds the protocol links on the current device page and opens the connection options when needed. JavaScript syntax checks and the PostgreSQL enrollment package test passed, and PostgreSQL accepted the new fixture seed. The native Windows runs and interactive background terminal remain open.
+
+## 0.3.0 candidate process and artifact checks, 2026-11-26
+
+The candidate uses workspace version 0.3.0 so enrollment downloads name the matching Windows release artifact. The release workflow checks the version reported by the built agent before uploading it. Windows x64 agents embed the build version in a read-only PE section. The signer, update verifier, and installer asset lookup compare that version with the selected release. The signer and agent tests passed locally. Removing the signer check made the relabel regression fail. An optimized Windows linker probe preserved the version through ThinLTO and symbol stripping. The offline signer accepted that probe at its embedded version and rejected it with a newer filename and manifest version. The native signed agent still needs the Windows signing rehearsal.
+
+The agent's local `terminal-check --powershell` command exercises fixed PowerShell inputs through ConPTY, checks persistent state and prompt replies, interrupts a running command, and verifies process exit. The child enters a kill-on-close Job Object at creation. The agent resolves ConPTY when the diagnostic runs so platforms without it can still load the executable. The Windows installer fixture runs the installed binary's check as LocalSystem. Windows-targeted linting of the diagnostic passed in isolation. The live terminal, native LocalSystem result, and an employee-session acceptance run remain open.
+
+In the first native run, PowerShell printed its prompt on the runner's redirected output and the diagnostic timed out waiting on ConPTY. The child now has explicit null standard handles so Windows can attach them to the pseudoconsole. The SSH readiness test now uses a separate closed port for the absence case and allows time for the OS to report refusal. The native rerun is required. [Microsoft's ConPTY issue and workaround](https://github.com/microsoft/terminal/issues/11276)
+
+## Local Windows release key pin, 2026-11-26
+
+An administrator can pin and inspect an independent release public key in the protected default Windows agent state folder. The first pin publishes a flushed, ACL-protected file using a same-directory rename that refuses replacement. Repeating the same key succeeds. `update-check` uses the pin by default and reports when its explicit diagnostic key is used.
+
+Windows x64 target Clippy passed for the agent and its tests, using compile-only metadata for ring's native library. A local simulation forced two writers to observe a missing pin before one published it. Removing the final comparison let the second writer report success and failed the regression. The elevated NTFS test covers the real move, conflicting pins, hard links and corrupt state. It still needs to run on Windows.
+
+## Native candidate evidence, 2026-11-27
+
+Draft PR #70 at `8d1f2fe` passed all five CI jobs. The Windows job ran the local ConPTY test, the quiet LocalSystem site installer including the installed binary's PowerShell diagnostic, and the elevated NTFS release-key test. Linux ran the PostgreSQL suites and browser capture, and the container job verified sign-in and restore. [Candidate CI](https://github.com/spilloid/flyw8t/actions/runs/45937708514)
+
+On a Windows 11 VM, the same source built an optimized x64 executable that reported 0.3.0 and passed its PowerShell diagnostic when run through the guest agent. The debug PowerShell test timed out when run over noninteractive SSH. The offline signer used a temporary test key to verify a manifest for the optimized executable. It rejected the executable relabeled 0.3.1 and rejected a changed copy. Production signing, the browser-to-agent session, and real Intune and upgrade acceptance remain open.
+
+## Screenshot consent audit, 2026-11-27
+
+MCP screenshot permission stays pending while Audit records the participant's decision. The participant socket remains responsive during the bounded write. Only the same live participant connection and grant can enable capture after a successful write. Revocation takes effect immediately. The decision, capture request, and release authorization have separate audit evidence.
+
+Four screenshot unit tests and the PostgreSQL integration test passed in isolated Linux containers. The integration test holds the audit table lock, checks that access stays pending and the participant socket responds, then releases the lock and verifies the approved flow. Reporting the recording state as allowed made the regression fail.
+
+## Background terminal confirmation deadline, 2026-11-27
+
+The browser confirmation's remaining lifetime now limits the registry's policy observation as well as the console response. The registry checks its deadline under the connection lock before queuing a probe. The same deadline governs reply matching. Tokio's timeout polls the wrapped future before checking its timer, so wrapping the preflight alone could allow the registry to enqueue after waiting for its lock. The live terminal remains open.
+
+The five registry tests and the terminal confirmation regression passed in an isolated Linux container on 10t7. Removing the under-lock expiry check made the regression detect a queued policy probe. Restoring the check made the regression pass again.
+
+## Offline release-stage verification, 2026-11-27
+
+The offline signer can verify a staged update against the exact intended release version. It checks the independently supplied release key, signed manifest, canonical artifact filename, embedded build version, byte count, and SHA-256. The installed-version check remains available for upgrade eligibility.
+
+The signer and protocol suites passed 56 tests, with one fixture generator ignored. The staged check also accepted the optimized Windows agent under a disposable fixture key. It rejected a different expected release version, a wrong filename, and modified bytes. Removing the exact-version comparison made the mismatch regression fail. Production Authenticode and verification of the final publication bytes remain open.
+
+## Compose upgrade and recovery rehearsal, 2026-11-27
+
+The container CI job now rehearses the transition from the published 0.2.0 image to the candidate and recovers the 0.2.0 image from its original database snapshot. The fixture checks the exact container image IDs, migration history, MFA and organization records. The fresh-install recovery fixture runs separately. The baseline digest was verified against the release and public registry. The CI runner still needs to execute the full rehearsal.
+
+The upgrade and recovery rehearsal passed on 10t7 with the published 0.2.0 image and an isolated image containing the candidate debug server. The upgrade applied the candidate migration ledger and preserved sign-in and organization records. The original image signed in and recovered those records after restoring the pre-upgrade snapshot.
+
+## Fleet update preflight, 2026-11-27
+
+The Windows agent can check current fleet preferences after verifying a local candidate with the pinned release key and Authenticode. The short-lived socket authenticates independently of the service connection. The server records the effective policy and the device-reported release metadata before responding.
+
+The macOS protocol suite passed 51 tests with one fixture generator ignored. The focused PostgreSQL protocol test passed on isolated Linux at the update commit and at the combined candidate `e38607d`. The combined candidate also passed all six fleet-health tests, including legacy enrollment scope. The preflight test checked default enablement, organization pause and device opt-out, audit and Device Activity labels, service connection continuity, revoked credentials, and signature replay and tampering. Removing candidate metadata from the signed request in a disposable checkout made the tampering check fail at the expected assertion.
+
+Native Windows preflight with a production-signed candidate, managed distribution, service replacement and rollback still need acceptance. The integration review used the same model family.
+
+## Rollback artifact preflight, 2026-11-27
+
+The Windows update check can verify a staged fallback alongside the upgrade candidate. Paired fallback arguments use the pinned release key, require the exact running version, and share the candidate's file-handle publisher verification. The protected Windows signing rehearsal exercises the same fallback path with its signed build.
+
+An isolated Linux container on 10t7 passed 40 agent library tests, 51 protocol tests, and focused agent Clippy. One protocol fixture generator stayed ignored. Replacing exact fallback verification with the upgrade version rule failed the new regression. Restoring the rule passed. Actual service rollback and enrolled reconnect remain open.
+
+## Windows and technician workflow checks, 2026-11-27
+
+An optimized Windows candidate built at `86ea760` passed the fixed-input PowerShell diagnostic on a Windows 11 VM under LocalSystem. The diagnostic checked Session 0 for both processes, persistent PowerShell state, prompt input, Ctrl+C, and a clean exit. The installed service stayed in place during the scratch test. The live browser terminal and employee meeting scenario remain open.
+
+A debug build at `324928c` also passed the forced-cleanup probe under LocalSystem on Windows 11. Closing the job stopped PowerShell while the input pipe and pseudoconsole stayed open. Removing the kill-on-close flag from a disposable build caused the probe to fail with the process still alive. The integration work used a same-family review.
+
+Legacy scope recovery passed the Linux fleet-health tests against PostgreSQL 18. Substituting the device's current assignment for the original enrollment token's site made the recovery test fail. The disposable signed Windows rehearsal exercises old local state, identity continuity, and correct-site detection. The production signing rehearsal and a real Intune assignment remain open.
+
+The technician workspace labels the invitation, physical desktop, RDP, and direct SSH actions separately. Ten web unit tests, 17 web fleet tests, and 31 browser support tests passed. The headless Chrome captures at draft revision `2f48eb8` showed the three main actions on desktop and phone. The UX work used Terra and the integration review used the same model family. [Candidate CI and captures](https://github.com/spilloid/flyw8t/actions/runs/46060321016)
+
+## Screen-share connection evidence, 2026-11-27
+
+The attended browser peers finish the transport and security-code checks before reporting connected media. The viewer also requires a frame. The unsupported certificate API still produces the existing browser notice. All 32 Node support tests passed. Removing the reporting gate in an isolated copy failed both the certificate mismatch and delayed certificate tests. Full browser integration and a two-device session with a participant-selected Windows surface remain open.
+
+## Win32 deployment bundle rehearsal, 2026-11-27
+
+The native Windows installer test takes its installer, detector, and uninstall command from the same Intune download. It confirms the embedded binary matches the fixture before installation and compares the installed service binary with the original bytes. The packaged uninstall and quiet retry exercise service removal, detection, reconnect, and preservation of the original site, device ID, and key. Normal CI expects the detector to reject its unsigned fixture. A separate clean Windows job in the signing check verifies the signed agent's publisher and expects detection to succeed.
+
+All six PostgreSQL fleet-health tests passed. Changing the declared setup filename made the bundle verification test fail. The restored test passed. Windows rehearsal and managed Intune assignment results remain open. The production signing environment stays on the existing signing job. The validation job uses the signed artifact from that job and runs with repository read access.
+
+## Update manifest publication, 2026-11-27
+
+The offline signer and Windows update checker use one validator for the agent image. The signer rejects a site enrollment package in both verification modes even when the manifest signature and digest are correct. The signer writes and flushes a temporary manifest beside the destination before publishing it without overwriting an existing file.
+
+On 10t7, 58 signer and protocol tests passed in an isolated Linux container. One fixture generator remained ignored. Workspace formatting and signer and protocol Clippy passed. Bypassing the image check failed the enrollment package regression. Allowing publication to replace the destination failed the concurrent writer regression. Both suites passed after restoring the checks. Native Windows publisher verification, service replacement, reconnect and rollback remain open.
+
+## Background terminal handoff, 2026-11-27
+
+The MCP adapter checks an explicit device through the existing scoped read API and returns its browser connection options link. The destination comes from the configured Flyw8t origin and the verified device ID. The browser uses its own sign-in for the background terminal policy check.
+
+All 15 adapter tests, the PostgreSQL device-page scope test, and adapter Clippy passed on 10t7. Removing the returned-device ID check made the handoff regression fail with a mismatched device. The restored test passed. The live session, five-minute reconnect, and lifecycle status are tracked in the background terminal checklist.
+
+The browser handoff puts the policy check directly in Connect and explains offline and permission restrictions. Independent review checked device scope and the authenticated POST, including CSRF protection. On 10t7, both PostgreSQL policy tests and the device role and organization scope test passed.
+
+## Windows release publisher verification, 2026-11-27
+
+Independent review found that the release verification script accepted a publisher prefix. On Kubert, we verified the published 0.2.0 binary against its release checksum. The old verifier accepted the prefix. The new verifier accepted the exact configured publisher, the complete subject, and the built-in publisher default. It rejected the prefix, wildcard, different case, and empty setting.
+
 ## Substitutions and gaps
 
 - Row 40 was reviewed by a Claude subagent because Codex was out of quota; the implementer is Claude too, so it is not a cross-family review. A Codex pass is owed.
@@ -212,3 +428,65 @@ The device Activity page reads organization-scoped audit records and job transit
 - Verify before trusting, in both directions. A green suite is evidence about the tests: prove a new check can fail.
 - A dispatcher's report is a claim, not proof: check exit codes and output files.
 - Look at the screenshots. (Row 8 is why.)
+
+## Background terminal policy observations in Activity, 2026-11-27
+
+Astra reviewed the browser policy check, confirmation and scoped Device Activity query. Both enabled and disabled observations have successful audit outcomes, and the previous Activity label discarded their recorded policy status. Activity now shows the observed state for these two successful results and preserves the generic label for older records without a recognized status. The PostgreSQL protocol integration test on 10t7 checks both labels and the absence of a confirmation button for a disabled observation. Live Windows terminal acceptance remains open.
+
+## Update policy changes in flight, 2026-11-27
+
+Update preflight takes shared row locks on the organization, device, and enrollment credential while observing eligibility and appending the audit event. On 10t7, the WebSocket regression reproduced an in-flight device opt-out on an isolated PostgreSQL database. The regression failed without the row locks and passed after restoring them. All 16 protocol integration tests passed together.
+
+## Intune LocalSystem fixture, 2026-11-27
+
+The Windows rehearsal runs installation, the packaged detector, uninstall, and retries as LocalSystem. The capture test checks the wrapper's child exit code, streams, identity and working directory. A clean Windows runner covers the complete package and identity checks. The managed Intune pilot remains separate.
+
+## Release asset inventory, 2026-11-27
+
+The publish job checks the exact nine-binary inventory before writing `SHA256SUMS`. The same script verifies downloads. A 0.3.0-format staging fixture used copies of the seven checksum-verified 0.2.0 binaries and two synthetic signer files. Manifest generation and independent SHA-256 verification passed. Removing a required file, adding an unexpected file, changing a file's bytes, using a symlink, and trying to overwrite the manifest all failed as expected. Exact 0.3.0 artifact and image verification remain on AnchorDesk ticket #10207.
+
+## Current authorization for Network handoff, 2026-11-27
+
+The PortGlass handoff rechecks the technician's browser sign-in and holds shared locks on the active collector and site through the access audit. A fresh inventory read uses the same lock order as ingestion. The response reflects the collector and site evidence that agreed with the access record.
+
+On 10t7, the PostgreSQL regression failed on the old handler while a collector revocation was in flight. The fixed handler waited, refused after revocation committed, and emitted neither a link nor an access request record. The nine Network tests passed. Enrolled node selection remains open on AnchorDesk #10211.
+
+## Agent version history in Device Activity, 2026-11-27
+
+Device Activity shows the reported candidate version for update preflight decisions and the reported runtime version for authenticated connections. The PostgreSQL regression uses one enrolled device to prove the previous and current versions appear newest first and the renderer suppresses malformed version text. The reconnect test failed with the old layout. With the change, all 16 protocol tests passed, including the candidate reporting checks for enabled, opted-out, and paused policy.
+
+The 10t7 workspace suite, formatting, and Clippy passed. The desktop and phone Device Activity captures show the reported version beneath its authenticated connection event.
+
+The version history supports the signed rollout and rollback drill on AnchorDesk #10212. Service replacement and production-signed reconnect acceptance remain open.
+
+## Draft CI synchronization, 2026-11-27
+
+Draft CI run 46088376168 found two timing assumptions. On Linux, the protocol fixture counted Activity after Welcome but before the third connection audit committed. A PostgreSQL lock reproduced the old two-versus-three result on 10t7. The fixture now waits for the previous socket's supersession, which follows the new connection's audit insert. The fixed test passed with the exact count, order, and malformed-label assertions.
+
+On Windows, the first-use browser test failed while selecting the removal menu. The fixture could see the window before the application attached its menu. The harness now waits for the exact menu and command ID, then posts the command once and verifies the registry outcome. Kubert passed a synthetic native-window probe for both delayed menu attachment and an absent menu. Astra independently reviewed both test changes using the same model family. Track the draft CI result on AnchorDesk #10213.
+
+## Current agent account on terminal policy checks, 2026-11-27
+
+The Windows agent reports the account class of its current process. The browser and audit record include it only when the response matches the active connection and the technician still has permission. Older agents can omit the field. The observation covers the existing agent account. Interactive sessions, account switching, reconnect, and MCP lifecycle results remain open on AnchorDesk #10209.
+
+On Kubert, the extracted token reader distinguished LocalSystem from a standard Windows account and kept the process handle count steady over 100 queries in each context. On 10t7, suppressing the browser's account value failed the new PostgreSQL regression. Restoring it passed all 16 protocol tests, including stale responses, access revoked during a check, and older agent replies. We inspected a desktop Chromium capture of the actual policy renderer with synthetic LocalSystem output. The integration used an independent same-family review.
+
+## Interactive browser PowerShell, 2026-11-27
+
+The candidate connects the browser to the enrolled Windows agent and its existing ConPTY host. A session has one writable browser attachment. The agent verifies LocalSystem and Session 0, keeps the process across a detach, and retains up to 256 KiB of output. Terminal input and output are excluded from audit. MCP exposes the browser handoff and a scoped, read-only lifecycle observation.
+
+The work used independent same-family Windows, relay, browser and verification branches. On 10t7, four PostgreSQL terminal tests passed, including a distinct-sign-in refusal, second-writer rejection, same-session resume, confirmed termination, and scoped lifecycle status. All 16 MCP tests and five browser terminal tests passed. The Chromium fixture exercised native browser keys, Ctrl+C, output rendering, inert terminal links, and desktop and phone layouts. Removing the trusted-input guard failed its browser regression. Removing the initiating-browser predicate failed the lifecycle status SQL fixture. These proof points use an isolated test agent or browser fixture. The optimized Windows agent built on Kubert with SHA-256 `b6921a5419cb7462d5d2656c0c27034e00dcd89ad152c7c3cb1b1dd5067cf77a`.
+
+Workspace Clippy and 423 tests passed on 10t7, including the browser capture suite. The public HTTPS trust check needed outbound DNS and HTTPS in the disposable test network. Desktop and phone Device captures were inspected.
+
+On the separately enrolled HomeLab Windows 11 guest, draft `138b87a` opened real browser PowerShell as LocalSystem in Session 0. The technician entered a prompt reply, interrupted a foreground command, and kept the same process, directory and variable over a browser reload. Explicit End closed the process. Device Activity recorded start, detach, reattachment and confirmed termination. The signed-in desktop process in Session 1 had the same PID and start time before and after. The real MCP adapter read the closed session's lifecycle evidence with an initiating read-scoped credential. A detached process expired after 303 seconds, and a separate session terminated when its browser sign-in was revoked.
+
+## Terminal liveness after a lost endpoint link, 2026-11-28
+
+The enrolled Windows link-loss test at `138b87a` left the browser showing Connected beyond 30 seconds. The terminal now requires matching endpoint lease replies from the active connection and attachment. An expired lease detaches the browser while keeping the original deadline for reattachment. The four PostgreSQL terminal tests and two lease unit tests passed with the correction. The unit tests covered expiry while a reply was outstanding and refusal of mismatched, replayed, and late replies.
+
+On the native rerun, disabling the test VM's network adapter made the browser show loss after 20.0 seconds. The browser reattached 2.7 seconds after the link returned. A fresh command verified the same PowerShell PID, directory and variable, then End closed that process and Device Activity recorded the result. The installed Windows artifact SHA-256 was `d1dc28b956bd4ada3200061619a784fa7609d3a23a0a82a48e1210152e01bfcf`. The tested server binary SHA-256 was `01d87fb3e98ba74de2c79504e1819b0f9f8c0e8e67afa47b5d9d7f142eeb5385`.
+
+In a second native run, End stayed available while the device link was down and input was disabled. The browser showed termination pending. It reported confirmed closure 5.2 seconds after the link returned, and Device Activity recorded the end.
+
+The correction passed workspace Clippy and 425 tests on 10t7, including the browser capture suite.

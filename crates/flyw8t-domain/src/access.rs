@@ -24,6 +24,8 @@ pub enum Permission {
     ManageOrganizations,
     ManageUsers,
     ViewAudit,
+    /// Review activity for devices in the caller's organization scope.
+    ViewDeviceActivity,
     RunSupportSessions,
     /// Attended sessions that include remote keyboard and mouse (ADR-0012). Separate from
     /// viewing so it can be withheld on its own.
@@ -40,6 +42,9 @@ pub enum Permission {
     ViewScripts,
     /// Creating scripts and saving draft revisions, global ones included (ADR-0014). Drafts never run.
     EditScripts,
+    /// Starting a run of an approved script on a device (ADR-0015). What runs is decided by the approvals and run
+    /// signatures the agent checks, not by this permission.
+    RunScripts,
 }
 
 impl Role {
@@ -75,12 +80,14 @@ impl Role {
                     | RunDiagnostics
                     | CancelJobs
                     | ManageEnrollment
+                    | ViewDeviceActivity
                     | RunSupportSessions
                     | RunControlSessions
                     | ManageDevices
                     | EditFieldValues
                     | ViewScripts
                     | EditScripts
+                    | RunScripts
             ),
             Role::ReadOnly => matches!(p, ViewDevices),
         }
@@ -101,6 +108,7 @@ mod tests {
             Permission::ManageOrganizations,
             Permission::ManageUsers,
             Permission::ViewAudit,
+            Permission::ViewDeviceActivity,
             Permission::RunSupportSessions,
             Permission::RunControlSessions,
             Permission::ManageDevices,
@@ -109,6 +117,7 @@ mod tests {
             Permission::EditFieldValues,
             Permission::ViewScripts,
             Permission::EditScripts,
+            Permission::RunScripts,
         ] {
             assert!(!Role::ReadOnly.allows(p), "{p:?}");
         }
@@ -117,6 +126,8 @@ mod tests {
     #[test]
     fn technicians_cannot_administer() {
         assert!(Role::Technician.allows(Permission::RunDiagnostics));
+        assert!(Role::Technician.allows(Permission::ViewDeviceActivity));
+        assert!(!Role::Technician.allows(Permission::ViewAudit));
         assert!(!Role::Technician.allows(Permission::ManageUsers));
         assert!(!Role::Technician.allows(Permission::ManageOrganizations));
         assert!(Role::Technician.allows(Permission::ManageDevices));

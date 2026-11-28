@@ -280,7 +280,11 @@ const REVISION_COLUMNS: &str =
     "r.number, r.source, r.risk_class, r.parameters, r.content_hash, r.syntax_check, r.note, \
      u.email AS author, r.created_at";
 
-/// A script the viewer may read (global, or in one of their organizations); otherwise not found.
+/// Return the organization of a visible script, or None for a global script.
+pub async fn visible(state: &Shared, p: &Principal, id: Uuid) -> AppResult<Option<Uuid>> {
+    load(state, p, id).await.map(|s| s.organization_id)
+}
+
 async fn load(state: &Shared, p: &Principal, id: Uuid) -> AppResult<ScriptRow> {
     p.require(Permission::ViewScripts)?;
     let (all, orgs) = p.scope();
@@ -762,6 +766,7 @@ pub async fn revision_page(
     State(state): State<Shared>,
     WebUser(p): WebUser,
     Path((id, number)): Path<(Uuid, i32)>,
+    Query(m): Query<MsgQuery>,
 ) -> Response {
     page(&p, async {
         let s = load(&state, &p, id).await?;
@@ -779,13 +784,20 @@ pub async fn revision_page(
             parameters: diff(&prev.parameters, &r.parameters),
             risk_from: (prev.risk_class != r.risk_class).then(|| prev.risk_class.clone()),
         });
+        let rev = crate::trust::revision_for(&state, id, number).await?;
+        let (_, approvals) = crate::trust::approvals(&state, &rev).await?;
+        let trusted = crate::trust::head(&state.db).await?.is_some();
         html(flyw8t_web::script_revision_page(
-            &ctx(&p, None),
+            &ctx(&p, flash(m.m.as_deref())),
             script_view(&s),
             revision_view(&r),
             found,
             missing,
             changes,
+            flyw8t_web::model::ApprovalsView {
+                trusted,
+                rows: approvals,
+            },
             can_edit(&p),
         ))
     })

@@ -4,9 +4,15 @@ flyw8t is a self-hosted Rust RMM. Its rule: an operation succeeds **with evidenc
 
 Read [`docs/architecture.md`](docs/architecture.md), [`docs/job-lifecycle.md`](docs/job-lifecycle.md) and [`docs/threat-model.md`](docs/threat-model.md) before any unit of work.
 
+## AnchorDesk work tracking
+
+Use the configured AnchorDesk MCP at `https://tickets.spillerstech.us/mcp/sse` for ongoing Flyw8t work. Look up the relevant ticket when resuming and record decisions, blockers, and verification evidence there as work progresses. The 0.3.0 release checklist lives on ticket **#10207** in [AnchorDesk](https://tickets.spillerstech.us/).
+
+Log actual work through the MCP `log_time` tool using measured start and stop times. Leave idle gaps out of the time entry. Mark a checklist item complete when its acceptance evidence is available, and record partial results on the ticket.
+
 ## Product rules that override convenience
 
-- **No arbitrary execution.** Endpoints run only catalog actions (`flyw8t-protocol::catalog`), validated on the server *and* the agent. Never add a shell, a "run command" action, or a parameter that reaches a command line unvalidated.
+- **Validate job execution on the server and agent.** Built-in jobs use typed catalog actions (`flyw8t-protocol::catalog`). Script jobs follow the signed-script trust rules. The interactive background terminal may accept ordinary PowerShell input from a technician in a live, authorized session on an opted-in device. See [Background terminal](docs/background-terminal.md#authorization-and-audit).
 - **Never invent success.** Only `domain::job::outcome` decides labels. `completed` comes only from a device report; "Succeeded" needs `verified`. Silence is `outcome_unknown`, never `failed` or `timed_out`.
 - **Never "did not run" about something that may have run.** `expired`, pre-dispatch `cancelled` and `NotStarted` must imply zero executions. Retryable declines never re-queue.
 - **Never retry automatically.** A person creates a new job.

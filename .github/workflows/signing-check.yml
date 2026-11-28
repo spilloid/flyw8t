@@ -20,12 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
-      - run: cargo build --release --locked --target x86_64-pc-windows-msvc -p flyw8t-server -p flyw8t-agent -p flyw8t-mcp -p flyw8t-technician
+      - run: cargo build --release --locked --target x86_64-pc-windows-msvc -p flyw8t-server -p flyw8t-agent -p flyw8t-mcp -p flyw8t-sign -p flyw8t-technician
       - name: Collect binaries
         shell: bash
         run: |
           mkdir dist
-          for binary in flyw8t-server flyw8t-agent flyw8t-mcp flyw8t-technician; do
+          for binary in flyw8t-server flyw8t-agent flyw8t-mcp flyw8t-sign flyw8t-technician; do
             cp "target/x86_64-pc-windows-msvc/release/$binary.exe" dist/
           done
       - name: Sign and verify binaries
@@ -38,11 +38,42 @@ jobs:
           account: ${{ vars.SIGNING_ACCOUNT }}
           profile: ${{ vars.SIGNING_PROFILE }}
           expected-subject: ${{ vars.SIGNING_EXPECTED_SUBJECT }}
+      - name: Verify the signed agent with Windows update preflight
+        env:
+          FLYW8T_TEST_SIGNED_AGENT: ${{ github.workspace }}/dist/flyw8t-agent.exe
+        run: cargo test --locked --release --target x86_64-pc-windows-msvc -p flyw8t-agent --lib update_verify::windows::tests::authenticode_is_required_for_a_manifest_valid_candidate -- --exact --ignored
       - uses: actions/upload-artifact@v5
         with:
           name: signed-binaries
           path: dist/*.exe
           retention-days: 1
+
+  intune-install:
+    name: Signed Intune bundle on a clean Windows runner
+    needs: sign
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: signed-binaries
+          path: dist
+      - name: Verify signed installation, detection, uninstall and retry
+        shell: pwsh
+        env:
+          FLYW8T_TEST_DATABASE_URL: postgres://postgres:root@127.0.0.1:5432/postgres
+          FLYW8T_TEST_EXPECT_SIGNED_INSTALL: '1'
+        run: |
+          $env:FLYW8T_TEST_AGENT_BINARY = (Resolve-Path './dist/flyw8t-agent.exe').Path
+          ./scripts/verify-signature.ps1 -Files $env:FLYW8T_TEST_AGENT_BINARY -ExpectedSubject 'CN=Joseph Spillers'
+          $service = @(Get-Service -Name 'postgresql-x64-*')
+          if ($service.Count -ne 1) { throw 'Expected one hosted PostgreSQL instance.' }
+          Set-Service $service[0].Name -StartupType Manual
+          Start-Service $service[0].Name
+          cargo test --locked --target x86_64-pc-windows-msvc -p flyw8t-server --test windows_installer -- --ignored
 
   browser-launch:
     name: Signed Windows browser handoff on a clean user
@@ -57,10 +88,10 @@ jobs:
         with:
           name: signed-binaries
           path: dist
-      - name: Verify the four downloaded signed executables
+      - name: Verify the downloaded signed executables
         shell: pwsh
         run: |
-          $expected = 'flyw8t-agent.exe', 'flyw8t-mcp.exe', 'flyw8t-server.exe', 'flyw8t-technician.exe'
+          $expected = 'flyw8t-agent.exe', 'flyw8t-mcp.exe', 'flyw8t-server.exe', 'flyw8t-sign.exe', 'flyw8t-technician.exe'
           $files = Get-ChildItem dist -File
           if (Compare-Object $expected $files.Name) { throw 'Unexpected signed artifact contents.' }
           ./scripts/verify-signature.ps1 -Files $files.FullName -ExpectedSubject 'CN=Joseph Spillers'

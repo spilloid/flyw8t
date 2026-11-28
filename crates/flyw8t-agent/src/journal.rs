@@ -34,13 +34,24 @@ const MAX_ACKED: usize = 5000;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub job_id: Uuid,
-    /// `None` for a cancel tombstone: a job cancelled before this agent ever saw its offer.
+    /// `None` for a cancel tombstone: a job cancelled before this agent ever saw its offer, or for a script.
     pub action: Option<Action>,
+    /// The script a script job runs (ADR-0015). Never its values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<ScriptRef>,
     pub timeout_secs: u32,
     #[serde(with = "time::serde::rfc3339")]
     pub received_at: OffsetDateTime,
     pub state: EntryState,
     pub server_acked: bool,
+}
+
+/// Which revision a script job runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptRef {
+    pub script_id: Uuid,
+    pub revision: u64,
+    pub content_hash: flyw8t_protocol::trust::Hash,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,9 +201,70 @@ impl Journal {
         let entry = Entry {
             job_id,
             action: Some(action.clone()),
+            script: None,
             timeout_secs,
             received_at: OffsetDateTime::now_utc(),
             state: EntryState::Accepted,
+            server_acked: false,
+        };
+        self.persist(&entry)?;
+        entries.insert(job_id, entry);
+        Ok(Accept::New)
+    }
+
+    /// Record a script offer. Returns `New` exactly once per job id, as `accept` does.
+    pub fn accept_script(
+        &self,
+        job_id: Uuid,
+        script: ScriptRef,
+        timeout_secs: u32,
+    ) -> Result<Accept> {
+        self.record_script(job_id, script, timeout_secs, EntryState::Accepted)
+    }
+
+    /// An invalid offer must be recorded as refused in the first durable write.
+    pub(crate) fn refuse_script(
+        &self,
+        job_id: Uuid,
+        script: ScriptRef,
+        timeout_secs: u32,
+        report: Finished,
+    ) -> Result<JobReport> {
+        let report = Box::new(report);
+        match self.record_script(
+            job_id,
+            script,
+            timeout_secs,
+            EntryState::Finished {
+                report: report.clone(),
+            },
+        )? {
+            Accept::Known(entry) => Ok(entry.report()),
+            Accept::New => Ok(JobReport {
+                job_id,
+                phase: JobPhase::Finished(report),
+            }),
+        }
+    }
+
+    fn record_script(
+        &self,
+        job_id: Uuid,
+        script: ScriptRef,
+        timeout_secs: u32,
+        state: EntryState,
+    ) -> Result<Accept> {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(existing) = entries.get(&job_id) {
+            return Ok(Accept::Known(Box::new(existing.clone())));
+        }
+        let entry = Entry {
+            job_id,
+            action: None,
+            script: Some(script),
+            timeout_secs,
+            received_at: OffsetDateTime::now_utc(),
+            state,
             server_acked: false,
         };
         self.persist(&entry)?;
@@ -219,6 +291,17 @@ impl Journal {
         })
     }
 
+    /// Keep the original result in the worker across connection loss. Only retry the
+    /// journal write. The worker keeps its job slot until there is a durable result.
+    pub(crate) async fn finish_when_writable(&self, job_id: Uuid, report: &Finished) {
+        let mut delay_secs = 1;
+        while let Err(error) = self.finish(job_id, report.clone()) {
+            tracing::warn!(%job_id, %error, "retrying the result journal write");
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            delay_secs = (delay_secs * 2).min(30);
+        }
+    }
+
     /// Record a cancel for a job this agent has never seen, so a later offer is not run.
     /// Returns the entry to report. If the job is already known, nothing changes.
     pub fn cancel_unknown(&self, job_id: Uuid) -> Result<Entry> {
@@ -230,6 +313,7 @@ impl Journal {
         let entry = Entry {
             job_id,
             action: None,
+            script: None,
             timeout_secs: 0,
             received_at: now,
             state: EntryState::Finished {
@@ -681,6 +765,63 @@ mod tests {
             reopened.unreported()[0].phase,
             JobPhase::Finished(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_finished_worker_waits_for_the_exact_result_to_be_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open(dir.path()).unwrap();
+        let id = Uuid::new_v4();
+        j.accept(id, &Action::SystemInfo, 30).unwrap();
+        j.mark_started(id, OffsetDateTime::now_utc()).unwrap();
+        let before = j.get(id).unwrap();
+        let result = done(ExecOutcome::Exited { code: 4 });
+        let blocked = block_writes(&j, id);
+        let mut write = std::pin::pin!(j.finish_when_writable(id, &result));
+        assert!(matches!(
+            futures_util::poll!(&mut write),
+            std::task::Poll::Pending
+        ));
+        assert_unchanged(&j, &before);
+        std::fs::remove_dir(blocked).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), write)
+            .await
+            .unwrap();
+        let reopened = Journal::open(dir.path()).unwrap();
+        assert!(matches!(
+            reopened.unreported()[0].phase,
+            JobPhase::Finished(ref saved) if saved.as_ref() == &result
+        ));
+    }
+
+    #[test]
+    fn a_refusal_is_durable_before_it_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let job = Uuid::new_v4();
+        let script = ScriptRef {
+            script_id: Uuid::new_v4(),
+            revision: 1,
+            content_hash: flyw8t_protocol::trust::Hash([0; 32]),
+        };
+        let refusal = done(ExecOutcome::Failed {
+            error: "Approval withdrawn".into(),
+        });
+        let blocked = block_writes(&journal, job);
+        assert!(journal
+            .refuse_script(job, script.clone(), 30, refusal.clone())
+            .is_err());
+        assert!(journal.get(job).is_none());
+        std::fs::remove_dir(blocked).unwrap();
+        journal
+            .refuse_script(job, script.clone(), 30, refusal.clone())
+            .unwrap();
+
+        let reopened = Journal::open(dir.path()).unwrap();
+        let Accept::Known(entry) = reopened.accept_script(job, script, 30).unwrap() else {
+            panic!("a refused job was offered again");
+        };
+        assert!(matches!(entry.report().phase, JobPhase::Finished(saved) if *saved == refusal));
     }
 
     #[test]

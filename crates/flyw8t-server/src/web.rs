@@ -98,6 +98,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
         now: OffsetDateTime::now_utc(),
         can_run: p.can(Permission::RunDiagnostics),
         is_admin: p.role == Role::Admin,
+        can_view_device_activity: p.can(Permission::ViewDeviceActivity),
         can_enroll: p.can(Permission::ManageEnrollment),
         can_support: p.can(Permission::RunSupportSessions),
         can_control: p.can(Permission::RunControlSessions),
@@ -114,6 +115,7 @@ pub(crate) fn ctx(p: &Principal, flash: Option<Flash>) -> PageCtx {
 pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
     let (ok, message) = match code? {
         "job-cancelled" => (true, "Cancellation recorded."),
+        "inventory-queued" => (true, "Inventory refresh requested. See Job history for the outcome."),
         "org-created" => (true, "Organization created."),
         "site-added" => (true, "Site added."),
         "token-revoked" => (true, "Token revoked."),
@@ -131,6 +133,7 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "user-signed-out" => (true, "That user was signed out everywhere."),
         "device-revoked" => (true, "Device credential revoked and its connection closed."),
         "device-updated" => (true, "Device updated."),
+        "agent-update-policy-saved" => (true, "Agent update policy saved."),
         "device-retired" => (true, "Device retired: its credential is revoked and its connection closed."),
         "devices-tagged" => (true, "Tag added to the selected devices."),
         "devices-untagged" => (true, "Tag removed from the selected devices."),
@@ -144,7 +147,7 @@ pub(crate) fn flash(code: Option<&str>) -> Option<Flash> {
         "mfa-reset" => (true, "Two-step verification reset. That user was signed out everywhere and sets it up again at next sign-in."),
         "mfa-disabled" => (true, "Two-step verification turned off."),
         "codes-regenerated" => (true, "New recovery codes issued; the old ones no longer work."),
-        _ => return None,
+        other => return crate::trust::flash_for(other),
     };
     Some(Flash {
         ok,
@@ -438,18 +441,36 @@ pub async fn devices(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct DeviceDetailQs {
+    m: Option<String>,
+    refresh: Option<Uuid>,
+}
+
 pub async fn device(
     State(state): State<Shared>,
     WebUser(p): WebUser,
     Path(id): Path<Uuid>,
-    Query(m): Query<MsgQuery>,
+    Query(q): Query<DeviceDetailQs>,
 ) -> Response {
     page(&p, async {
         p.require(Permission::ViewDevices)?;
         let d = queries::device(&state, &p, id)
             .await?
             .ok_or(AppError::NotFound)?;
-        html(flyw8t_web::device_page(&ctx(&p, flash(m.m.as_deref())), d))
+        let history = queries::inventory_history(&state, &p, id).await?;
+        let refreshing = d.recent_jobs.iter().any(|job| {
+            Some(job.id) == q.refresh
+                && job.action == "system.info"
+                && !job.state.is_terminal()
+                && job.state != flyw8t_domain::job::ExecState::OutcomeUnknown
+        });
+        html(flyw8t_web::device_page(
+            &ctx(&p, flash(q.m.as_deref())),
+            d,
+            &history,
+            refreshing,
+        ))
     })
     .await
 }
@@ -470,7 +491,7 @@ pub async fn device_activity(
         let device = queries::device_summary(&state, &p, id)
             .await?
             .ok_or(AppError::NotFound)?;
-        p.require(Permission::ViewAudit)?;
+        p.require(Permission::ViewDeviceActivity)?;
         let before = qs
             .before
             .as_deref()
@@ -493,7 +514,7 @@ pub async fn device_activity(
 
 // Read the device and its live enrollment again before displaying a reply. A membership change,
 // sign-out or retirement during the short agent round trip must take effect.
-async fn physical_console_target(
+pub(crate) async fn windows_observation_target(
     tx: &mut sqlx::PgConnection,
     p: &Principal,
     device: Uuid,
@@ -532,7 +553,7 @@ pub async fn check_physical_console(
         p.require(Permission::RunSupportSessions)?;
         let request = Uuid::new_v4();
         let mut tx = state.db.begin().await?;
-        let (org, _) = physical_console_target(&mut tx, &p, device).await?;
+        let (org, _) = windows_observation_target(&mut tx, &p, device).await?;
         Audit::user(&p, "device.physical_console.requested")
             .org(org)
             .target("device", device)
@@ -562,7 +583,7 @@ pub async fn check_physical_console(
             Err(ConsoleCheckError::Timeout) => (PhysicalConsoleCheck::TimedOut, "timeout"),
         };
         let mut tx = state.db.begin().await?;
-        let (current_org, name) = physical_console_target(&mut tx, &p, device).await?;
+        let (current_org, name) = windows_observation_target(&mut tx, &p, device).await?;
         if current_org != org {
             return Err(AppError::NotFound);
         }
@@ -600,6 +621,7 @@ pub async fn run_job(
         let name = form.get("action").unwrap_or("");
         let action = Action::from_request(name, |k| form.get(k).map(str::to_string))
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        let refresh = action == Action::SystemInfo && form.get("return_to_device") == Some("yes");
         let job_id = jobs::create(
             &state,
             &p,
@@ -612,7 +634,11 @@ pub async fn run_job(
             },
         )
         .await?;
-        to(format!("/jobs/{job_id}"))
+        if refresh {
+            to(format!("/devices/{id}?m=inventory-queued&refresh={job_id}"))
+        } else {
+            to(format!("/jobs/{job_id}"))
+        }
     })
     .await
 }
@@ -1061,6 +1087,22 @@ pub async fn create_enrollment_token(
         check_csrf(&p, &form)?;
         p.require(Permission::ManageEnrollment)?;
         let org = visible_org(&state, &p, id).await?;
+        let site: Option<Uuid> = form.get("site").filter(|s| !s.is_empty()).map(|s| s.parse()).transpose().map_err(|_| AppError::BadRequest("Unknown site.".into()))?;
+        let site_name = site.map(|id| {
+            org.sites.iter().find(|view| view.id == id).map(|view| view.name.clone())
+                .ok_or_else(|| AppError::BadRequest("Unknown site.".into()))
+        }).transpose()?;
+        let download = form.get("download");
+        if download == Some("intune-detection") {
+            let script = crate::windows_installer::intune_detection_script(
+                &state.config.public_url, id, site,
+            );
+            return Ok(([
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CONTENT_DISPOSITION, "attachment; filename=Detect-Flyw8t.ps1"),
+                (header::CACHE_CONTROL, "no-store"),
+            ], script).into_response());
+        }
         let ttl_minutes: i64 = form.get("ttl_minutes").and_then(|v| v.parse().ok()).unwrap_or(60);
         if !(5..=1440).contains(&ttl_minutes) {
             return Err(AppError::BadRequest("Validity must be between 5 minutes and 24 hours.".into()));
@@ -1069,24 +1111,27 @@ pub async fn create_enrollment_token(
         if !(1..=100).contains(&max_uses) {
             return Err(AppError::BadRequest("Devices must be between 1 and 100.".into()));
         }
-        let site: Option<Uuid> = form.get("site").filter(|s| !s.is_empty()).map(|s| s.parse()).transpose().map_err(|_| AppError::BadRequest("Unknown site.".into()))?;
-        let site_name = site.map(|id| {
-            org.sites.iter().find(|view| view.id == id).map(|view| view.name.clone())
-                .ok_or_else(|| AppError::BadRequest("Unknown site.".into()))
-        }).transpose()?;
-        let download = form.get("download") == Some("windows");
-        let template = if download { Some(crate::windows_installer::template(&state).await?) } else { None };
         let secret = format!("{}{}", auth::ENROLL_PREFIX, auth::random_secret(32));
-        let installer = template.map(|base| -> AppResult<Vec<u8>> {
-            let mut exe = base.to_vec();
+        let installer = if matches!(download, Some("windows" | "intune")) {
+            let mut exe = crate::windows_installer::template(&state).await?.to_vec();
             flyw8t_protocol::enrollment_package::EnrollmentPackage {
                 server_url: state.config.public_url.clone(),
                 organization: org.name.clone(),
                 site: site_name,
                 token: secret.clone(),
             }.append(&mut exe).map_err(|error| AppError::Internal(error.into()))?;
-            Ok(exe)
-        }).transpose()?;
+            if download == Some("intune") {
+                let detector = crate::windows_installer::intune_detection_script(
+                    &state.config.public_url, id, site,
+                );
+                let bundle = crate::windows_installer::intune_deployment_bundle(exe, detector).await?;
+                Some(("attachment; filename=Flyw8t-Intune.zip", bundle))
+            } else {
+                Some(("attachment; filename=Flyw8t-Setup-x64.exe", exe))
+            }
+        } else {
+            None
+        };
         let mut tx = state.db.begin().await?;
         auth::recheck_actor(&mut tx, &p, Some(id), false).await?;
         let (token_id,): (Uuid,) = sqlx::query_as(
@@ -1108,12 +1153,12 @@ pub async fn create_enrollment_token(
             .record(&mut *tx)
             .await?;
         tx.commit().await?;
-        if let Some(exe) = installer {
+        if let Some((disposition, bytes)) = installer {
             return Ok(([
                 (header::CONTENT_TYPE, "application/octet-stream"),
-                (header::CONTENT_DISPOSITION, "attachment; filename=Flyw8t-Setup-x64.exe"),
+                (header::CONTENT_DISPOSITION, disposition),
                 (header::CACHE_CONTROL, "no-store"),
-            ], exe).into_response());
+            ], bytes).into_response());
         }
         let revealed = RevealedSecret {
             label: format!("Enrollment token for {}", org.name),

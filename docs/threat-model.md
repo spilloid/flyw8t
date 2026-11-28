@@ -24,9 +24,9 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 ## Threats and controls
 
 ### T1: Arbitrary command execution
-- **Control:** there is no arbitrary-execution path. Jobs name one of four compiled-in, read-only actions; parameters are typed and validated on the server *and again* on the agent; unknown actions fail to deserialize on both sides. Child processes are absolute paths with argument vectors and no shell; the ping target cannot begin with `-` (option injection) and is restricted to IP or hostname characters.
+- **Control:** built-in jobs name one of four compiled-in, read-only actions. Parameters are typed and validated on the server and again on the agent. Catalog child processes use absolute paths and argument vectors. The ping target accepts only IP or hostname characters and cannot begin with `-`. Script jobs use approvals verified by the agent under its pinned trust policy.
 - **Evidence:** `ping_target_rejects_option_injection_and_shell_metacharacters`, `unknown_actions_do_not_deserialize`, `invalid_params_never_reach_a_process`, the API test that `shell.exec` is rejected.
-- **Residual:** adding a script-execution action changes this threat completely. It needs signed scripts, an approval flow for high-risk classes (STD-005 C2/C3), and its own review before it ships.
+- **Planned terminal:** a live technician session introduces general PowerShell execution under the selected Windows account. Treat access to the session as access to that account on the enrolled device. Local administrator opt-in, browser authorization, and session lifecycle controls are required. See [Background terminal](background-terminal.md#authorization-and-audit).
 
 ### T2: Cross-tenant access
 - **Control:** every query is scoped by the caller's organizations; out-of-scope records return 404. Job creation re-checks scope before permission. The database enforces job organization = device organization. Devices get their organization from the enrollment token, never from anything they send.
@@ -64,15 +64,17 @@ flyw8t is privileged remote-execution infrastructure: whoever controls it contro
 - **Residual:** when fleet operations arrive they need per-operation scope limits, rate limits, a confirmation that states the count, and C2 approval for anything state-changing.
 
 ### T8: Malicious job payloads
-- Covered by T1. Payloads are typed; there is no string that the agent interprets as code.
+- Covered by T1. Catalog payloads are typed. The agent verifies the trusted revision and required approvals before running a script job.
 
 ### T9: Compromised software updates
 - **Control:** there is no automatic update mechanism. Agents are installed and upgraded by an administrator.
-- **Residual:** auto-update is designed to require a signed manifest (an Ed25519 key held outside the server, following PortGlass's updater) **before** it is enabled. Published Windows agent/server binaries are timestamped Authenticode-signed (0.1.3 assets verified on 2026-11-15, dev-process row 47); install-time verification by the agent and signed automatic-update manifests remain open.
+- **Update preflight:** the offline signer can produce a manifest signed by a separate Ed25519 release key. A Windows administrator can pin its public key in the protected default agent state directory. The Windows x64 agent's local `update-check` validates against that pin by default and checks the expected Authenticode publisher and timestamp. An explicitly supplied key applies to one diagnostic invocation. The signed-artifact runtime test is part of the Windows signing rehearsal.
+- **Fleet preflight:** the enrolled agent can check current fleet preferences for a verified local candidate with its pinned key. The server authenticates the device's nonce-bound request and records the outcome.
+- **Residual:** automatic updates still need trusted release-key distribution, approved release delivery, and verified replacement and rollback.
 
 ### T10: Compromised server or database
-- **Reality:** a compromised server can command every agent within the catalog. Today that means read-only diagnostics to every endpoint and full knowledge of inventory. It **cannot** obtain device private keys (they never leave devices) or user passwords in plaintext (Argon2id), and it cannot execute arbitrary code on endpoints, because the agent enforces its own catalog.
-- **Control direction:** keep the agent's catalog the real boundary. When script execution arrives, scripts must be signed by a key the server does not hold, so a server compromise cannot become arbitrary fleet-wide execution. The design is [ADR-0015](decisions/ADR-0015-script-trust-and-running.md): a trust list pinned at enrollment that only its own admins can extend, revision approvals the agent verifies, and a fresh signature for every C2 and C3 run. Its section 9 lists what a compromised server can still do with approved scripts.
+- **Current controls:** a compromised server can request catalog actions and read inventory. The endpoint holds its private key, and Argon2id protects passwords at rest. [ADR-0015](decisions/ADR-0015-script-trust-and-running.md) defines agent-verified script approvals and fresh authorization for C2 and C3 runs. Section 9 describes which signed jobs a compromised server can still request.
+- **Planned terminal:** local opt-in and the locally authorized account constrain where an interactive terminal may run and with what privileges. If the server is the sole authority for a terminal grant, a server compromise would give access to every enabled maintenance account. Evaluate the terminal grant and revocation model against that exposure before shipping.
 
 ### T11: Secrets in logs, URLs and responses (STD-006b)
 - **Control:** tokens are shown once and stored hashed; API token responses are never re-displayed; reveal pages send `Cache-Control: no-store`; audit records hold credential *prefixes*; agent logs never include tokens or keys; the enrollment token is passed by flag or environment, never in a URL.

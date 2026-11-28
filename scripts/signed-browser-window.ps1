@@ -56,7 +56,18 @@ if ($Action -eq 'Enable' -or $Action -eq 'Remove') {
     $window = [IntPtr]::Zero
     try {
         $window = Wait-For { $w = [TechnicianSmoke]::Window($app.Id); if ($w -ne [IntPtr]::Zero) { $w } } 'Technician window missing.'
-        if (![TechnicianSmoke]::ChooseBrowserMenu($window, $enable)) { throw 'Expected the browser menu entry.' }
+        try {
+            $menuCommand = Wait-For {
+                if ($app.HasExited) { throw "Technician exited before its browser menu appeared (exit $($app.ExitCode))." }
+                $id = [TechnicianSmoke]::BrowserMenuCommand($window, $enable)
+                if ($id -gt 0) { $id }
+            } 'Expected the browser menu entry.'
+        } catch {
+            throw "$_ Last menu state: $([TechnicianSmoke]::BrowserMenuState($window, $enable))."
+        }
+        if (![TechnicianSmoke]::PostMessage($window, 0x111, [IntPtr]$menuCommand, [IntPtr]::Zero)) {
+            throw 'Could not post the browser menu command.'
+        }
         if ($enable) {
             Wait-For { (Registered-Here) -and (Get-Item -LiteralPath $key).GetValueNames() -contains 'URL Protocol' } 'Menu did not register the downloaded candidate.' | Out-Null
         } else {

@@ -6,15 +6,23 @@
 
 use crate::config::AgentConfig;
 use crate::identity::DeviceKey;
-use crate::journal::{Accept, Journal};
+use crate::journal::{Accept, Journal, ScriptRef};
+use crate::script::Policy;
+use crate::spent::Spent;
+use crate::trust::{Pin, Pinned, Trust};
 use anyhow::{bail, Context, Result};
 use base64::Engine;
+use flyw8t_protocol::agent_update::Release;
 use flyw8t_protocol::messages::{
     AgentMsg, DeviceFacts, ExecOutcome, Finished, JobPhase, JobReport, NotAccepted, RefusalCode,
     ServerMsg,
 };
+use flyw8t_protocol::messages::{
+    AgentUpdatePolicy, BackgroundTerminalPolicy, EnrollmentScope, ScriptOffer,
+};
+use flyw8t_protocol::trust::{key_id, Hash, KeyKind};
 use flyw8t_protocol::{auth, Action, PhysicalConsoleState, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
-use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
+use futures_util::{stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
 use ring::rand::SecureRandom;
 use rustls::ClientConfig;
 use std::collections::HashMap;
@@ -64,10 +72,16 @@ pub struct Agent {
     key: DeviceKey,
     tls: Arc<ClientConfig>,
     journal: Journal,
+    trust: Trust,
+    spent: Spent,
+    policy: Policy,
+    device_key_id: Hash,
     slots: Arc<Semaphore>,
     running: Mutex<HashMap<Uuid, CancellationToken>>,
     events_tx: mpsc::Sender<AgentMsg>,
     events_rx: tokio::sync::Mutex<mpsc::Receiver<AgentMsg>>,
+    #[cfg(windows)]
+    terminal: crate::terminal::Runtime,
     started: Instant,
     /// Held for the agent's lifetime: one process per state directory (see `lock_state_dir`).
     _lock: std::fs::File,
@@ -82,17 +96,29 @@ impl Agent {
         let key = DeviceKey::load(&cfg.key_path())?;
         let tls = crate::tls::client_config(cfg.ca_cert_pem.as_deref())?;
         let journal = Journal::open(&cfg.journal_dir())?;
+        let trust = Trust::load(&cfg.state_dir)?;
+        let spent = Spent::open(&cfg.state_dir)?;
+        let policy = crate::script::load_policy(&cfg.state_dir)?;
+        let device_key_id = key_id(KeyKind::Device, key.public_key());
         let (events_tx, events_rx) = mpsc::channel(EVENT_BUFFER);
+        #[cfg(windows)]
+        let terminal = crate::terminal::Runtime::new(cfg.state_dir.clone(), device_id)?;
         Ok(Arc::new(Self {
             cfg,
             device_id,
             key,
             tls,
             journal,
+            trust,
+            spent,
+            policy,
+            device_key_id,
             slots: Arc::new(Semaphore::new(MAX_CONCURRENT_JOBS)),
             running: Mutex::new(HashMap::new()),
             events_tx,
             events_rx: tokio::sync::Mutex::new(events_rx),
+            #[cfg(windows)]
+            terminal,
             started: Instant::now(),
             _lock: lock,
         }))
@@ -106,6 +132,35 @@ impl Agent {
         &self.journal
     }
 
+    pub fn trust(&self) -> &Trust {
+        &self.trust
+    }
+
+    fn recover_enrollment_scope(&self, scope: EnrollmentScope) -> Result<()> {
+        if self.cfg.enrollment_scope.is_some() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.trust
+                .lock()
+                .as_ref()
+                .is_none_or(|pinned| pinned.organization_id == scope.organization_id),
+            "the original enrollment scope conflicts with the locally pinned organization"
+        );
+        // The agent holds the state directory lock. Read back the file so reconnects leave a
+        // scope already recovered by this process untouched.
+        let mut cfg = AgentConfig::load(&self.cfg.state_dir)?;
+        anyhow::ensure!(
+            cfg.device_id == Some(self.device_id) && cfg.server_url == self.cfg.server_url,
+            "agent configuration changed since the service started"
+        );
+        if cfg.enrollment_scope.is_none() {
+            cfg.enrollment_scope = Some(scope);
+            cfg.save()?;
+        }
+        Ok(())
+    }
+
     /// Stay connected until `shutdown`, reconnecting with capped, jittered backoff.
     pub async fn run(self: &Arc<Self>, shutdown: CancellationToken) -> Result<(), Fatal> {
         let mut backoff = Duration::from_secs(1);
@@ -113,12 +168,18 @@ impl Agent {
             let began = Instant::now();
             match self.session(&shutdown).await {
                 Ok(()) => tracing::info!("session ended"),
-                Err(SessionError::Fatal(f)) => return Err(f),
+                Err(SessionError::Fatal(f)) => {
+                    #[cfg(windows)]
+                    self.terminal.stop(true);
+                    return Err(f);
+                }
                 Err(SessionError::Retry(e)) => {
                     tracing::warn!(error = %format!("{e:#}"), "session failed")
                 }
             }
             if shutdown.is_cancelled() {
+                #[cfg(windows)]
+                self.terminal.stop(false);
                 return Ok(());
             }
             if began.elapsed() > MAX_BACKOFF {
@@ -128,7 +189,11 @@ impl Agent {
             tracing::info!(delay_ms = delay.as_millis() as u64, "reconnecting");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = shutdown.cancelled() => return Ok(()),
+                _ = shutdown.cancelled() => {
+                    #[cfg(windows)]
+                    self.terminal.stop(false);
+                    return Ok(());
+                }
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
@@ -139,7 +204,11 @@ impl Agent {
     pub async fn run_session(self: &Arc<Self>, stop: &CancellationToken) -> Result<()> {
         match self.session(stop).await {
             Ok(()) => Ok(()),
-            Err(SessionError::Fatal(f)) => Err(f.into()),
+            Err(SessionError::Fatal(f)) => {
+                #[cfg(windows)]
+                self.terminal.stop(true);
+                Err(f.into())
+            }
             Err(SessionError::Retry(e)) => Err(e),
         }
     }
@@ -159,21 +228,51 @@ impl Agent {
                     .sign_b64(&auth::auth_message(&nonce, self.device_id)),
                 agent_version: crate::AGENT_VERSION.to_string(),
                 physical_console_check: cfg!(windows),
+                capabilities: crate::CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             },
         )
         .await?;
-        let heartbeat_secs = match recv(&mut ws, HANDSHAKE_TIMEOUT).await? {
-            ServerMsg::Welcome { heartbeat_secs, .. } => heartbeat_secs.clamp(5, 300),
-            ServerMsg::Refused { code, message } => return Err(refusal(code, message)),
-            other => return Err(anyhow::anyhow!("unexpected handshake reply: {other:?}").into()),
-        };
+        let (heartbeat_secs, organization_id, enrollment_scope) =
+            match recv(&mut ws, HANDSHAKE_TIMEOUT).await? {
+                ServerMsg::Welcome {
+                    device_id,
+                    heartbeat_secs,
+                    organization_id,
+                    enrollment_scope,
+                } if device_id == self.device_id => (
+                    heartbeat_secs.clamp(5, 300),
+                    organization_id,
+                    enrollment_scope,
+                ),
+                ServerMsg::Refused { code, message } => return Err(refusal(code, message)),
+                other => {
+                    return Err(anyhow::anyhow!("unexpected handshake reply: {other:?}").into())
+                }
+            };
         tracing::info!(device_id = %self.device_id, "connected");
 
         // Exclusive use of the event stream for this session. Anything buffered while
         // disconnected is stale; the journal snapshot below supersedes it.
         let mut events = self.events_rx.lock().await;
+        if let Some(scope) = enrollment_scope {
+            if Some(scope.organization_id) != organization_id {
+                tracing::warn!("the server returned inconsistent enrollment organization IDs");
+            } else if let Err(error) = self.recover_enrollment_scope(scope) {
+                tracing::warn!(%error, "could not record the original enrollment scope");
+            }
+        }
         while events.try_recv().is_ok() {}
 
+        // A pinned agent asks for any trust-list versions after the one it holds.
+        if let Some(p) = self.trust.get() {
+            send(
+                &mut ws,
+                &AgentMsg::TrustRequest {
+                    after: Some(p.head.list.version),
+                },
+            )
+            .await?;
+        }
         let inventory = tokio::task::spawn_blocking(crate::collect::inventory).await?;
         send(&mut ws, &AgentMsg::Inventory(Box::new(inventory))).await?;
         for report in self.journal.unreported() {
@@ -185,9 +284,15 @@ impl Agent {
         let mut inventory_tick = tokio::time::interval(INVENTORY_INTERVAL);
         inventory_tick.tick().await;
         let mut last_heard = Instant::now();
-        // Replies belong only to this socket. A stalled WTS call must not hold
+        // Observations belong only to this socket. A stalled check must not hold
         // up heartbeats or build a queue, including across a reconnect.
-        let mut console_checks = FuturesUnordered::new();
+        let mut checks = FuturesUnordered::new();
+        // Terminal output cannot displace durable job reports. This reply channel
+        // belongs to only this authenticated socket, so dropping its receiver also
+        // disarms the writer without destroying the Windows process.
+        let (terminal_tx, mut terminal_rx) = mpsc::channel::<AgentMsg>(32);
+        #[cfg(not(windows))]
+        drop(terminal_tx);
 
         loop {
             tokio::select! {
@@ -207,17 +312,51 @@ impl Agent {
                     let msg: ServerMsg = serde_json::from_str(text.as_str()).context("malformed server message")?;
                     match msg {
                         ServerMsg::CheckPhysicalConsole { request_id } => {
-                            if console_checks.is_empty() {
-                                console_checks.push(async move {
+                            if checks.is_empty() {
+                                checks.push(async move {
                                     let state = crate::physical_console::check().await;
                                     AgentMsg::PhysicalConsoleStatus { request_id, state }
-                                });
+                                }.boxed());
                             } else {
                                 let reply = AgentMsg::PhysicalConsoleStatus {
                                     request_id,
                                     state: PhysicalConsoleState::Unavailable,
                                 };
                                 send(&mut ws, &reply).await?;
+                            }
+                        }
+                        ServerMsg::CheckBackgroundTerminalPolicy { request_id } => {
+                            if checks.is_empty() {
+                                #[cfg(windows)]
+                                let (state_dir, device) = (self.cfg.state_dir.clone(), self.device_id);
+                                checks.push(async move {
+                                    #[cfg(windows)]
+                                    let (policy, agent_account) = tokio::task::spawn_blocking(move || {
+                                        (
+                                            crate::terminal::read_background_policy(&state_dir, device),
+                                            crate::runner::current_windows_execution_account(),
+                                        )
+                                    }).await.unwrap_or((BackgroundTerminalPolicy::Unavailable, None));
+                                    #[cfg(not(windows))]
+                                    let (policy, agent_account) = (
+                                        BackgroundTerminalPolicy::Unavailable,
+                                        crate::runner::current_windows_execution_account(),
+                                    );
+                                    AgentMsg::BackgroundTerminalPolicyStatus { request_id, policy, agent_account }
+                                }.boxed());
+                            } else {
+                                let reply = AgentMsg::BackgroundTerminalPolicyStatus {
+                                    request_id,
+                                    policy: BackgroundTerminalPolicy::Unavailable,
+                                    agent_account: None,
+                                };
+                                send(&mut ws, &reply).await?;
+                            }
+                        }
+                        #[cfg(windows)]
+                        ServerMsg::BackgroundTerminal { session_id, command } => {
+                            if !self.terminal.submit(session_id, command, terminal_tx.clone()) {
+                                return Err(anyhow::anyhow!("background terminal command queue unavailable").into());
                             }
                         }
                         other => {
@@ -227,10 +366,11 @@ impl Agent {
                         }
                     }
                 }
-                Some(reply) = console_checks.next(), if !console_checks.is_empty() => {
+                Some(reply) = checks.next(), if !checks.is_empty() => {
                     send(&mut ws, &reply).await?;
                 }
                 Some(event) = events.recv() => send(&mut ws, &event).await?,
+                Some(event) = terminal_rx.recv() => send(&mut ws, &event).await?,
                 _ = heartbeat_tick.tick() => {
                     if last_heard.elapsed() > heartbeat * 3 {
                         return Err(anyhow::anyhow!("server silent for {:?}", last_heard.elapsed()).into());
@@ -269,6 +409,7 @@ impl Agent {
                 action,
                 timeout_secs,
             } => vec![AgentMsg::Job(self.on_offer(job_id, action, timeout_secs))],
+            ServerMsg::ScriptOffer(offer) => vec![AgentMsg::Job(self.on_script_offer(*offer))],
             ServerMsg::JobCancel { job_id } => self
                 .on_cancel(job_id)?
                 .into_iter()
@@ -276,6 +417,19 @@ impl Agent {
                 .collect(),
             ServerMsg::ReportAck { job_id } => {
                 self.journal.mark_acked(job_id)?;
+                vec![]
+            }
+            ServerMsg::TrustUpdate { versions } => {
+                match self.trust.update(&versions) {
+                    Ok(Some(v)) => tracing::info!(version = v, "trust list held"),
+                    Ok(None) => {
+                        tracing::warn!("trust versions offered to an agent that is not pinned")
+                    }
+                    // Refused and kept as it was: the server cannot extend or wind back what this agent trusts.
+                    Err(e) => {
+                        tracing::warn!(error = %format!("{e:#}"), "refused trust-list update")
+                    }
+                }
                 vec![]
             }
             ServerMsg::Refused { code, message } => return Err(refusal(code, message)),
@@ -325,6 +479,185 @@ impl Agent {
         }
     }
 
+    fn on_script_offer(self: &Arc<Self>, offer: ScriptOffer) -> JobReport {
+        let job_id = offer.job_id;
+        if let Some(entry) = self.journal.get(job_id) {
+            tracing::info!(%job_id, "duplicate script offer; re-sending known state");
+            return entry.report();
+        }
+        let script = ScriptRef {
+            script_id: offer.revision.script_id,
+            revision: offer.revision.revision,
+            content_hash: offer.revision.content_hash(),
+        };
+        // Checked when it arrives, so a bad job is refused at once; checked again just before it starts.
+        let first = {
+            let g = self.trust.lock();
+            crate::script::check(
+                g.as_ref(),
+                &self.device_key_id,
+                &self.policy,
+                &offer,
+                unix_now(),
+                &self.spent,
+            )
+        };
+        let refuse = |why: String| {
+            tracing::warn!(%job_id, reason = %why, "script refused");
+            let refusal = not_run(ExecOutcome::Failed {
+                error: format!("refused, nothing ran: {why}"),
+            });
+            match self
+                .journal
+                .refuse_script(job_id, script.clone(), offer.timeout_secs, refusal)
+            {
+                Ok(report) => report,
+                Err(_) => JobReport {
+                    job_id,
+                    phase: JobPhase::NotAccepted {
+                        reason: NotAccepted::StorageError,
+                    },
+                },
+            }
+        };
+        if let Err(why) = first {
+            return refuse(why);
+        }
+        let Ok(permit) = self.slots.clone().try_acquire_owned() else {
+            return JobReport {
+                job_id,
+                phase: JobPhase::NotAccepted {
+                    reason: NotAccepted::Busy,
+                },
+            };
+        };
+        match self
+            .journal
+            .accept_script(job_id, script, offer.timeout_secs)
+        {
+            Ok(Accept::New) => {}
+            Ok(Accept::Known(entry)) => return entry.report(),
+            Err(e) => {
+                tracing::error!(%job_id, error = %format!("{e:#}"), "could not journal script job; declining it");
+                return JobReport {
+                    job_id,
+                    phase: JobPhase::NotAccepted {
+                        reason: NotAccepted::StorageError,
+                    },
+                };
+            }
+        }
+        let token = CancellationToken::new();
+        self.running.lock().unwrap().insert(job_id, token.clone());
+        let agent = Arc::clone(self);
+        tokio::spawn(async move {
+            agent.run_script(offer, token).await;
+            drop(permit);
+        });
+        JobReport {
+            job_id,
+            phase: JobPhase::Accepted,
+        }
+    }
+
+    /// Admission in the ADR's order, under the trust lock: check again, spend the authorization, advance the clock
+    /// mark, record `Started`; then release the lock and start the interpreter.
+    async fn run_script(self: &Arc<Self>, offer: ScriptOffer, token: CancellationToken) {
+        let job_id = offer.job_id;
+        let at = OffsetDateTime::now_utc();
+        let admitted = {
+            let g = self.trust.lock();
+            let now = unix_now();
+            match crate::script::check(
+                g.as_ref(),
+                &self.device_key_id,
+                &self.policy,
+                &offer,
+                now,
+                &self.spent,
+            ) {
+                Err(why) => Err(format!("refused, nothing ran: {why}")),
+                Ok(a) => {
+                    let spent = if a.class.needs_run_signature() {
+                        self.spent
+                            .spend(offer.deployment_id, job_id)
+                            .map_err(|e| format!("refused, nothing ran: {e:#}"))
+                    } else {
+                        Ok(())
+                    };
+                    spent
+                        .and_then(|_| {
+                            self.spent
+                                .advance(now)
+                                .map_err(|e| format!("refused, nothing ran: {e:#}"))
+                        })
+                        .and_then(|_| {
+                            if token.is_cancelled() {
+                                return Err("cancelled before it started".into());
+                            }
+                            self.journal
+                                .mark_started(job_id, at)
+                                .map_err(|e| format!("could not record start: {e:#}"))
+                        })
+                        .map(|_| a)
+                }
+            }
+        };
+        let report = match admitted {
+            Err(why) => not_run(if why.starts_with("cancelled") {
+                ExecOutcome::Cancelled { started: false }
+            } else if why.starts_with("could not record start") {
+                ExecOutcome::NotStarted { reason: why }
+            } else {
+                ExecOutcome::Failed { error: why }
+            }),
+            Ok(a) => {
+                self.emit(JobReport {
+                    job_id,
+                    phase: JobPhase::Started { at },
+                });
+                tracing::info!(%job_id, script = %offer.revision.script_id, revision = offer.revision.revision, "running script");
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = cancel.clone();
+                let watch = token.clone();
+                let watcher = tokio::spawn(async move {
+                    watch.cancelled().await;
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                let state_dir = self.cfg.state_dir.clone();
+                let source = offer.revision.source.clone();
+                let report = tokio::task::spawn_blocking(move || {
+                    crate::runner::run(
+                        crate::runner::Run {
+                            state_dir: &state_dir,
+                            job_id,
+                            source: &source,
+                            values: a.values,
+                            secrets: a.secrets,
+                            timeout: Duration::from_secs(a.timeout_secs),
+                            cancel,
+                        },
+                        at,
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    not_run(ExecOutcome::Interrupted {
+                        reason: format!("the runner failed: {e}"),
+                    })
+                });
+                watcher.abort();
+                report
+            }
+        };
+        self.journal.finish_when_writable(job_id, &report).await;
+        self.running.lock().unwrap().remove(&job_id);
+        self.emit(JobReport {
+            job_id,
+            phase: JobPhase::Finished(Box::new(report)),
+        });
+    }
+
     async fn run_job(
         &self,
         job_id: Uuid,
@@ -348,9 +681,7 @@ impl Agent {
             tracing::info!(%job_id, action = action.name(), "running");
             crate::executor::execute(&action, timeout, token, at).await
         };
-        if let Err(e) = self.journal.finish(job_id, report.clone()) {
-            tracing::error!(%job_id, error = %format!("{e:#}"), "could not journal result");
-        }
+        self.journal.finish_when_writable(job_id, &report).await;
         self.running.lock().unwrap().remove(&job_id);
         self.emit(JobReport {
             job_id,
@@ -376,6 +707,10 @@ impl Agent {
     }
 }
 
+fn unix_now() -> u64 {
+    OffsetDateTime::now_utc().unix_timestamp().max(0) as u64
+}
+
 fn not_run(outcome: ExecOutcome) -> Finished {
     Finished {
         outcome,
@@ -396,9 +731,25 @@ fn refusal(code: RefusalCode, message: String) -> SessionError {
     }
 }
 
+/// Ask for the whole trust chain before authenticating, and verify it against `pin`.
+async fn fetch_chain(ws: &mut Ws, pin: &Pin) -> Result<Pinned> {
+    send(ws, &AgentMsg::TrustRequest { after: None }).await?;
+    match recv(ws, HANDSHAKE_TIMEOUT).await.map_err(session_err)? {
+        ServerMsg::TrustUpdate { versions } => pin.verify(&versions),
+        ServerMsg::Refused { message, .. } => bail!("the server refused: {message}"),
+        other => bail!("expected the trust chain, got {other:?}"),
+    }
+}
+
 /// Enroll this device with a one-time token. Generates the device key, proves possession of
-/// it, and persists identity only once the server confirms.
-pub async fn enroll(mut cfg: AgentConfig, token: &str) -> Result<(Uuid, String)> {
+/// it, and persists identity only once the server confirms. With `pin`, the server's trust chain must verify
+/// against the fingerprint before the device key is sent, and the organization the server enrolls it into must
+/// be the one given (ADR-0015 section 3); otherwise nothing is stored.
+pub async fn enroll(
+    mut cfg: AgentConfig,
+    token: &str,
+    pin: Option<Pin>,
+) -> Result<(Uuid, String, Option<Pinned>)> {
     if cfg.device_id.is_some() || cfg.key_path().exists() {
         bail!(
             "{} already holds an enrolled identity; preserve its identity and job history and follow docs/deployment.md#existing-test-enrollment when moving it to another server",
@@ -409,6 +760,10 @@ pub async fn enroll(mut cfg: AgentConfig, token: &str) -> Result<(Uuid, String)>
     let tls = crate::tls::client_config(cfg.ca_cert_pem.as_deref())?;
     let mut ws = connect(&cfg.ws_url()?, tls).await?;
     let nonce = expect_challenge(&mut ws).await.map_err(session_err)?;
+    let pinned = match &pin {
+        Some(p) => Some(fetch_chain(&mut ws, p).await?),
+        None => None,
+    };
     let digest = ring::digest::digest(&ring::digest::SHA256, token.trim().as_bytes());
     send(
         &mut ws,
@@ -436,16 +791,82 @@ pub async fn enroll(mut cfg: AgentConfig, token: &str) -> Result<(Uuid, String)>
         ServerMsg::Enrolled {
             device_id,
             organization,
+            organization_id,
+            enrollment_scope,
         } => {
+            anyhow::ensure!(
+                enrollment_scope.is_none_or(|scope| Some(scope.organization_id) == organization_id),
+                "the server returned inconsistent enrollment organization IDs"
+            );
+            if let Some(p) = &pinned {
+                if organization_id != Some(p.organization_id) {
+                    bail!(
+                        "the server enrolled this device into organization {organization:?} ({}), not {} as given: nothing was saved. Retire device {device_id} in the console.",
+                        organization_id.map_or("no id".into(), |o| o.to_string()),
+                        p.organization_id
+                    );
+                }
+            }
             std::fs::create_dir_all(&cfg.state_dir)?;
             key.save(&cfg.key_path())?;
+            if let Some(p) = &pinned {
+                crate::trust::store(&cfg.state_dir, p)?;
+            }
             cfg.device_id = Some(device_id);
+            cfg.enrollment_scope = enrollment_scope;
             cfg.save()?;
             let _ = ws.close(None).await;
-            Ok((device_id, organization))
+            Ok((device_id, organization, pinned))
         }
         ServerMsg::Refused { message, .. } => bail!("enrollment refused: {message}"),
         other => bail!("unexpected enrollment reply: {other:?}"),
+    }
+}
+
+/// Pin an agent enrolled before ADR-0015 (`flyw8t-agent trust pin`): verify the server's chain against the
+/// fingerprint, authenticate, and check the organization the server has this device in against the one given.
+/// Holds the state-folder lock, so the service must be stopped.
+pub async fn trust_pin(cfg: AgentConfig, pin: Pin) -> Result<Pinned> {
+    let device_id = cfg.device_id.context("agent is not enrolled")?;
+    let _lock = lock_state_dir(&cfg.state_dir)
+        .context("stop the flyw8t-agent service first: it holds the state folder")?;
+    let key = DeviceKey::load(&cfg.key_path())?;
+    let tls = crate::tls::client_config(cfg.ca_cert_pem.as_deref())?;
+    let mut ws = connect(&cfg.ws_url()?, tls).await?;
+    let nonce = expect_challenge(&mut ws).await.map_err(session_err)?;
+    let pinned = fetch_chain(&mut ws, &pin).await?;
+    send(
+        &mut ws,
+        &AgentMsg::Authenticate {
+            protocol_version: PROTOCOL_VERSION,
+            device_id,
+            signature: key.sign_b64(&auth::auth_message(&nonce, device_id)),
+            agent_version: crate::AGENT_VERSION.to_string(),
+            physical_console_check: false,
+            capabilities: vec![],
+        },
+    )
+    .await?;
+    match recv(&mut ws, HANDSHAKE_TIMEOUT)
+        .await
+        .map_err(session_err)?
+    {
+        ServerMsg::Welcome {
+            organization_id, ..
+        } => {
+            let _ = ws.close(None).await;
+            if organization_id != Some(pin.organization_id) {
+                bail!(
+                    "the server has this device in organization {}, not {} as given: nothing was pinned",
+                    organization_id.map_or("(not said)".into(), |o| o.to_string()),
+                    pin.organization_id
+                );
+            }
+            crate::trust::store(&cfg.state_dir, &pinned)?;
+            Ok(pinned)
+        }
+        ServerMsg::Refused { message, .. } => bail!("the server refused: {message}"),
+        other => bail!("unexpected reply: {other:?}"),
     }
 }
 
@@ -453,6 +874,37 @@ fn session_err(e: SessionError) -> anyhow::Error {
     match e {
         SessionError::Fatal(f) => f.into(),
         SessionError::Retry(e) => e,
+    }
+}
+
+/// Read effective fleet policy for a locally verified candidate over a one-shot connection.
+pub async fn observe_update_policy(
+    cfg: &AgentConfig,
+    candidate: Release,
+) -> Result<AgentUpdatePolicy> {
+    let device_id = cfg.device_id.context("agent is not enrolled")?;
+    let key = DeviceKey::load(&cfg.key_path())?;
+    let tls = crate::tls::client_config(cfg.ca_cert_pem.as_deref())?;
+    let mut ws = connect(&cfg.ws_url()?, tls).await?;
+    let nonce = expect_challenge(&mut ws).await.map_err(session_err)?;
+    let message = auth::agent_update_policy_message(&nonce, device_id, &candidate);
+    send(
+        &mut ws,
+        &AgentMsg::AgentUpdatePolicyRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id,
+            signature: key.sign_b64(&message),
+            candidate,
+        },
+    )
+    .await?;
+    match recv(&mut ws, HANDSHAKE_TIMEOUT)
+        .await
+        .map_err(session_err)?
+    {
+        ServerMsg::AgentUpdatePolicyResult { policy } => Ok(policy),
+        ServerMsg::Refused { code, message } => Err(session_err(refusal(code, message))),
+        _ => bail!("the enrolled server did not return an agent update policy"),
     }
 }
 

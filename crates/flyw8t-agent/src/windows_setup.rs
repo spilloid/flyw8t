@@ -203,6 +203,7 @@ fn enroll_and_install(
     let cfg = AgentConfig {
         server_url: package.server_url,
         device_id: None,
+        enrollment_scope: None,
         ca_cert_pem: None,
         state_dir,
     };
@@ -230,8 +231,8 @@ fn enroll_and_install(
     } else {
         ensure!(current_service.is_none(), "The Flyw8t service already exists. Check it in Windows Services before enrolling this PC.");
         stage("Enrolling this PC with your Flyw8t console…");
-        let (id, _) = super::runtime()?.block_on(async {
-            tokio::time::timeout(Duration::from_secs(90), flyw8t_agent::enroll(cfg, &package.token)).await
+        let (id, _, _) = super::runtime()?.block_on(async {
+            tokio::time::timeout(Duration::from_secs(90), flyw8t_agent::enroll(cfg, &package.token, None)).await
         }).context("Setup timed out while enrolling. Check connectivity and look for this PC in Devices before retrying.")?
             .context("Enrollment failed. Verify the installer is still valid in the console and that this PC can reach it.")?;
         id

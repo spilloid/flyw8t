@@ -31,55 +31,17 @@ const TIMER: usize = 1;
 const DISPLAY_TIMER: usize = 2;
 const MIN_CARD_WIDTH: i32 = 572;
 const INITIAL_CARD_HEIGHT: i32 = 204;
-
-fn ssh_arguments(address: &str) -> Result<Vec<String>, String> {
-    let mut args = vec!["-t".to_owned()];
-    let host = match address.trim().split_once('@') {
-        Some((user, host)) => {
-            if user.is_empty()
-                || user.starts_with('-')
-                || user.len() > 128
-                || !user
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-\\".contains(&b))
-            {
-                return Err("Enter an SSH account in the form user@computer.".into());
-            }
-            args.extend(["-l".to_owned(), user.to_owned()]);
-            host
-        }
-        None => address,
-    };
-    let target = Target::parse_with_port(host, 22)?;
-    args.extend(["-p".to_owned(), target.port.to_string(), target.host]);
-    Ok(args)
-}
-
-fn open_ssh_terminal(address: &str) -> Result<(), String> {
-    use std::os::windows::{ffi::OsStringExt, process::CommandExt};
-    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
-    use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
-    let args = ssh_arguments(address)?;
-    let mut path = vec![0u16; 32768];
-    let n = unsafe { GetSystemDirectoryW(path.as_mut_ptr(), path.len() as u32) } as usize;
-    if n == 0 || n >= path.len() {
-        return Err("Windows could not locate its system directory.".into());
-    }
-    let client = std::path::PathBuf::from(std::ffi::OsString::from_wide(&path[..n]))
-        .join("OpenSSH")
-        .join("ssh.exe");
-    std::process::Command::new(client)
-        .args(args)
-        .creation_flags(CREATE_NEW_CONSOLE)
-        .spawn()
-        .map(drop)
-        .map_err(|e| {
-            format!("Could not open Windows OpenSSH Client. Check Windows Optional Features ({e}).")
-        })
-}
+const ACCOUNT_ROW_HEIGHT: i32 = 40;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
+}
+
+unsafe fn edit_text(control: HWND) -> String {
+    let len = GetWindowTextLengthW(control);
+    let mut text = vec![0u16; len as usize + 1];
+    let n = GetWindowTextW(control, text.as_mut_ptr(), len + 1);
+    String::from_utf16_lossy(&text[..n as usize])
 }
 
 fn last_error(action: &str) -> String {
@@ -299,7 +261,11 @@ pub fn run(prefill: Option<String>, intent: Intent, connect_now: bool) -> Result
             if msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN as usize {
                 let closed_choice =
                     focus == ui.intent && SendMessageW(ui.intent, CB_GETDROPPEDSTATE, 0, 0) == 0;
-                if focus == ui.address || focus == ui.button || closed_choice {
+                if focus == ui.address
+                    || focus == ui.ssh_account
+                    || focus == ui.button
+                    || closed_choice
+                {
                     // Holding Enter must not immediately cancel the connection it just started.
                     if msg.lParam & (1 << 30) == 0 {
                         ui.action();
@@ -307,7 +273,14 @@ pub fn run(prefill: Option<String>, intent: Intent, connect_now: bool) -> Result
                     continue;
                 }
             }
-            if [ui.address, ui.intent, ui.button, ui.clipboard].contains(&focus)
+            if [
+                ui.address,
+                ui.intent,
+                ui.ssh_account,
+                ui.button,
+                ui.clipboard,
+            ]
+            .contains(&focus)
                 && IsDialogMessageW(hwnd, &msg) != 0
             {
                 continue;
@@ -374,6 +347,8 @@ struct Ui {
     choosers: Vec<Chooser>,
     label: HWND,
     address: HWND,
+    ssh_account_label: HWND,
+    ssh_account: HWND,
     button: HWND,
     clipboard: HWND,
     status: HWND,
@@ -423,6 +398,19 @@ impl Ui {
             }
         }
         SendMessageW(intent, CB_SETCURSEL, initial_intent as usize, 0);
+        let ssh_account_label = child(hwnd, "STATIC", "SSH &account", 0, 0, 0)?;
+        let ssh_account = child(
+            hwnd,
+            "EDIT",
+            "",
+            WS_EX_CLIENTEDGE,
+            WS_TABSTOP | ES_AUTOHSCROLL as u32,
+            108,
+        )?;
+        if initial_intent != Intent::Terminal {
+            ShowWindow(ssh_account_label, SW_HIDE);
+            ShowWindow(ssh_account, SW_HIDE);
+        }
         let button = child(
             hwnd,
             "BUTTON",
@@ -467,6 +455,8 @@ impl Ui {
             choosers: Vec::new(),
             label,
             address,
+            ssh_account_label,
+            ssh_account,
             button,
             clipboard,
             status,
@@ -510,6 +500,8 @@ impl Ui {
             self.intent,
             self.label,
             self.address,
+            self.ssh_account_label,
+            self.ssh_account,
             self.button,
             self.clipboard,
             self.hint,
@@ -564,7 +556,16 @@ impl Ui {
         MoveWindow(self.intent, s(96), s(56), s(166), s(154), 1);
         MoveWindow(self.button, s(274), s(54), s(120), s(34), 1);
         MoveWindow(self.clipboard, s(406), s(55), s(126), s(32), 1);
-        let y = s(100);
+        let y = s(100 + self.account_row_height());
+        MoveWindow(self.ssh_account_label, s(16), s(105), s(78), s(22), 1);
+        MoveWindow(
+            self.ssh_account,
+            s(96),
+            s(98),
+            (w - s(112)).max(1),
+            s(32),
+            1,
+        );
         let height = (h - y - s(33)).max(1);
         MoveWindow(self.surface, 0, y, w, height, 1);
         let text_width = (w - s(32)).max(1);
@@ -680,7 +681,7 @@ impl Ui {
         let mut client = RECT::default();
         GetClientRect(self.hwnd, &mut client);
         let width = (client.right - 32 * dpi / 96).max(1);
-        let required = 120 * dpi / 96
+        let required = (120 + self.account_row_height()) * dpi / 96
             + self.text_height(self.hint, width, dpi)
             + self
                 .text_height(self.status, width, dpi)
@@ -735,10 +736,18 @@ impl Ui {
         }
     }
 
+    unsafe fn account_row_height(&self) -> i32 {
+        if self.selected() == Intent::Terminal {
+            ACCOUNT_ROW_HEIGHT
+        } else {
+            0
+        }
+    }
+
     unsafe fn select_intent(&self) {
         let intent = self.selected();
         let (button, hint) = match intent {
-            Intent::Terminal => ("Open terminal", "Sign in through SSH in a separate window. Enter a computer or user@computer, optionally with a port. The host must already offer SSH."),
+            Intent::Terminal => ("Open terminal", "Choose an SSH account for this session. Leave it blank to use OpenSSH’s default. Windows opens a separate terminal window."),
             Intent::Assist => ("Find sessions", "Choose the signed-in person whose current Windows session you want to help."),
             Intent::Share => ("Share a screen", "Open flyw8t Support in your browser. The person chooses which screen to share."),
             Intent::SignIn => ("Connect", "Sign in with a Windows account. The person at this computer may see a lock screen."),
@@ -746,6 +755,13 @@ impl Ui {
         };
         SetWindowTextW(self.button, wide(button).as_ptr());
         SetWindowTextW(self.hint, wide(hint).as_ptr());
+        let account_visibility = if intent == Intent::Terminal {
+            SW_SHOWNA
+        } else {
+            SW_HIDE
+        };
+        ShowWindow(self.ssh_account_label, account_visibility);
+        ShowWindow(self.ssh_account, account_visibility);
         ShowWindow(
             self.clipboard,
             if intent == Intent::SignIn {
@@ -805,12 +821,9 @@ impl Ui {
             self.finish(msg);
             return;
         }
-        let len = GetWindowTextLengthW(self.address);
-        let mut text = vec![0u16; len as usize + 1];
-        let n = GetWindowTextW(self.address, text.as_mut_ptr(), len + 1);
-        let address = String::from_utf16_lossy(&text[..n as usize]);
+        let address = edit_text(self.address);
         if self.selected() == Intent::Terminal {
-            match open_ssh_terminal(&address) {
+            match crate::ssh::open(&address, &edit_text(self.ssh_account)) {
                 Ok(()) => self.message(
                     "Opened Windows OpenSSH. Confirm the host and sign in in the terminal window.",
                 ),
@@ -1008,6 +1021,8 @@ impl Drop for Ui {
                     self.intent,
                     self.label,
                     self.address,
+                    self.ssh_account_label,
+                    self.ssh_account,
                     self.button,
                     self.clipboard,
                     self.hint,
@@ -1024,27 +1039,6 @@ impl Drop for Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ssh_mode_accepts_only_an_interactive_destination() {
-        assert_eq!(
-            ssh_arguments("alice@[::1]:2200").unwrap(),
-            ["-t", "-l", "alice", "-p", "2200", "::1"]
-        );
-        assert_eq!(
-            ssh_arguments("pc.example").unwrap(),
-            ["-t", "-p", "22", "pc.example"]
-        );
-        for bad in [
-            "-oProxyCommand=x",
-            "pc.example cmd",
-            "alice@pc:0",
-            "@pc",
-            "user@-F",
-        ] {
-            assert!(ssh_arguments(bad).is_err(), "{bad}");
-        }
-    }
 
     unsafe fn test_window() -> Window {
         let host = CreateWindowExW(
@@ -1125,6 +1119,10 @@ mod tests {
                 assert_eq!(
                     (GetWindowLongW(ui.clipboard, GWL_STYLE) as u32 & WS_VISIBLE) != 0,
                     clipboard
+                );
+                assert_eq!(
+                    (GetWindowLongW(ui.ssh_account, GWL_STYLE) as u32 & WS_VISIBLE) != 0,
+                    index == 4
                 );
             }
             assert!(ui.choosers.is_empty());

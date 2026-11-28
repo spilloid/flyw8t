@@ -582,6 +582,8 @@ mod flow_expiry_tests {
             limiter: Default::default(),
             remote_access: Box::new(crate::remote_access::NotConfigured),
             support: Default::default(),
+            terminal_admissions: Default::default(),
+            terminal_sessions: Default::default(),
             started_unix: 0,
             bodies: Default::default(),
             oidc_flows: Default::default(),

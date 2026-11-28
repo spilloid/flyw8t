@@ -26,7 +26,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_ProgramData, FOLDERID_ProgramFiles, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_System, FOLDERID_Windows,
+    SHGetKnownFolderPath, KF_FLAG_DEFAULT,
 };
 
 /// Owned by Administrators; SYSTEM and Administrators have full control; nothing inherited from above.
@@ -63,6 +64,16 @@ fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
 /// Windows protects.
 pub fn program_data() -> Result<PathBuf> {
     known_folder(&FOLDERID_ProgramData).context("Windows did not say where ProgramData is")
+}
+
+/// The System folder (`C:\Windows\System32`), from Windows, not `%SystemRoot%`.
+pub fn system_folder() -> Result<PathBuf> {
+    known_folder(&FOLDERID_System).context("Windows did not say where the System folder is")
+}
+
+/// The Windows folder, from Windows, not `%windir%`.
+pub fn windows_folder() -> Result<PathBuf> {
+    known_folder(&FOLDERID_Windows).context("Windows did not say where the Windows folder is")
 }
 
 /// `C:\Program Files` (or wherever Windows keeps it), not `%ProgramFiles%`. No fallback, as above.
@@ -113,6 +124,25 @@ pub enum Created {
 
 /// Create `dir` (not its parents) with `sddl` as its owner and permissions, in one call.
 pub fn create_dir(dir: &Path, sddl: &str) -> Result<Created> {
+    let p = wide(dir.as_os_str());
+    with_security_attributes(sddl, |attrs| {
+        // SAFETY: NUL-terminated path, valid attributes for the duration of the call.
+        if unsafe { CreateDirectoryW(p.as_ptr(), attrs) } != 0 {
+            return Ok(Created::New);
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error().map(|c| c as u32) {
+            Some(ERROR_ALREADY_EXISTS) => Ok(Created::Existed),
+            Some(ERROR_INVALID_OWNER) => Ok(Created::NotElevated),
+            _ => Err(err).with_context(|| format!("creating {}", dir.display())),
+        }
+    })
+}
+
+fn with_security_attributes<T>(
+    sddl: &str,
+    create: impl FnOnce(&SECURITY_ATTRIBUTES) -> Result<T>,
+) -> Result<T> {
     let mut sd: *mut core::ffi::c_void = std::ptr::null_mut();
     let s = wide(OsStr::new(sddl));
     // SAFETY: NUL-terminated SDDL; on success `sd` is a LocalAlloc'd descriptor freed below.
@@ -135,19 +165,75 @@ pub fn create_dir(dir: &Path, sddl: &str) -> Result<Created> {
         lpSecurityDescriptor: sd,
         bInheritHandle: 0,
     };
-    let p = wide(dir.as_os_str());
-    // SAFETY: NUL-terminated path, valid attributes for the duration of the call.
-    let ok = unsafe { CreateDirectoryW(p.as_ptr(), &attrs) } != 0;
-    let err = std::io::Error::last_os_error();
+    let result = create(&attrs);
+    // SAFETY: `sd` was allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
     unsafe { LocalFree(sd) };
-    if ok {
-        return Ok(Created::New);
+    result
+}
+
+/// Write and publish a private file inside an already checked folder. `false` means the
+/// destination existed, including when another writer published it first.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn publish_private_file_once(path: &Path, bytes: &[u8]) -> Result<bool> {
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{ERROR_FILE_EXISTS, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, MoveFileExW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let source = wide(temporary.as_os_str());
+    let destination = wide(path.as_os_str());
+    let mut file = with_security_attributes(PRIVATE, |attrs| {
+        // SAFETY: the path is NUL-terminated, attrs lives through the call, and the handle is checked.
+        let handle = unsafe {
+            CreateFileW(
+                source.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                attrs,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("creating {} (run as Administrator)", temporary.display())
+            });
+        }
+        // SAFETY: CreateFileW transferred ownership of a valid handle.
+        Ok(unsafe { File::from_raw_handle(handle) })
+    })?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        check_private_file(&temporary)?;
+        // SAFETY: both paths are NUL-terminated. Omitting replace and copy flags makes this
+        // a no-replace rename in the checked directory, including against competing writers.
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        } != 0
+        {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error().map(|code| code as u32) {
+            Some(ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS) => Ok(false),
+            _ => Err(error).with_context(|| format!("publishing {}", path.display())),
+        }
+    })();
+    if !matches!(result, Ok(true)) {
+        let _ = fs::remove_file(temporary);
     }
-    match err.raw_os_error().map(|c| c as u32) {
-        Some(ERROR_ALREADY_EXISTS) => Ok(Created::Existed),
-        Some(ERROR_INVALID_OWNER) => Ok(Created::NotElevated),
-        _ => Err(err).with_context(|| format!("creating {}", dir.display())),
-    }
+    result
 }
 
 /// The owner and DACL of `path`, as SDDL.

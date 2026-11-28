@@ -2,11 +2,15 @@
 #![cfg(windows)]
 
 mod common;
+#[path = "common/intune_bundle.rs"]
+mod intune_bundle;
 
 use common::*;
 use flyw8t_agent::{config, service, AgentConfig};
+use flyw8t_protocol::{enrollment_package::EnrollmentPackage, messages::EnrollmentScope};
 use reqwest::{header, StatusCode};
 use std::{
+    io::Cursor,
     path::{Path, PathBuf},
     process::Output,
     time::Duration,
@@ -59,14 +63,13 @@ fn assert_success(output: &Output, description: &str) {
     );
 }
 
-async fn setup_as_system(executable: &Path) -> Output {
-    // Exercise the installer itself in the System context used by managed Windows deployments.
-    // The task runs the EXE directly so LastTaskResult is the installer's real exit status.
+async fn run_as_system(executable: &Path, arguments: &str, description: &str) -> Output {
+    // The task runs the EXE directly so LastTaskResult is the executable's real exit status.
     let mut command = powershell(
         r#"
 $ErrorActionPreference = 'Stop'
-$name = 'Flyw8t quiet installer test ' + [Guid]::NewGuid()
-$action = New-ScheduledTaskAction -Execute $env:FLYW8T_TEST_PACKAGE_PATH -Argument '--quiet'
+$name = 'Flyw8t LocalSystem acceptance test ' + [Guid]::NewGuid()
+$action = New-ScheduledTaskAction -Execute $env:FLYW8T_TEST_EXECUTABLE -Argument $env:FLYW8T_TEST_ARGUMENTS
 $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 130)
 Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null
@@ -82,28 +85,168 @@ try {
         $resultReady = $info.LastTaskResult -notin @(0x41301, 0x41303)
         if ($info.LastRunTime -ne $previousRun -and $state -eq 'Ready' -and $resultReady) {
             if ($info.LastTaskResult -ne 0) {
-                throw ('LocalSystem quiet setup returned task result 0x{0:X8} ({0})' -f $info.LastTaskResult)
+                throw ('LocalSystem acceptance returned task result 0x{0:X8} ({0})' -f $info.LastTaskResult)
             }
             exit 0
         }
     } while ($timer.Elapsed.TotalSeconds -lt 135)
-    throw 'LocalSystem quiet setup exceeded its deadline.'
+    throw 'LocalSystem acceptance exceeded its deadline.'
 } finally {
     Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $name -Confirm:$false
 }
+
 "#,
     );
-    command.env("FLYW8T_TEST_PACKAGE_PATH", executable);
-    run_fixture_command(command, "LocalSystem quiet setup").await
+    command.env("FLYW8T_TEST_EXECUTABLE", executable);
+    command.env("FLYW8T_TEST_ARGUMENTS", arguments);
+    run_fixture_command(command, description).await
+}
+
+struct SystemOutput {
+    code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+// PowerShell single-quoted literals do not interpolate paths or arguments.
+fn ps_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+async fn capture_as_system(
+    executable: &str,
+    arguments: &str,
+    working_dir: &Path,
+    description: &str,
+) -> SystemOutput {
+    let temp = tempfile::tempdir().unwrap();
+    let wrapper = temp.path().join("capture.ps1");
+    let stdout = temp.path().join("stdout.txt");
+    let stderr = temp.path().join("stderr.txt");
+    let result = temp.path().join("exit.txt");
+    let literal = |path: &Path| ps_literal(path.to_str().expect("fixture path must be Unicode"));
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {{ throw 'Expected LocalSystem' }}
+$child = Start-Process -FilePath {} -ArgumentList {} -WorkingDirectory {} -RedirectStandardOutput {} -RedirectStandardError {} -Wait -PassThru
+[IO.File]::WriteAllText({}, [string]$child.ExitCode)
+"#,
+        ps_literal(executable),
+        ps_literal(arguments),
+        literal(working_dir),
+        literal(&stdout),
+        literal(&stderr),
+        literal(&result),
+    );
+    // Windows PowerShell 5.1 needs a BOM to read non-ASCII paths as UTF-8.
+    std::fs::write(
+        &wrapper,
+        [b"\xef\xbb\xbf".as_slice(), script.as_bytes()].concat(),
+    )
+    .unwrap();
+    let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let args = format!(
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+        wrapper.display()
+    );
+    let task = run_as_system(&powershell, &args, description).await;
+    assert_success(&task, description);
+    SystemOutput {
+        code: std::fs::read_to_string(result).unwrap().parse().unwrap(),
+        stdout: std::fs::read(stdout).unwrap(),
+        stderr: std::fs::read(stderr).unwrap(),
+    }
+}
+
+async fn verify_local_terminal_policy(
+    server: &TestServer,
+    admin: &Browser,
+    exe: &Path,
+    device: Uuid,
+) {
+    let path = format!("/devices/{device}/background-terminal/check");
+    for (action, expected) in [
+        (None, "disabled"),
+        (Some("enable"), "enabled"),
+        (Some("disable"), "disabled"),
+    ] {
+        if let Some(action) = action {
+            let mut command = Command::new(exe);
+            command.args(["terminal-policy", action]);
+            let output = run_fixture_command(command, "changing local terminal policy").await;
+            assert_success(&output, "changing local terminal policy");
+        }
+        let mut command = Command::new(exe);
+        command.args(["terminal-policy", "status"]);
+        let output = run_fixture_command(command, "reading local terminal policy").await;
+        assert_success(&output, "reading local terminal policy");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("Background terminal policy {expected} locally."),
+        );
+        let observed = admin.post(server, &path, &[]).await;
+        assert_eq!(observed.status, StatusCode::OK);
+        assert!(observed
+            .body
+            .contains(&format!("Local policy is {expected}")));
+    }
+}
+
+async fn assert_intune_detection(detector: &Path, expect_detected: bool) {
+    let arguments = format!(
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+        detector.display()
+    );
+    let output = capture_as_system(
+        "powershell.exe",
+        &arguments,
+        detector.parent().unwrap(),
+        "running the Intune detector",
+    )
+    .await;
+    let (exit_code, response) = if expect_detected {
+        (0, "Flyw8t enrollment detected")
+    } else {
+        (1, "")
+    };
+    assert_eq!(output.code, exit_code);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), response);
+    assert!(output.stderr.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an elevated Windows runner to schedule a LocalSystem task"]
+async fn system_capture_preserves_exit_output_and_working_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("probe.ps1");
+    std::fs::write(temp.path().join("marker.txt"), "probe directory").unwrap();
+    std::fs::write(
+        &script,
+        "[Console]::Out.Write((Get-Content -Raw -ErrorAction Stop -LiteralPath 'marker.txt')); [Console]::Error.Write('probe error'); exit 1",
+    )
+    .unwrap();
+    let args = format!(
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+        script.display()
+    );
+    let output = capture_as_system("powershell.exe", &args, temp.path(), "SYSTEM probe").await;
+    assert_eq!(output.code, 1);
+    assert_eq!(output.stdout, b"probe directory");
+    assert_eq!(output.stderr, b"probe error");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "installs the service on a disposable Windows runner backed by PostgreSQL"]
-async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolling() {
+async fn intune_package_enrolls_quietly_and_preserves_its_identity_on_retry() {
     let binary = PathBuf::from(
         std::env::var_os("FLYW8T_TEST_AGENT_BINARY").expect("path to the built Windows agent"),
     );
+    let expect_signed = std::env::var("FLYW8T_TEST_EXPECT_SIGNED_INSTALL").as_deref() == Ok("1");
     let baseline = std::fs::read(&binary).unwrap();
     let state_dir = config::default_state_dir().unwrap();
     let state_root = state_dir.parent().unwrap();
@@ -149,22 +292,32 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
     .unwrap();
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("Flyw8t-Setup-x64.exe");
+    let detector = temp.path().join("Detect-Flyw8t.ps1");
+    let path = format!("/organizations/{org}/enrollment-tokens");
+    let expected_detector = admin
+        .post(
+            &server,
+            &path,
+            &[
+                ("site", &site.to_string()),
+                ("download", "intune-detection"),
+            ],
+        )
+        .await;
+    assert_eq!(expected_detector.status, StatusCode::OK);
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     let response = reqwest::Client::builder()
         .no_proxy()
         .build()
         .unwrap()
-        .post(format!(
-            "{}/organizations/{org}/enrollment-tokens",
-            server.url()
-        ))
+        .post(format!("{}{path}", server.url()))
         .header(header::COOKIE, &admin.cookie)
         .header(header::ORIGIN, &server.state.config.public_url)
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(form(&[
             ("csrf", admin.csrf.as_str()),
-            ("download", "windows"),
+            ("download", "intune"),
             ("site", &site.to_string()),
             ("ttl_minutes", "60"),
             ("max_uses", "1"),
@@ -173,16 +326,38 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    std::fs::write(&package, response.bytes().await.unwrap()).unwrap();
-
-    let first = setup_as_system(&package).await;
-    assert_success(&first, "LocalSystem quiet installation");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     assert_eq!(
-        std::fs::read(&installed).unwrap(),
-        baseline,
+        response.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=Flyw8t-Intune.zip"
+    );
+    let files = intune_bundle::unpack(&response.bytes().await.unwrap(), &expected_detector.body);
+    let (original_length, _) = EnrollmentPackage::read(&mut Cursor::new(&files.installer))
+        .unwrap()
+        .expect("packaged executable is missing its enrollment trailer");
+    assert_eq!(original_length, baseline.len() as u64);
+    assert!(
+        files.installer.starts_with(&baseline),
+        "the bundled executable must embed the exact fixture binary"
+    );
+    std::fs::write(&package, files.installer).unwrap();
+    std::fs::write(&detector, files.detector).unwrap();
+    std::fs::write(temp.path().join("Uninstall-Flyw8t.cmd"), files.uninstall).unwrap();
+
+    let first = run_as_system(&package, "--quiet", "LocalSystem quiet installation").await;
+    assert_success(&first, "LocalSystem quiet installation");
+    assert!(
+        std::fs::read(&installed).unwrap() == baseline,
         "the service image contains only the original agent bytes"
     );
     let initial = AgentConfig::load(&state_dir).unwrap();
+    assert_eq!(
+        initial.enrollment_scope,
+        Some(EnrollmentScope {
+            organization_id: org,
+            site_id: Some(site),
+        })
+    );
     let device = initial.device_id.unwrap();
     let key = std::fs::read(initial.key_path()).unwrap();
     let enrollment: (Uuid, Option<Uuid>) =
@@ -198,9 +373,29 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
         || async { server.state.registry.connected_since(device).is_some() },
     )
     .await;
+    assert_intune_detection(&detector, expect_signed).await;
+    let terminal = run_as_system(
+        &installed,
+        "terminal-check --powershell --require-session-zero",
+        "LocalSystem PowerShell check",
+    )
+    .await;
+    assert_success(&terminal, "LocalSystem PowerShell check");
+    verify_local_terminal_policy(&server, &admin, &installed, device).await;
 
-    let repeated = setup(&package, "/quiet").await;
-    assert_success(&repeated, "quiet retry");
+    let repeated = capture_as_system(
+        package.to_str().unwrap(),
+        "/quiet",
+        temp.path(),
+        "LocalSystem quiet retry",
+    )
+    .await;
+    assert_eq!(
+        repeated.code,
+        0,
+        "quiet retry stderr: {}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
     assert!(String::from_utf8_lossy(&repeated.stdout).contains("already installed and running"));
 
     let stop = powershell("Stop-Service -Name 'flyw8t-agent' -ErrorAction Stop");
@@ -212,7 +407,12 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
         || async { server.state.registry.connected_since(device).is_none() },
     )
     .await;
-    let resumed = setup(&package, "--quiet").await;
+    let resumed = run_as_system(
+        &package,
+        "--quiet",
+        "LocalSystem quiet retry with stopped service",
+    )
+    .await;
     assert_success(&resumed, "quiet retry with a stopped service");
     wait_for(
         "restarted service to reconnect under the same device",
@@ -222,18 +422,58 @@ async fn quiet_windows_package_enrolls_at_its_site_and_retries_without_reenrolli
     .await;
 
     // The one-use package is spent. A service-only retry keeps the original identity and site.
-    service::uninstall().unwrap();
+    let removed = capture_as_system(
+        "cmd.exe",
+        "/d /c Uninstall-Flyw8t.cmd",
+        temp.path(),
+        "running the Intune uninstall command",
+    )
+    .await;
+    assert_eq!(
+        removed.code,
+        0,
+        "Intune uninstall failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
     wait_for(
         "service record to be removed",
         Duration::from_secs(15),
-        || async { service::status().is_ok_and(|state| state.is_none()) },
+        || async {
+            service::status().is_ok_and(|state| state.is_none())
+                && server.state.registry.connected_since(device).is_none()
+        },
     )
     .await;
-    let resumed = setup(&package, "--quiet").await;
+    assert_intune_detection(&detector, false).await;
+    let saved = AgentConfig::load(&state_dir).unwrap();
+    assert_eq!(saved.device_id, Some(device));
+    assert_eq!(saved.enrollment_scope, initial.enrollment_scope);
+    assert!(
+        std::fs::read(saved.key_path()).unwrap() == key,
+        "uninstall changed the device key"
+    );
+    let resumed = run_as_system(
+        &package,
+        "--quiet",
+        "LocalSystem quiet retry after service removal",
+    )
+    .await;
     assert_success(&resumed, "quiet retry after service removal");
+    wait_for(
+        "reinstalled service to reconnect under the same device",
+        Duration::from_secs(60),
+        || async { server.state.registry.connected_since(device).is_some() },
+    )
+    .await;
     let current = AgentConfig::load(&state_dir).unwrap();
     assert_eq!(current.device_id, Some(device));
-    assert_eq!(std::fs::read(current.key_path()).unwrap(), key);
+    assert_eq!(current.enrollment_scope, initial.enrollment_scope);
+    assert!(
+        std::fs::read(current.key_path()).unwrap() == key,
+        "reinstall changed the device key"
+    );
+    assert_intune_detection(&detector, expect_signed).await;
     let uses: i32 =
         sqlx::query_scalar("SELECT uses FROM enrollment_tokens WHERE organization_id = $1")
             .bind(org)
